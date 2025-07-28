@@ -1,0 +1,68 @@
+[project]
+name = "koder"
+version = "0.1.0"
+description = "An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support."
+authors = [
+    { name = "Pengfei Ni" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+homepage = "https://github.com/feiskyer/koder"
+repository = "https://github.com/feiskyer/koder"
+keywords = ["vibe coding", "copilot","openai", "agent", "ai", "agentic", "litellm"]
+
+dependencies = [
+    "openai-agents[litellm]>=0.1.0",
+    "tiktoken>=0.5.0",
+    "requests>=2.31.0",
+    "beautifulsoup4>=4.12.0",
+    "aiosqlite>=0.19.0",
+    "pydantic>=2.0.0",
+    "httpx[socks]>=0.25.0",
+    "openai==1.96.1",
+    "rich>=13.0.0",
+    "google-cloud-aiplatform>=1.105.0",
+    "prompt-toolkit>=3.0.51",
+]
+
+[project.scripts]
+koder = "koder_agent.cli:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = [
+    ".venv",
+    "build",
+    "dist",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["koder_agent"]
