@@ -129,8 +129,6 @@ export KODER_MODEL="openai/<your-model-name>"
 
 </details>
 
-
-
 ## ⚡ Quick Start
 
 ### Basic Usage
@@ -148,8 +146,6 @@ koder --session my-project "Your prompt here"
 # Enable streaming mode
 koder --stream "Your prompt here"
 ```
-
-
 
 ## 🧪 Development
 
