@@ -90,6 +90,30 @@ export KODER_MODEL="gemini/gemini-2.5-pro"
 
 <details>
 
+<summary>Anthropic Claude</summary>
+
+```bash
+# Anthropic Claude Opus
+export ANTHROPIC_API_KEY="your-anthropic-key"
+export KODER_MODEL="claude-opus-4-20250514"
+```
+
+</details>
+
+<details>
+
+<summary>Github Copilot</summary>
+
+```bash
+export KODER_MODEL="github_copilot/claude-sonnet-4"
+```
+
+Visit <https://github.com/login/device> and enter code XXXX-XXXXX shown in your first chat to authenticate.
+
+</details>
+
+<details>
+
 <summary>Azure OpenAI</summary>
 
 ```bash
@@ -112,10 +136,6 @@ export AZURE_OPENAI_API_VERSION="2025-04-01-preview"   # Default version
 [LiteLLM](https://docs.litellm.ai/docs/providers) supports 100+ providers including Anthropic, Google, Cohere, Hugging Face, and more:
 
 ```bash
-# Anthropic Claude
-export ANTHROPIC_API_KEY="your-anthropic-key"
-export KODER_MODEL="claude-opus-4-20250514"
-
 # Google Vertex AI
 export GOOGLE_APPLICATION_CREDENTIALS="your-sa-path.json"
 export VERTEXAI_LOCATION="<your-region>"

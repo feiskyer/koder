@@ -1,6 +1,7 @@
 """Agent definitions and hooks for Koder."""
 
 import logging
+import uuid
 
 from agents import Agent
 from rich.console import Console
@@ -40,5 +41,18 @@ async def create_dev_agent(tools) -> Agent:
         # handoffs=[planner],
         mcp_servers=mcp_servers,
     )
+
+    if "github_copilot" in model:
+        dev_agent.model_settings.extra_headers = {
+            "copilot-integration-id": "vscode-chat",
+            "editor-version": "vscode/1.98.1",
+            "editor-plugin-version": "copilot-chat/0.26.7",
+            "user-agent": "GitHubCopilotChat/0.26.7",
+            "openai-intent": "conversation-panel",
+            "x-github-api-version": "2025-04-01",
+            "x-request-id": str(uuid.uuid4()),
+            "x-vscode-user-agent-library-version": "electron-fetch",
+        }
+
     # planner.handoffs.append(dev_agent)
     return dev_agent

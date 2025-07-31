@@ -1,6 +1,7 @@
 """Task delegation operations."""
 
 import asyncio
+import uuid
 from typing import List, Union
 
 from agents import Agent, RunConfig, Runner, function_tool
@@ -56,6 +57,17 @@ Return your findings or results directly without unnecessary explanation.""",
                     tools=tools,
                     mcp_servers=mcp_servers,
                 )
+                if "github_copilot" in get_model_name():
+                    delegated_agent.model_settings.extra_headers = {
+                        "copilot-integration-id": "vscode-chat",
+                        "editor-version": "vscode/1.98.1",
+                        "editor-plugin-version": "copilot-chat/0.26.7",
+                        "user-agent": "GitHubCopilotChat/0.26.7",
+                        "openai-intent": "conversation-panel",
+                        "x-github-api-version": "2025-04-01",
+                        "x-request-id": str(uuid.uuid4()),
+                        "x-vscode-user-agent-library-version": "electron-fetch",
+                    }
 
                 # Run the delegated agent
                 result = await Runner.run(
