@@ -73,6 +73,7 @@ Return your findings or results directly without unnecessary explanation.""",
                 result = await Runner.run(
                     delegated_agent,
                     task.prompt,
+                    max_turns=50,
                     run_config=RunConfig(),
                     hooks=get_display_hooks(),
                 )

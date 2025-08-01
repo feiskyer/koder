@@ -94,7 +94,7 @@ class StatusCommand(SlashCommand):
         tool_count = len(tools)
 
         # Create status table
-        table = Table(title="🔧 Koder Status", show_header=True, header_style="bold cyan")
+        table = Table(title="Koder Status", show_header=True, header_style="bold cyan")
         table.add_column("Setting", style="cyan", width=20)
         table.add_column("Value", style="green")
 
@@ -150,7 +150,7 @@ class McpCommand(SlashCommand):
                 return "No MCP servers configured. Use 'koder mcp add' to add servers."
 
             # Create simple table for display
-            table = Table(title="🔧 MCP Servers", show_header=True, header_style="bold cyan")
+            table = Table(title="MCP Servers", show_header=True, header_style="bold cyan")
             table.add_column("Name", style="cyan", width=20)
             table.add_column("Type", style="green", width=10)
             table.add_column("Configuration", style="white")

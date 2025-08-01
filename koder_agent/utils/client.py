@@ -45,7 +45,7 @@ def setup_openai_client():
         console.print(
             Panel(
                 f"[green]✅ Using OpenAI {model}[/green]",
-                title="🔧 Model Configuration",
+                title="Model Configuration",
                 border_style="green",
             )
         )
@@ -64,7 +64,7 @@ def setup_openai_client():
         console.print(
             Panel(
                 f"[green]✅ Using Azure OpenAI {model}[/green]",
-                title="🔧 Model Configuration",
+                title="Model Configuration",
                 border_style="green",
             )
         )
@@ -75,7 +75,7 @@ def setup_openai_client():
     console.print(
         Panel(
             f"[green]✅ Using LiteLLM {model}[/green]",
-            title="🔧 Model Configuration",
+            title="Model Configuration",
             border_style="green",
         )
     )

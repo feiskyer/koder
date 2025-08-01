@@ -51,9 +51,7 @@ async def main():
 
     # Add root-level options (from old chat command)
     parser.add_argument("--session", "-s", default="default", help="Session ID for context")
-    parser.add_argument(
-        "--stream", action="store_true", help="Enable streaming mode for real-time output"
-    )
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
 
     # Create subparsers for specific commands
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -133,18 +131,13 @@ async def main():
 
     # Load context for chat mode
     context = await load_context()
-    console.print(
-        Panel(
-            f"[bold cyan]🚀 Koder Started[/bold cyan]\n"
-            f"[dim]Working in: {os.getcwd()}[/dim]\n"
-            "[dim]Type 'exit' or 'quit' to stop, Ctrl+C to interrupt[/dim]",
-            title="Koder",
-            border_style="cyan",
-        )
-    )
+    # Simple startup message
+    console.print(f"[dim]koder session: {args.session}[/dim]")
+    console.print(f"[dim]working in: {os.getcwd()}[/dim]")
+    print()
 
     # Create scheduler
-    scheduler = AgentScheduler(session_id=args.session, streaming=args.stream)
+    scheduler = AgentScheduler(session_id=args.session, streaming=not args.no_stream)
 
     try:
         # Create interactive prompt with slash commands

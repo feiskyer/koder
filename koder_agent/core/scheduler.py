@@ -11,16 +11,15 @@ from agents import (
     ToolCallItem,
     ToolCallOutputItem,
 )
-from openai._utils import is_dict
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
-from rich.panel import Panel
 from rich.text import Text
 
 from ..agentic import create_dev_agent, get_display_hooks
 from ..core.context import ContextManager
+from ..core.streaming_display import StreamingDisplayManager
 from ..tools import get_all_tools
 
 console = Console()
@@ -38,6 +37,28 @@ class AgentScheduler:
         self.hooks = get_display_hooks(streaming_mode=streaming)
         self._agent_initialized = False
         self._mcp_servers = []  # Track MCP servers for cleanup
+
+    def _has_content(self, content) -> bool:
+        """Check if Rich or string content has any content."""
+        if isinstance(content, str):
+            return bool(content.strip())
+        elif isinstance(content, Text):
+            return bool(str(content).strip())
+        elif isinstance(content, Group):
+            return bool(content.renderables)
+        else:
+            return content is not None
+
+    def _get_line_count(self, content) -> int:
+        """Get line count for Rich or string content."""
+        if isinstance(content, str):
+            return content.count("\n") + 1
+        elif isinstance(content, Text):
+            return str(content).count("\n") + 1
+        elif isinstance(content, Group):
+            return len(content.renderables) * 2
+        else:
+            return 50  # Conservative estimate
 
     async def _ensure_agent_initialized(self):
         """Ensure the dev agent is initialized."""
@@ -62,7 +83,7 @@ class AgentScheduler:
         # Load conversation history
         history = await self.context_manager.load()
 
-        console.print("[yellow]🤖 Agent is thinking...[/yellow]")
+        console.print("[dim]thinking...[/dim]")
 
         # Build context from history
         context_str = ""
@@ -87,17 +108,15 @@ class AgentScheduler:
                     full_input,
                     run_config=RunConfig(),
                     hooks=self.hooks,
+                    max_turns=50,
                 )
                 # Filter output for security
                 response = self._filter_output(result.final_output)
 
-                console.print(
-                    Panel(
-                        f"[dark_cyan]{response}[/dark_cyan]",
-                        title="🤖 Agent Response",
-                        border_style="dark_cyan",
-                    )
-                )
+                # Clean response output without heavy panels
+                print()  # Add space before response
+                console.print(response)
+                print()  # Add space after response
 
         # Save conversation to context
         await self.context_manager.save(
@@ -111,59 +130,55 @@ class AgentScheduler:
         return response
 
     async def _handle_streaming(self, full_input: str) -> str:
-        """Handle streaming execution with real-time output."""
-        # TODO: upstream issue https://github.com/openai/openai-agents-python/issues/1016
-        # TODO: upstream issue https://github.com/openai/openai-agents-python/issues/824
-        # Create initial display content
-        streaming_text = Text()
-        current_response = ""
-        # Track text content by output_index to avoid duplication
-        output_texts = {}
-        # Track non-text indicators (tool calls, status messages, etc.)
-        indicators = []
+        """Handle streaming execution with Rich Live and smart cleanup."""
+        import os
+        import sys
 
-        def rebuild_display():
-            """Rebuild the complete display with indicators and text content."""
-            display_text = Text()
+        # Create the streaming display manager
+        display_manager = StreamingDisplayManager(console)
 
-            # Add all indicators first
-            for indicator in indicators:
-                display_text.append(indicator)
+        # Detect terminal capabilities
+        terminal_type = os.environ.get("TERM_PROGRAM", "unknown")
+        supports_advanced_clearing = terminal_type in ["iTerm.app", "Apple_Terminal", "vscode"]
 
-            # Add text content from all outputs
-            for idx in sorted(output_texts.keys()):
-                filtered_text = self._filter_output(output_texts[idx])
-                display_text.append(filtered_text)
+        # Add space before streaming starts
+        print()
 
-            return display_text
+        # Capture cursor position before Rich Live starts (if supported)
+        if supports_advanced_clearing:
+            sys.stdout.write("\033[6n")  # Request cursor position
+            sys.stdout.flush()
 
-        # Use Rich Live to update the display in real-time
+        # Run the agent in streaming mode
+        if self.dev_agent is None:
+            console.print("[dim red]Agent not initialized[/dim red]")
+            return "Agent not initialized"
+
+        result = Runner.run_streamed(
+            self.dev_agent,
+            full_input,
+            run_config=RunConfig(),
+            hooks=self.hooks,
+            max_turns=50,
+        )
+
+        # Track if we displayed content during streaming
+        content_displayed = False
+
+        # Use Rich Live for proper formatting during streaming
         with Live(
-            Panel(
-                streaming_text,
-                title="🤖 Agent Response",
-                border_style="dark_cyan",
-                style="dark_cyan",
-            ),
-            refresh_per_second=10,
+            "",
             console=console,
+            refresh_per_second=8,  # Reasonable refresh rate
+            transient=False,  # Keep content visible during streaming
+            vertical_overflow="visible",  # Show all content even if it exceeds screen height
         ) as live:
-            # Run the agent in streaming mode
-            if self.dev_agent is None:
-                console.print("[dim red]Agent not initialized[/dim red]")
-                return "Agent not initialized"
-
-            result = Runner.run_streamed(
-                self.dev_agent,
-                full_input,
-                run_config=RunConfig(),
-                hooks=self.hooks,
-            )
-
             try:
                 # Process streaming events
                 async for event in result.stream_events():
                     try:
+                        should_update = False
+
                         # Handle raw response events (token-by-token streaming)
                         if isinstance(event, RawResponsesStreamEvent):
                             if isinstance(event.data, ResponseTextDeltaEvent):
@@ -171,23 +186,8 @@ class AgentScheduler:
                                 output_index = event.data.output_index
 
                                 if delta_text:
-                                    # Initialize output text for this index if not exists
-                                    if output_index not in output_texts:
-                                        output_texts[output_index] = ""
-
-                                    # Append delta to the specific output stream
-                                    output_texts[output_index] += delta_text
-
-                                    # Update current_response for final result
-                                    current_response = "".join(output_texts.values())
-
-                                    # Rebuild and update display
-                                    live.update(
-                                        Panel(
-                                            rebuild_display(),
-                                            title="🤖 Agent Response",
-                                            border_style="dark_cyan",
-                                        )
+                                    should_update = display_manager.handle_text_delta(
+                                        output_index, delta_text
                                     )
 
                         # Handle run item events (tool calls, outputs, etc.)
@@ -198,111 +198,117 @@ class AgentScheduler:
                                     and isinstance(event.item, ToolCallItem)
                                     and isinstance(event.item.raw_item, ResponseFunctionToolCall)
                                 ):
-                                    tool_name = event.item.raw_item.name
-                                    tool_id = event.item.raw_item.call_id
-                                    tool_args = event.item.raw_item.arguments
-                                    tool_indicator = Text(
-                                        f"\n[🔧 Tool {tool_name} called (ID: {tool_id}): {tool_args}]\n",
-                                        style="dim yellow",
-                                    )
-                                    indicators.append(tool_indicator)
-                                    live.update(
-                                        Panel(
-                                            rebuild_display(),
-                                            title="🤖 Agent Response",
-                                            border_style="dark_cyan",
-                                        )
-                                    )
+                                    should_update = display_manager.handle_tool_called(event.item)
+
                             elif event.name == "tool_output":
                                 if hasattr(event, "item") and isinstance(
                                     event.item, ToolCallOutputItem
                                 ):
-                                    if (
-                                        is_dict(event.item.raw_item)
-                                        and "call_id" in event.item.raw_item
-                                        and "output" in event.item.raw_item
-                                    ):
-                                        tool_id = event.item.raw_item.get("call_id", "unknown")
-                                        tool_result = event.item.raw_item.get("output", "unknown")
-                                        tool_result = str(tool_result)[:150]
-                                        tool_indicator = Text(
-                                            f"\n[📤 Tool {tool_id} output:\n{tool_result}]\n",
-                                            style="dim green",
-                                        )
-                                        indicators.append(tool_indicator)
-                                        live.update(
-                                            Panel(
-                                                rebuild_display(),
-                                                title="🤖 Agent Response",
-                                                border_style="dark_cyan",
-                                            )
-                                        )
+                                    should_update = display_manager.handle_tool_output(event.item)
+
                             elif event.name == "message_output_created":
                                 pass
                             elif event.name == "handoff_requested":
-                                handoff_indicator = Text(
-                                    "\n[🤝 Handoff requested]", style="dim magenta"
-                                )
-                                indicators.append(handoff_indicator)
-                                live.update(
-                                    Panel(
-                                        rebuild_display(),
-                                        title="🤖 Agent Response",
-                                        border_style="dark_cyan",
-                                    )
+                                # Handle agent handoff as a special tool call
+                                should_update = display_manager.handle_tool_called(
+                                    type(
+                                        "HandoffItem",
+                                        (),
+                                        {
+                                            "raw_item": type(
+                                                "RawItem",
+                                                (),
+                                                {
+                                                    "name": "agent_handoff",
+                                                    "arguments": "{}",
+                                                    "id": "handoff",
+                                                },
+                                            )()
+                                        },
+                                    )()
                                 )
                             elif event.name == "handoff_occured":
-                                handoff_indicator = Text(
-                                    "\n[✋ Handoff occurred]", style="dim magenta"
-                                )
-                                indicators.append(handoff_indicator)
-                                live.update(
-                                    Panel(
-                                        rebuild_display(),
-                                        title="🤖 Agent Response",
-                                        border_style="dark_cyan",
-                                    )
+                                # Handle as tool output
+                                should_update = display_manager.handle_tool_output(
+                                    type(
+                                        "HandoffOutput",
+                                        (),
+                                        {"output": "Agent switched", "tool_call_id": "handoff"},
+                                    )()
                                 )
                             elif event.name == "reasoning_item_created":
-                                reasoning_indicator = Text(
-                                    "\n[🧠 Reasoning step]", style="dim purple"
-                                )
-                                indicators.append(reasoning_indicator)
-                                live.update(
-                                    Panel(
-                                        rebuild_display(),
-                                        title="🤖 Agent Response",
-                                        border_style="dark_cyan",
-                                    )
-                                )
+                                # Don't show reasoning steps in display
+                                pass
 
                         # Handle agent updates (handoffs, etc.)
                         elif isinstance(event, AgentUpdatedStreamEvent):
-                            agent_indicator = Text(
-                                f"\n[🤖 Entering Agent {event.new_agent.name}]\n", style="dim cyan"
-                            )
-                            indicators.append(agent_indicator)
-                            live.update(
-                                Panel(
-                                    rebuild_display(),
-                                    title="🤖 Agent Response",
-                                    border_style="dark_cyan",
-                                )
-                            )
+                            # This is handled by handoff events above
+                            pass
+
+                        # Update Rich Live display
+                        if should_update:
+                            current_content = display_manager.get_display_content()
+                            # Handle both string and renderable objects
+                            if isinstance(current_content, str):
+                                if current_content.strip():
+                                    live.update(current_content)
+                                    content_displayed = True
+                            elif current_content:  # For renderables like Group
+                                live.update(current_content)
+                                content_displayed = True
 
                     except Exception as e:
                         # Log event processing errors but continue streaming
                         console.print(f"[dim red]Event processing error: {e}[/dim red]")
                         continue
+
             except Exception as e:
                 # Handle streaming errors
                 console.print(f"[dim red]Streaming error: {e}[/dim red]")
 
-        # Get final result and filter it
-        if current_response:
-            final_response = self._filter_output(current_response)
-        else:
+        # After Rich Live context ends, perform intelligent cleanup
+        display_manager.finalize_text_sections()
+
+        # Get final content for permanent display
+        final_content = display_manager.get_display_content()
+
+        # Clear the Rich Live region and show final content cleanly
+        # Check if we have content to display
+        has_content = self._has_content(final_content)
+
+        if has_content:
+            # Strategy 1: For advanced terminals, clear the scroll buffer region
+            if supports_advanced_clearing:
+                try:
+                    # Clear recent lines from scroll buffer (terminal-specific)
+                    if terminal_type == "iTerm.app":
+                        # iTerm2 specific: Clear last N lines from scrollback
+                        lines_count = self._get_line_count(final_content)
+                        sys.stdout.write(f"\033]1337;ClearScrollback=lines:{lines_count * 3}\007")
+                    elif terminal_type == "Apple_Terminal":
+                        # Terminal.app: Use scrollback clearing if available
+                        sys.stdout.write("\033[3J")  # Clear scrollback
+
+                    sys.stdout.flush()
+                except Exception:
+                    pass  # Fallback to simple approach
+
+            # Strategy 2: Print final clean content only if not already displayed
+            # Skip if we already showed content during streaming
+            if not content_displayed:
+                # No content was displayed during streaming, show it now
+                print()  # Add spacing
+                console.print(final_content)
+                print()  # Add spacing after
+
+        # Get final text response for context saving
+        final_response = display_manager.get_final_text()
+        if not final_response:
+            # Fallback to result.final_output if no text was captured
             final_response = self._filter_output(result.final_output)
+        else:
+            final_response = self._filter_output(final_response)
+
         return final_response
 
     def _get_display_input(self, user_input: str) -> str:

@@ -43,7 +43,7 @@ class ToolEngine:
         console.print(
             Panel(
                 f"[bold cyan]Tool:[/bold cyan] {name}\n[bold cyan]Input:[/bold cyan] {kw}",
-                title="🔧 Tool Execution",
+                title="Tool Execution",
                 border_style="cyan",
             )
         )

@@ -109,17 +109,18 @@ class InteractivePrompt:
             input_processors=[BeforeInput("> ")],
         )
 
-        # Create input window
+        # Create input window with dynamic height
         input_window = Window(
             content=buffer_control,
-            height=1,
-            wrap_lines=False,
+            height=Dimension(min=1, max=10),  # Allow 1-10 lines, auto-expand
+            wrap_lines=False,  # Keep single line behavior, expand vertically instead
+            dont_extend_height=True,
         )
 
-        # Create frame that mimics Rich panel
+        # Create simple frame without heavy styling
         framed_input = Frame(
             body=input_window,
-            title=f"💭 {prompt_text.title()} Input",
+            title=f"{prompt_text}",
         )
 
         # Key bindings
@@ -127,19 +128,23 @@ class InteractivePrompt:
 
         @kb.add("enter")
         def accept_input(event):
+            # Submit the input
             event.app.exit(result=buffer.text)
+
+        @kb.add("c-j")  # For Ctrl+Enter in many terminals
+        @kb.add("escape", "enter")  # For Alt+Enter as a more compatible option
+        def insert_newline(event):
+            # Insert a newline for multi-line input
+            event.app.current_buffer.insert_text("\n")
 
         @kb.add("c-c")
         def cancel_input(event):
             event.app.exit(exception=KeyboardInterrupt())
 
         @kb.add("c-d")
-        def eof_input(event):
-            # Always exit immediately on Ctrl+D, raise EOFError if buffer is empty
-            if not buffer.text:
-                event.app.exit(exception=EOFError())
-            else:
-                event.app.exit(result=buffer.text)
+        def clear_input(event):
+            # Clear the input content
+            event.app.current_buffer.text = ""
 
         # Add Tab key for completion navigation
         @kb.add("tab")
@@ -200,16 +205,16 @@ class InteractivePrompt:
             )
         )
 
-        # Create style that matches Rich and supports completion
+        # Minimal style for clean terminal look
         style = Style.from_dict(
             {
-                "frame.border": "#7C7C78",  # Blue border like Rich
-                "frame.title": "#7C7C78 bold",  # White bold title
-                "": "#888888",  # Gray color for user input text
-                "completion-menu.completion": "#ffffff bg:#444444",  # Completion items
-                "completion-menu.completion.current": "#ffffff bg:#666666",  # Selected completion
-                "completion-menu.meta.completion": "#aaaaaa bg:#333333",  # Completion description
-                "completion-menu.meta.completion.current": "#ffffff bg:#555555",  # Selected desc
+                "frame.border": "#555555",  # Subtle gray border
+                "frame.title": "#888888",  # Muted title
+                "": "#ffffff",  # Normal white text for input
+                "completion-menu.completion": "#ffffff bg:#333333",  # Clean completion items
+                "completion-menu.completion.current": "#ffffff bg:#555555",  # Selected completion
+                "completion-menu.meta.completion": "#aaaaaa bg:#222222",  # Muted description
+                "completion-menu.meta.completion.current": "#ffffff bg:#444444",  # Selected desc
             }
         )
 

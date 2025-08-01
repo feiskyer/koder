@@ -151,7 +151,7 @@ async def handle_list_command(manager: MCPServerManager) -> int:
             return 0
 
         # Create table
-        table = Table(title="🔧 MCP Servers", show_header=True, header_style="bold cyan")
+        table = Table(title="MCP Servers", show_header=True, header_style="bold cyan")
         table.add_column("Name", style="cyan", width=20)
         table.add_column("Type", style="green", width=10)
         table.add_column("Configuration", style="white")
@@ -207,7 +207,7 @@ async def handle_get_command(manager: MCPServerManager, args: argparse.Namespace
             return 1
 
         # Create detailed view
-        table = Table(title=f"🔧 MCP Server: {server.name}", show_header=False)
+        table = Table(title=f"MCP Server: {server.name}", show_header=False)
         table.add_column("Property", style="cyan", width=20)
         table.add_column("Value", style="white")
 
