@@ -184,6 +184,7 @@ class SlashCommandHandler:
             "clear": ClearCommand(),
             "status": StatusCommand(),
             "mcp": McpCommand(),
+            "session": SlashCommand("session", "Switch session via picker and recreate scheduler"),
         }
 
     def get_command_list(self) -> List[Tuple[str, str]]:
@@ -213,6 +214,19 @@ class SlashCommandHandler:
 
         try:
             command = self.commands[command_name]
+            if command_name == "session":
+                from ..cli import AgentScheduler, _prompt_select_session
+
+                selected = await _prompt_select_session()
+                if selected:
+                    new_sched = AgentScheduler(session_id=selected, streaming=scheduler.streaming)
+                    (
+                        scheduler.replace_with(new_sched)
+                        if hasattr(scheduler, "replace_with")
+                        else None
+                    )
+                    return f"Switched to session: {selected}"
+                return "Session switch cancelled"
             return await command.execute(scheduler, *args)
         except Exception as e:
             return f"❌ Error executing command '{command_name}': {str(e)}"

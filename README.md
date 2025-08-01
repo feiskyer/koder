@@ -4,20 +4,20 @@
 
 An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support.
 
-## 🚀 Why this project
+## 🚀 Overview
 
-Yet another vibe coding assistant that aims to provide:
+Koder is a universal, provider-agnostic CLI assistant. It supports OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, GitHub Copilot (device flow), and 100+ providers via LiteLLM.
 
-- Universal AI provider support - Works with OpenAI, Claude, Gemini, and 100+ providers through intelligent auto-detection.
-- Persistent context - Remembers your conversations across sessions with smart token management.
-- Rich toolset - File operations, search, shell commands, and web access in one unified interface.
-- Zero-config start - Just set your API key and go, with automatic model selection and streaming support.
-- Session management - Organize work by project with isolated conversation histories.
+- Universal provider support with intelligent auto-detection
+- Persistent context across sessions with smart token management
+- Rich toolset: file operations, search, shell commands, and web access
+- Zero-config start: set one API key and go (streaming supported)
+- Session management per project
 
 ## 📋 Requirements
 
-- Python 3.9 or higher.
-- API key and optional baseURL from OpenAI, Gemini, Anthropic or other AI providers.
+- Python 3.9 or higher
+- API key and optional base URL from your chosen AI provider
 
 ## 🛠️ Installation
 
@@ -33,9 +33,23 @@ uv tool install koder
 pip install koder
 ```
 
-## 🤖 AI Provider Configuration
+## ⚡ Quick Start (Minimal)
 
-Koder automatically detects and uses the LLM provider from environment variables.
+```bash
+# 1) Install
+uv tool install koder
+
+# 2) Configure one provider (example: OpenAI)
+export OPENAI_API_KEY="your-openai-api-key"
+export KODER_MODEL="gpt-4o"
+
+# 3) Run
+koder -s demo "Help me scaffold a FastAPI service with a /health endpoint"
+```
+
+## 🤖 Provider Configuration
+
+Koder auto-detects the provider based on environment variables. If multiple providers are configured, KODER_MODEL is used to route requests. If KODER_MODEL is omitted, Koder picks a sensible default for the detected provider.
 
 **Model Selection**
 
@@ -77,9 +91,9 @@ export KODER_MODEL="gpt-4o"
 
 ```bash
 # Required
-export GEMINI_API_KEY="your-openai-api-key"
+export GEMINI_API_KEY="your-gemini-api-key"
 
-# Specify model (default: gemini/gemini-2.5-pro)
+# Optional: Specify model (default: gemini/gemini-2.5-pro)
 export KODER_MODEL="gemini/gemini-2.5-pro"
 ```
 
@@ -90,7 +104,7 @@ export KODER_MODEL="gemini/gemini-2.5-pro"
 <summary>Anthropic Claude</summary>
 
 ```bash
-# Anthropic Claude Opus
+# Anthropic Claude
 export ANTHROPIC_API_KEY="your-anthropic-key"
 export KODER_MODEL="claude-opus-4-20250514"
 ```
@@ -99,13 +113,13 @@ export KODER_MODEL="claude-opus-4-20250514"
 
 <details>
 
-<summary>Github Copilot</summary>
+<summary>GitHub Copilot</summary>
 
 ```bash
 export KODER_MODEL="github_copilot/claude-sonnet-4"
 ```
 
-Visit <https://github.com/login/device> and enter code XXXX-XXXXX shown in your first chat to authenticate.
+On first run you will see a device code in the terminal. Visit <https://github.com/login/device> and enter the code to authenticate.
 
 </details>
 
@@ -117,12 +131,21 @@ Visit <https://github.com/login/device> and enter code XXXX-XXXXX shown in your 
 # Required
 export AZURE_OPENAI_API_KEY="your-azure-api-key"
 export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
-export KODER_MODEL="gpt-4o"  # Your Azure deployment model
 
-# Optional
-export AZURE_OPENAI_DEPLOYMENT="your-deployment-name"  # Defaults to KODER_MODEL
-export AZURE_OPENAI_API_VERSION="2025-04-01-preview"   # Default version
+# Your Azure deployment name (often different from the base model name)
+export AZURE_OPENAI_DEPLOYMENT="my-gpt4o-deployment"
+
+# Choose a model that maps to your deployment
+export KODER_MODEL="gpt-4o"
+
+# Optional: API version
+export AZURE_OPENAI_API_VERSION="2025-04-01-preview"
 ```
+
+Tips:
+
+- Ensure the endpoint hostname matches your Azure resource.
+- AZURE_OPENAI_DEPLOYMENT must match the deployed model name in Azure.
 
 </details>
 
@@ -146,18 +169,22 @@ export KODER_MODEL="openai/<your-model-name>"
 
 </details>
 
-## ⚡ Quick Start
+## 🔐 Security
 
-### Basic Usage
+- Never commit API keys. Prefer shell profiles, direnv (.envrc), 1Password CLI, or CI secrets.
+- Rotate keys regularly and scope permissions minimally.
+- For CI, store secrets in the platform’s secret manager and inject at runtime.
+
+## 📦 Usage Examples
 
 ```bash
 # Run in interactive mode
 koder
 
-# Execute a single prompt
+# Execute a single prompt in a named session
 koder -s my-project "Help me implement a new feature"
 
-# Use a specific session
+# Use an explicit session flag
 koder --session my-project "Your prompt here"
 
 # Enable streaming mode
@@ -185,9 +212,6 @@ black .
 
 # Lint code
 ruff check .
-
-# Type checking
-mypy .
 ```
 
 ## 🤝 Contributing
@@ -195,11 +219,17 @@ mypy .
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/your-feature`
 3. Make your changes
-4. Run formating and linting: `black . && ruff check .`
-5. Commit your changes: `git commit -am 'Add your feature'`
+4. Run formatting and linting
+5. Commit your changes: `git commit -am 'feat: add your feature'`
 6. Push to the branch: `git push origin feature/your-feature`
 7. Submit a pull request
 
+## 🌐 Code of Conduct
+
+This project follows a Code of Conduct based on the Contributor Covenant. Be kind and respectful. If you observe unacceptable behavior, please open an issue.
+
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+Use of third-party AI services is governed by their respective provider terms.
