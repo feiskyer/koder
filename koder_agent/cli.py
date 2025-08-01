@@ -4,9 +4,8 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime  # added for session timestamp
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -15,64 +14,9 @@ from .core.commands import slash_handler
 from .core.context import ContextManager
 from .core.interactive import InteractivePrompt
 from .core.scheduler import AgentScheduler
-from .utils import setup_openai_client
+from .utils import default_session_local_ms, picker_arrows, setup_openai_client, sort_sessions_desc
 
 console = Console()
-
-
-def _default_session_local_ms() -> str:
-    """Generate a local time session id precise to milliseconds.
-
-    Format: YYYY-MM-DDTHH:MM:SS.mmm (local time)
-    """
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-
-
-def _parse_session_dt(sid: str) -> Tuple[int, Optional[datetime]]:
-    """Parse session id to datetime if possible. Return a sort key for desc order.
-
-    Supports formats like YYYY-MM-DDTHH:MM:SS.mmm or with microseconds.
-    Unparsable sids get None and are sorted to the end.
-    """
-    fmts = ["%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"]
-    for fmt in fmts:
-        try:
-            dt = datetime.strptime(sid, fmt)
-            return (0, dt)
-        except Exception:
-            continue
-    return (1, None)
-
-
-def _sort_sessions_desc(sids: List[str]) -> List[str]:
-    parsed = [(_parse_session_dt(s), s) for s in sids]
-    dated = [(dt, s) for (flag, dt), s in parsed if flag == 0 and dt is not None]
-    others = [s for (flag_dt, s) in parsed if flag_dt[0] == 1]
-    dated.sort(key=lambda x: x[0], reverse=True)
-    return [s for _, s in dated] + others
-
-
-async def _picker_arrows(sessions: List[str]) -> Optional[str]:
-    if not sys.stdin.isatty():
-        return None
-    try:
-        from prompt_toolkit.shortcuts import radiolist_dialog
-    except Exception:
-        return None
-
-    values = [(s, s) for s in sessions]
-    dlg = radiolist_dialog(
-        title="Sessions",
-        text="Select a session (Enter to confirm, Esc to cancel)",
-        values=values,
-        ok_text="Select",
-        cancel_text="Cancel",
-    )
-    try:
-        result = await asyncio.to_thread(lambda: dlg.run(set_exception_handler=False))
-    except TypeError:
-        result = await asyncio.to_thread(dlg.run)
-    return result
 
 
 async def _prompt_select_session() -> Optional[str]:
@@ -82,9 +26,9 @@ async def _prompt_select_session() -> Optional[str]:
         console.print(Panel("No sessions found.", title="Sessions", border_style="yellow"))
         return None
 
-    sessions = _sort_sessions_desc(sessions)
+    sessions = sort_sessions_desc(sessions)
 
-    return await _picker_arrows(sessions)
+    return picker_arrows(sessions)
 
 
 async def load_context() -> str:
@@ -175,10 +119,10 @@ async def main():
             args.session = selected
         else:
             if not getattr(args, "session", None):
-                args.session = _default_session_local_ms()
+                args.session = default_session_local_ms()
 
     if not getattr(args, "session", None):
-        args.session = _default_session_local_ms()
+        args.session = default_session_local_ms()
 
     if args.command == "mcp":
         from .mcp.cli_handler import handle_mcp_command
@@ -230,29 +174,28 @@ async def main():
                     break
 
                 if user_input:
-                    if user_input.strip().startswith("/session"):
-                        selected = await _prompt_select_session()
-                        if selected:
-                            scheduler = AgentScheduler(
-                                session_id=selected, streaming=not args.no_stream
-                            )
-                            console.print(f"[dim]Switched to session: {selected}[/dim]")
-                        else:
-                            console.print("No session selected.")
-                        continue
-
                     if slash_handler.is_slash_command(user_input):
                         slash_response = await slash_handler.handle_slash_input(
                             user_input, scheduler
                         )
                         if slash_response:
-                            console.print(
-                                Panel(
-                                    f"[bold green]{slash_response}[/bold green]",
-                                    title="⚡ Command Response",
-                                    border_style="green",
+                            # Handle special session switch response
+                            if slash_response.startswith("session_switch:"):
+                                new_session_id = slash_response.split(":", 1)[1]
+                                # Clean up the old scheduler before creating a new one
+                                await scheduler.cleanup()
+                                scheduler = AgentScheduler(
+                                    session_id=new_session_id, streaming=not args.no_stream
                                 )
-                            )
+                                console.print(f"[dim]Switched to session: {new_session_id}[/dim]")
+                            else:
+                                console.print(
+                                    Panel(
+                                        f"[bold green]{slash_response}[/bold green]",
+                                        title="⚡ Command Response",
+                                        border_style="green",
+                                    )
+                                )
                     else:
                         await scheduler.handle(user_input)
     finally:

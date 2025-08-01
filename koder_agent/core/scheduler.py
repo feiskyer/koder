@@ -66,7 +66,7 @@ class AgentScheduler:
             self.dev_agent = await create_dev_agent(self.tools)
             # Track MCP servers for cleanup
             if hasattr(self.dev_agent, "mcp_servers") and self.dev_agent.mcp_servers:
-                self._mcp_servers = self.dev_agent.mcp_servers
+                self._mcp_servers = list(self.dev_agent.mcp_servers)  # Create a copy
             self._agent_initialized = True
 
     async def handle(self, user_input: str) -> str:
@@ -280,7 +280,7 @@ class AgentScheduler:
             # Strategy 1: For advanced terminals, clear the scroll buffer region
             if supports_advanced_clearing:
                 try:
-                    # Clear recent lines from scroll buffer (terminal-specific)
+                    # Clear recent lines from scrollback (terminal-specific)
                     if terminal_type == "iTerm.app":
                         # iTerm2 specific: Clear last N lines from scrollback
                         lines_count = self._get_line_count(final_content)
@@ -346,10 +346,28 @@ class AgentScheduler:
 
     async def cleanup(self):
         """Clean up resources, including MCP servers."""
-        if self._mcp_servers:
-            for server in self._mcp_servers:
-                try:
-                    await server.cleanup()
-                except Exception as e:
-                    console.print(f"[dim red]Error disconnecting MCP server: {e}[/dim red]")
-            self._mcp_servers.clear()
+        try:
+            # Clean up MCP servers one by one to avoid task group issues
+            if self._mcp_servers:
+                for server in self._mcp_servers:
+                    try:
+                        if hasattr(server, 'cleanup'):
+                            # Try cleanup with a timeout to avoid hanging
+                            try:
+                                await asyncio.wait_for(server.cleanup(), timeout=3.0)
+                            except asyncio.TimeoutError:
+                                console.print(f"[dim red]MCP server {getattr(server, 'name', 'unknown')} cleanup timed out[/dim red]")
+                            except Exception as cleanup_error:
+                                console.print(f"[dim red]Error cleaning up MCP server {getattr(server, 'name', 'unknown')}: {cleanup_error}[/dim red]")
+                    except Exception as e:
+                        console.print(f"[dim red]Error accessing MCP server for cleanup: {e}[/dim red]")
+
+                self._mcp_servers.clear()
+
+            # Reset agent state to force re-initialization
+            if self.dev_agent:
+                self.dev_agent = None
+                self._agent_initialized = False
+
+        except Exception as e:
+            console.print(f"[dim red]Unexpected error during scheduler cleanup: {e}[/dim red]")

@@ -67,8 +67,20 @@ class ClearCommand(SlashCommand):
 
     async def execute(self, scheduler, *_args) -> str:
         """Execute the /clear command."""
-        await scheduler.context_manager.clear()
-        return "🧹 Context Cleared"
+        from ..utils.sessions import default_session_local_ms
+
+        new_sid = default_session_local_ms()
+
+        # Clear screen
+        try:
+            import sys as _sys
+
+            _sys.stdout.write("\033[2J\033[H")
+            _sys.stdout.flush()
+        except Exception:
+            pass
+
+        return f"session_switch:{new_sid}"  # Special return value for CLI to handle
 
 
 class StatusCommand(SlashCommand):
@@ -215,17 +227,18 @@ class SlashCommandHandler:
         try:
             command = self.commands[command_name]
             if command_name == "session":
-                from ..cli import AgentScheduler, _prompt_select_session
+                from ..utils.sessions import picker_arrows, sort_sessions_desc
 
-                selected = await _prompt_select_session()
+                # Get sessions and prompt for selection
+                sessions = await scheduler.context_manager.list_sessions()
+                if not sessions:
+                    return "No sessions found."
+
+                sessions = sort_sessions_desc(sessions)
+                selected = picker_arrows(sessions)
+
                 if selected:
-                    new_sched = AgentScheduler(session_id=selected, streaming=scheduler.streaming)
-                    (
-                        scheduler.replace_with(new_sched)
-                        if hasattr(scheduler, "replace_with")
-                        else None
-                    )
-                    return f"Switched to session: {selected}"
+                    return f"session_switch:{selected}"  # Special return value for CLI to handle
                 return "Session switch cancelled"
             return await command.execute(scheduler, *args)
         except Exception as e:
