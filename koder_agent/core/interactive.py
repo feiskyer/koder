@@ -92,7 +92,7 @@ class InteractivePrompt:
         self.session = PromptSession(
             completer=self.completer,
             complete_while_typing=True,
-            mouse_support=True,
+            mouse_support=False,
         )
 
     async def get_input(self, prompt_text: str = "user") -> str:
@@ -224,7 +224,7 @@ class InteractivePrompt:
             key_bindings=kb,
             style=style,
             full_screen=False,
-            mouse_support=True,
+            mouse_support=False,  # Disable mouse support to allow terminal scrolling
         )
 
         result = await app.run_async()

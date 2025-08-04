@@ -181,9 +181,9 @@ class AgentScheduler:
         with Live(
             "",
             console=console,
-            refresh_per_second=8,  # Reasonable refresh rate
-            transient=False,  # Keep content visible during streaming
-            vertical_overflow="visible",  # Show all content even if it exceeds screen height
+            refresh_per_second=8,
+            transient=True,
+            vertical_overflow="crop",
         ) as live:
             try:
                 # Process streaming events
