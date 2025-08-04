@@ -120,7 +120,7 @@ class InteractivePrompt:
         # Create simple frame without heavy styling
         framed_input = Frame(
             body=input_window,
-            title=f"{prompt_text}",
+            title=f"{prompt_text} - Type your prompt, /command, or Ctrl+C to exit",
         )
 
         # Key bindings

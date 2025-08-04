@@ -117,7 +117,6 @@ class StatusCommand(SlashCommand):
         table.add_row("Total Sessions", str(len(sessions)))
         table.add_row("Working Directory", os.getcwd())
 
-
         if sessions:
             table.add_section()
             table.add_row("[bold]Available Sessions[/bold]", "[bold]ID[/bold]")
