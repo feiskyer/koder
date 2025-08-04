@@ -2,22 +2,19 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![PyPI Downloads](https://static.pepy.tech/badge/koder)](https://pepy.tech/projects/koder)
 
-An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support.
+Koder is an experimental, universal AI coding assistant designed to explore how to build an advanced terminal-based AI coding assistant. Written entirely in Python, it serves as both a functional tool and a learning playground for AI agent development.
 
-## 🚀 Overview
+**🎯 Project Status**: Under active vibe coding! This is a learning-focused project where we explore building AI coding agents.
 
-Koder is a universal, provider-agnostic CLI assistant. It supports OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, GitHub Copilot (device flow), and 100+ providers via LiteLLM.
+## ✨ Features
 
-- Universal provider support with intelligent auto-detection
-- Persistent context across sessions with smart token management
-- Rich toolset: file operations, search, shell commands, and web access
-- Zero-config start: set one API key and go (streaming supported)
-- Session management per project
-
-## 📋 Requirements
-
-- Python 3.9 or higher
-- API key and optional base URL from your chosen AI provider
+- **🤖 Universal AI Support**: Works with OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers via LiteLLM with intelligent auto-detection
+- **💾 Smart Context Management**: Persistent sessions with SQLite storage and automatic token-aware compression (50k token limit)
+- **🔄 Real-time Streaming**: Rich Live displays with intelligent terminal cleanup for responsive user experience
+- **🛠️ Comprehensive Toolset**: file operations, search, shell, task delegation and todos.
+- **🔌 MCP Integration**: Model Context Protocol support with stdio, SSE, and HTTP transports for extensible tool ecosystem
+- **🛡️ Enterprise Security**: SecurityGuard validation, output filtering, permission system, and input sanitization
+- **🎯 Zero Configuration**: Automatic provider detection with fallback defaults
 
 ## 🛠️ Installation
 
@@ -33,27 +30,33 @@ uv tool install koder
 pip install koder
 ```
 
-## ⚡ Quick Start (Minimal)
+## ⚡ Quick Start
+
+Simply run Koder with your question or request:
 
 ```bash
-# 1) Install
-uv tool install koder
-
-# 2) Configure one provider (example: OpenAI)
+# Configure one provider (example: OpenAI)
 export OPENAI_API_KEY="your-openai-api-key"
 export KODER_MODEL="gpt-4o"
 
-# 3) Run
-koder -s demo "Help me scaffold a FastAPI service with a /health endpoint"
+# Run in interactive mode
+koder
+
+# Run with prompt
+koder "create a Python function to calculate fibonacci numbers"
+
+# Execute a single prompt in a named session
+koder -s my-project "Help me implement a new feature"
+
+# Use an explicit session flag
+koder --session my-project "Your prompt here"
 ```
 
-## 🤖 Provider Configuration
+## 🤖 Configuration
 
-Koder auto-detects the provider based on environment variables. If multiple providers are configured, KODER_MODEL is used to route requests. If KODER_MODEL is omitted, Koder picks a sensible default for the detected provider.
+### Environment Variables
 
-**Model Selection**
-
-The `KODER_MODEL` environment variable controls which model to use:
+Koder automatically detects your AI provider based on available environment variables. The `KODER_MODEL` environment variable controls which model to use:
 
 ```bash
 # OpenAI models
@@ -64,20 +67,21 @@ export KODER_MODEL="claude-opus-4-20250514"
 
 # Google models (via LiteLLM)
 export KODER_MODEL="gemini/gemini-2.5-pro"
+
+# Github Copilot (via LiteLLM)
+export KODER_MODEL="github_copilot/claude-sonnet-4"
 ```
 
-**AI Providers:**
+### Supported Providers
 
 <details>
-
-<summary>OpenAI</summary>
+<summary><b>OpenAI</b></summary>
 
 ```bash
-# Required
-export OPENAI_API_KEY="your-openai-api-key"
+export OPENAI_API_KEY=your-api-key
 
-# Optional: Custom OpenAI-compatible endpoint
-export OPENAI_BASE_URL="https://api.openai.com/v1"  # Default
+# Optional: Use custom endpoint
+export OPENAI_API_BASE=https://your-endpoint.com
 
 # Optional: Specify model (default: gpt-4.1)
 export KODER_MODEL="gpt-4o"
@@ -86,13 +90,21 @@ export KODER_MODEL="gpt-4o"
 </details>
 
 <details>
-
-<summary>Gemini</summary>
+<summary><b>Anthropic</b></summary>
 
 ```bash
-# Required
-export GEMINI_API_KEY="your-gemini-api-key"
+export ANTHROPIC_API_KEY=your-api-key
+export KODER_MODEL="claude-opus-4-20250514"
 
+```
+
+</details>
+
+<details>
+<summary><b>Google (Gemini)</b></summary>
+
+```bash
+export GOOGLE_API_KEY=your-api-key
 # Optional: Specify model (default: gemini/gemini-2.5-pro)
 export KODER_MODEL="gemini/gemini-2.5-pro"
 ```
@@ -100,20 +112,7 @@ export KODER_MODEL="gemini/gemini-2.5-pro"
 </details>
 
 <details>
-
-<summary>Anthropic Claude</summary>
-
-```bash
-# Anthropic Claude
-export ANTHROPIC_API_KEY="your-anthropic-key"
-export KODER_MODEL="claude-opus-4-20250514"
-```
-
-</details>
-
-<details>
-
-<summary>GitHub Copilot</summary>
+<summary><b>GitHub Copilot</b></summary>
 
 ```bash
 export KODER_MODEL="github_copilot/claude-sonnet-4"
@@ -124,8 +123,7 @@ On first run you will see a device code in the terminal. Visit <https://github.c
 </details>
 
 <details>
-
-<summary>Azure OpenAI</summary>
+<summary><b>Azure OpenAI</b></summary>
 
 ```bash
 # Required
@@ -150,8 +148,7 @@ Tips:
 </details>
 
 <details>
-
-<summary>Other AI providers (via LiteLLM)</summary>
+<summary><b>Other AI providers (via LiteLLM)</b></summary>
 
 [LiteLLM](https://docs.litellm.ai/docs/providers) supports 100+ providers including Anthropic, Google, Cohere, Hugging Face, and more:
 
@@ -169,60 +166,50 @@ export KODER_MODEL="openai/<your-model-name>"
 
 </details>
 
-## 🔐 Security
-
-- Never commit API keys. Prefer shell profiles, direnv (.envrc), 1Password CLI, or CI secrets.
-- Rotate keys regularly and scope permissions minimally.
-- For CI, store secrets in the platform’s secret manager and inject at runtime.
-
-## 📦 Usage Examples
-
-```bash
-# Run in interactive mode
-koder
-
-# Execute a single prompt in a named session
-koder -s my-project "Help me implement a new feature"
-
-# Use an explicit session flag
-koder --session my-project "Your prompt here"
-
-# Enable streaming mode
-koder --stream "Your prompt here"
-```
-
-## 🧪 Development
+## 🛠️ Development
 
 ### Setup Development Environment
 
 ```bash
-# Clone and setup
+# Clone the repository
 git clone https://github.com/feiskyer/koder.git
 cd koder
-uv sync
 
+uv sync
 uv run koder
 ```
 
 ### Code Quality
 
 ```bash
-# Format code
+# Code formatting
 black .
 
-# Lint code
-ruff check .
+# Linting
+ruff check --fix
+
+# pylint
+pylint koder_agent/ --disable=C,R,W --errors-only
 ```
+
+## 🔒 Security
+
+- **API Keys**: All API keys are stored in environment variables and never in code.
+- **Local Storage**: Sessions are stored locally in your home directory.
+- **No Telemetry**: Koder doesn't send any data besides API requests to your chosen provider.
+- **Code Execution**: Shell commands require explicit user confirmation.
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Make your changes
-4. Run formatting and linting
-5. Commit your changes: `git commit -am 'feat: add your feature'`
-6. Push to the branch: `git push origin feature/your-feature`
-7. Submit a pull request
+Contributions are welcome! Here's how you can help:
+
+1. **Fork** the repository
+2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
+3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
+4. **Push** to the branch (`git push origin feature/amazing-feature`)
+5. **Open** a Pull Request
+
+Please read our [Contributing Guidelines](CONTRIBUTING.md) for more details.
 
 ## 🌐 Code of Conduct
 
@@ -230,6 +217,6 @@ This project follows a Code of Conduct based on the Contributor Covenant. Be kin
 
 ## 📄 License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 Use of third-party AI services is governed by their respective provider terms.

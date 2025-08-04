@@ -117,19 +117,6 @@ class StatusCommand(SlashCommand):
         table.add_row("Total Sessions", str(len(sessions)))
         table.add_row("Working Directory", os.getcwd())
 
-        # Show environment variables
-        env_vars = {
-            "OPENAI_API_KEY": "✅ Set" if os.environ.get("OPENAI_API_KEY") else "❌ Not set",
-            "AZURE_OPENAI_API_KEY": (
-                "✅ Set" if os.environ.get("AZURE_OPENAI_API_KEY") else "❌ Not set"
-            ),
-            "KODER_MODEL": os.environ.get("KODER_MODEL", "Not set (using default)"),
-        }
-
-        table.add_section()
-        table.add_row("[bold]Environment[/bold]", "[bold]Status[/bold]")
-        for key, value in env_vars.items():
-            table.add_row(key, value)
 
         if sessions:
             table.add_section()

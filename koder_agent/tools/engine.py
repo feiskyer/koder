@@ -1,12 +1,13 @@
 """Tool engine for managing and executing tools."""
 
 import asyncio
-from typing import Any, Dict, Type
+from typing import Any, Dict, Optional, Type
 
 from pydantic import BaseModel, ValidationError
 from rich.console import Console
 from rich.panel import Panel
 
+from ..core.permissions import PermissionManager
 from ..core.security import SecurityGuard
 
 console = Console()
@@ -15,9 +16,10 @@ console = Console()
 class ToolEngine:
     """Engine for registering and executing tools with security checks."""
 
-    def __init__(self):
+    def __init__(self, permission_manager: Optional[PermissionManager] = None):
         self.registry: Dict[str, Any] = {}
         self.schemas: Dict[str, Type[BaseModel]] = {}
+        self.permission_manager = permission_manager
 
     def register(self, schema: Type[BaseModel]):
         """
@@ -39,6 +41,15 @@ class ToolEngine:
 
     async def call(self, name: str, **kw) -> str:
         """Execute a tool with security validation."""
+        # Check permissions first if permission manager is available
+        if self.permission_manager:
+            if not self.permission_manager.check_permission(name, kw, is_mcp=False):
+                result = f"Tool execution denied: {name}"
+                console.print(
+                    Panel(f"[red]{result}[/red]", title="❌ Tool Denied", border_style="red")
+                )
+                return result
+
         # Show tool input
         console.print(
             Panel(

@@ -1,6 +1,6 @@
 [project]
 name = "koder"
-version = "0.3.0"
+version = "0.3.1"
 description = "An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support."
 authors = [
     { name = "Pengfei Ni" }
@@ -12,16 +12,16 @@ repository = "https://github.com/feiskyer/koder"
 keywords = ["vibe coding", "copilot","openai", "agent", "ai", "agentic", "litellm"]
 
 dependencies = [
-    "openai-agents[litellm]>=0.1.0",
+    "openai-agents[litellm]>=0.2.4",
     "tiktoken>=0.5.0",
     "requests>=2.31.0",
     "beautifulsoup4>=4.12.0",
     "aiosqlite>=0.19.0",
     "pydantic>=2.0.0",
     "httpx[socks]>=0.25.0",
-    "openai==1.96.1",
+    "openai==1.98.0",
     "rich>=13.0.0",
-    "google-cloud-aiplatform>=1.105.0",
+    "google-cloud-aiplatform>=1.106.0",
     "prompt-toolkit>=3.0.51",
 ]
 
@@ -37,8 +37,8 @@ dev-dependencies = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "black>=23.0.0",
-    "ruff>=0.1.0",
-    "mypy>=1.0.0",
+    "ruff>=0.12.7",
+    "mypy>=1.17.1",
 ]
 
 [tool.ruff]

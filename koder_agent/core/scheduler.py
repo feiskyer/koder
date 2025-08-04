@@ -17,8 +17,9 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.text import Text
 
-from ..agentic import create_dev_agent, get_display_hooks
+from ..agentic import ApprovalHooks, ToolApprovalError, create_dev_agent, get_display_hooks
 from ..core.context import ContextManager
+from ..core.permissions import PermissionManager
 from ..core.streaming_display import StreamingDisplayManager
 from ..tools import get_all_tools
 
@@ -31,10 +32,13 @@ class AgentScheduler:
     def __init__(self, session_id: str = "default", streaming: bool = False):
         self.semaphore = asyncio.Semaphore(10)
         self.context_manager = ContextManager(session_id)
+        self.permission_manager = PermissionManager()
         self.tools = get_all_tools()
         self.dev_agent = None  # Will be initialized in async method
         self.streaming = streaming
-        self.hooks = get_display_hooks(streaming_mode=streaming)
+        # Create approval hooks that wrap display hooks
+        display_hooks = get_display_hooks(streaming_mode=streaming)
+        self.hooks = ApprovalHooks(self.permission_manager, display_hooks)
         self._agent_initialized = False
         self._mcp_servers = []  # Track MCP servers for cleanup
 
@@ -100,23 +104,31 @@ class AgentScheduler:
 
         # Run the agent
         async with self.semaphore:
-            if self.streaming:
-                response = await self._handle_streaming(full_input)
-            else:
-                result = await Runner.run(
-                    self.dev_agent,
-                    full_input,
-                    run_config=RunConfig(),
-                    hooks=self.hooks,
-                    max_turns=50,
-                )
-                # Filter output for security
-                response = self._filter_output(result.final_output)
+            try:
+                if self.streaming:
+                    response = await self._handle_streaming(full_input)
+                else:
+                    result = await Runner.run(
+                        self.dev_agent,
+                        full_input,
+                        run_config=RunConfig(),
+                        hooks=self.hooks,
+                        max_turns=50,
+                    )
+                    # Filter output for security
+                    response = self._filter_output(result.final_output)
 
-                # Clean response output without heavy panels
-                print()  # Add space before response
+                    # Clean response output without heavy panels
+                    print()  # Add space before response
+                    console.print(response)
+                    print()  # Add space after response
+            except ToolApprovalError as e:
+                # Handle tool denial gracefully
+                response = (
+                    f"[red]Execution stopped: {str(e)}[/red]\n\nPlease provide new instructions."
+                )
                 console.print(response)
-                print()  # Add space after response
+                return response
 
         # Save conversation to context
         await self.context_manager.save(
@@ -262,9 +274,17 @@ class AgentScheduler:
                         console.print(f"[dim red]Event processing error: {e}[/dim red]")
                         continue
 
+            except ToolApprovalError as e:
+                # Handle tool denial in streaming mode
+                error_msg = f"Execution stopped: {str(e)}"
+                console.print(f"[red]{error_msg}[/red]")
+                # Clear the display manager and return early
+                display_manager.finalize_text_sections()
+                return f"{error_msg}\n\nPlease provide new instructions."
             except Exception as e:
                 # Handle streaming errors
                 console.print(f"[dim red]Streaming error: {e}[/dim red]")
+                # Continue to try to get some output
 
         # After Rich Live context ends, perform intelligent cleanup
         display_manager.finalize_text_sections()
@@ -337,6 +357,12 @@ class AgentScheduler:
         """Filter sensitive information from output."""
         import re
 
+        # Handle None or non-string input
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
+
         # Filter API keys and tokens
         text = re.sub(r"sk-\w{10,}", "[TOKEN]", text)
         text = re.sub(
@@ -351,16 +377,22 @@ class AgentScheduler:
             if self._mcp_servers:
                 for server in self._mcp_servers:
                     try:
-                        if hasattr(server, 'cleanup'):
+                        if hasattr(server, "cleanup"):
                             # Try cleanup with a timeout to avoid hanging
                             try:
                                 await asyncio.wait_for(server.cleanup(), timeout=3.0)
                             except asyncio.TimeoutError:
-                                console.print(f"[dim red]MCP server {getattr(server, 'name', 'unknown')} cleanup timed out[/dim red]")
+                                console.print(
+                                    f"[dim red]MCP server {getattr(server, 'name', 'unknown')} cleanup timed out[/dim red]"
+                                )
                             except Exception as cleanup_error:
-                                console.print(f"[dim red]Error cleaning up MCP server {getattr(server, 'name', 'unknown')}: {cleanup_error}[/dim red]")
+                                console.print(
+                                    f"[dim red]Error cleaning up MCP server {getattr(server, 'name', 'unknown')}: {cleanup_error}[/dim red]"
+                                )
                     except Exception as e:
-                        console.print(f"[dim red]Error accessing MCP server for cleanup: {e}[/dim red]")
+                        console.print(
+                            f"[dim red]Error accessing MCP server for cleanup: {e}[/dim red]"
+                        )
 
                 self._mcp_servers.clear()
 
