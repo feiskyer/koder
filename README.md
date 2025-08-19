@@ -142,11 +142,6 @@ export AZURE_API_VERSION="2025-04-01-preview"
 koder
 ```
 
-Tips:
-
-- Ensure the endpoint hostname matches your Azure resource.
-- AZURE_OPENAI_DEPLOYMENT must match the deployed model name in Azure.
-
 </details>
 
 <details>

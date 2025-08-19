@@ -95,7 +95,7 @@ class InteractivePrompt:
             mouse_support=False,
         )
 
-    async def get_input(self, prompt_text: str = "user") -> str:
+    async def get_input(self, prompt_text: str = "User") -> str:
         """Get user input with Rich panel display and prompt_toolkit completion."""
         # Create buffer
         buffer = Buffer(
@@ -120,7 +120,7 @@ class InteractivePrompt:
         # Create simple frame without heavy styling
         framed_input = Frame(
             body=input_window,
-            title=f"{prompt_text} - Type your prompt, /command, or Ctrl+C to exit",
+            title=f"{prompt_text} (Ctrl+C to exit)",
         )
 
         # Key bindings

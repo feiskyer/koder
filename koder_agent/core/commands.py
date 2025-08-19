@@ -173,11 +173,57 @@ class McpCommand(SlashCommand):
             return f"Error listing MCP servers: {e}"
 
 
+class HelpCommand(SlashCommand):
+    """Show help and usage instructions."""
+
+    def __init__(self):
+        super().__init__("help", "Show help and usage instructions")
+
+    async def execute(self, scheduler, *_args) -> str:
+        """Execute the /help command."""
+        # Show general usage instructions
+        usage_text = """[bold cyan]Koder - AI Coding Assistant[/bold cyan]
+
+[bold]How to use:[/bold]
+• Type your coding questions or requests in natural language
+• Use slash commands (/) for special functions
+• Press Ctrl+C to exit interactive mode
+• Type 'exit' or 'quit' to end the session
+
+[bold]Examples:[/bold]
+• "Help me implement a login feature"
+• "Fix the bug in auth.py"
+• "Explain this code"
+• "/status" - show current configuration
+• "/clear" - start a new session"""
+
+        console.print(Panel(usage_text, title="📖 Help", border_style="cyan"))
+
+        # Get the command handler to access all commands
+        handler = scheduler.slash_handler if hasattr(scheduler, "slash_handler") else slash_handler
+        commands = handler.get_command_list()
+
+        if commands:
+            # Show available slash commands in a table
+            table = Table(show_header=True, header_style="bold cyan", box=None)
+            table.add_column("Command", style="cyan", width=12)
+            table.add_column("Description", style="white")
+
+            for name, description in commands:
+                table.add_row(f"/{name}", description)
+
+            console.print()
+            console.print(table)
+
+        return ""
+
+
 class SlashCommandHandler:
     """Handles slash command detection and execution."""
 
     def __init__(self):
         self.commands: Dict[str, SlashCommand] = {
+            "help": HelpCommand(),
             "init": InitCommand(),
             "clear": ClearCommand(),
             "status": StatusCommand(),

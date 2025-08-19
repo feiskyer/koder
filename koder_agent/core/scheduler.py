@@ -156,10 +156,8 @@ class AgentScheduler:
         # Add space before streaming starts
         print()
 
-        # Capture cursor position before Rich Live starts (if supported)
-        if supports_advanced_clearing:
-            sys.stdout.write("\033[6n")  # Request cursor position
-            sys.stdout.flush()
+        # Skip cursor position capture - it causes escape sequence leaks
+        # The terminal clearing strategies below work without explicit position tracking
 
         # Run the agent in streaming mode
         if self.dev_agent is None:
@@ -313,10 +311,17 @@ class AgentScheduler:
                 except Exception:
                     pass  # Fallback to simple approach
 
-            # Strategy 2: Print final clean content only if not already displayed
-            # Skip if we already showed content during streaming
-            if not content_displayed:
-                # No content was displayed during streaming, show it now
+            # Strategy 2: Always show final text response, but avoid duplicate tool output
+            # Get the final text response separately to ensure it's always displayed
+            final_text_response = display_manager.get_final_text()
+
+            if final_text_response and final_text_response.strip():
+                # Always show the final AI text response
+                print()  # Add spacing
+                console.print(final_text_response)
+                print()  # Add spacing after
+            elif not content_displayed:
+                # Fallback: show full content if no separate text and nothing was displayed
                 print()  # Add spacing
                 console.print(final_content)
                 print()  # Add spacing after
