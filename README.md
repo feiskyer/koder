@@ -49,7 +49,7 @@ koder "create a Python function to calculate fibonacci numbers"
 koder -s my-project "Help me implement a new feature"
 
 # Use an explicit session flag
-koder --session my-project "Your prompt here"
+koder -s my-project "Your prompt here"
 ```
 
 ## 🤖 Configuration
@@ -61,15 +61,21 @@ Koder automatically detects your AI provider based on available environment vari
 ```bash
 # OpenAI models
 export KODER_MODEL="gpt-4.1"
+koder
 
 # Claude models (via LiteLLM)
 export KODER_MODEL="claude-opus-4-20250514"
+export ANTHROPIC_API_KEY=your-api-key
+koder
 
-# Google models (via LiteLLM)
+# Google Gemini models (via LiteLLM)
 export KODER_MODEL="gemini/gemini-2.5-pro"
+export GOOGLE_API_KEY=your-api-key
+koder
 
 # Github Copilot (via LiteLLM)
 export KODER_MODEL="github_copilot/claude-sonnet-4"
+koder
 ```
 
 ### Supported Providers
@@ -85,6 +91,8 @@ export OPENAI_API_BASE=https://your-endpoint.com
 
 # Optional: Specify model (default: gpt-4.1)
 export KODER_MODEL="gpt-4o"
+
+koder
 ```
 
 </details>
@@ -93,20 +101,20 @@ export KODER_MODEL="gpt-4o"
 <summary><b>Anthropic</b></summary>
 
 ```bash
-export ANTHROPIC_API_KEY=your-api-key
 export KODER_MODEL="claude-opus-4-20250514"
-
+export ANTHROPIC_API_KEY=your-api-key
+koder
 ```
 
 </details>
 
 <details>
-<summary><b>Google (Gemini)</b></summary>
+<summary><b>Google Gemini</b></summary>
 
 ```bash
-export GOOGLE_API_KEY=your-api-key
-# Optional: Specify model (default: gemini/gemini-2.5-pro)
 export KODER_MODEL="gemini/gemini-2.5-pro"
+export GOOGLE_API_KEY=your-api-key
+koder
 ```
 
 </details>
@@ -116,6 +124,7 @@ export KODER_MODEL="gemini/gemini-2.5-pro"
 
 ```bash
 export KODER_MODEL="github_copilot/claude-sonnet-4"
+koder
 ```
 
 On first run you will see a device code in the terminal. Visit <https://github.com/login/device> and enter the code to authenticate.
@@ -126,18 +135,11 @@ On first run you will see a device code in the terminal. Visit <https://github.c
 <summary><b>Azure OpenAI</b></summary>
 
 ```bash
-# Required
-export AZURE_OPENAI_API_KEY="your-azure-api-key"
-export AZURE_OPENAI_ENDPOINT="https://your-resource.openai.azure.com"
-
-# Your Azure deployment name (often different from the base model name)
-export AZURE_OPENAI_DEPLOYMENT="my-gpt4o-deployment"
-
-# Choose a model that maps to your deployment
-export KODER_MODEL="gpt-4o"
-
-# Optional: API version
-export AZURE_OPENAI_API_VERSION="2025-04-01-preview"
+export KODER_MODEL=azure/gpt-5
+export AZURE_API_KEY="your-azure-api-key"
+export ZURE_API_BASE="https://your-resource.openai.azure.com"
+export AZURE_API_VERSION="2025-04-01-preview"
+koder
 ```
 
 Tips:
@@ -154,14 +156,16 @@ Tips:
 
 ```bash
 # Google Vertex AI
+export KODER_MODEL="vertex_ai/claude-sonnet-4@20250514"
 export GOOGLE_APPLICATION_CREDENTIALS="your-sa-path.json"
 export VERTEXAI_LOCATION="<your-region>"
-export KODER_MODEL="vertex_ai/claude-sonnet-4@20250514"
+koder
 
 # Custom OpenAI-compatible endpoints
+export KODER_MODEL="openai/<your-model-name>"
 export OPENAI_API_KEY="your-key"
 export OPENAI_BASE_URL="https://your-custom-endpoint.com/v1"
-export KODER_MODEL="openai/<your-model-name>"
+koder
 ```
 
 </details>

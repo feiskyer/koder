@@ -10,6 +10,9 @@ This file provides guidance to KODER and Agentic AI when working with code in th
 # Install dependencies
 uv sync
 
+# Upgrade dependencies
+uv sync --upgrade
+
 # Run the CLI in interactive mode
 uv run koder
 

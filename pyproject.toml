@@ -2,15 +2,18 @@
 name = "koder"
 version = "0.3.1"
 description = "An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support."
-authors = [
-    { name = "Pengfei Ni" }
-]
+authors = [{ name = "Pengfei Ni" }]
 readme = "README.md"
 requires-python = ">=3.9"
-homepage = "https://github.com/feiskyer/koder"
-repository = "https://github.com/feiskyer/koder"
-keywords = ["vibe coding", "copilot","openai", "agent", "ai", "agentic", "litellm"]
-
+keywords = [
+    "vibe coding",
+    "copilot",
+    "openai",
+    "agent",
+    "ai",
+    "agentic",
+    "litellm",
+]
 dependencies = [
     "openai-agents[litellm]>=0.2.4",
     "tiktoken>=0.5.0",
@@ -20,10 +23,25 @@ dependencies = [
     "pydantic>=2.0.0",
     "httpx[socks]>=0.25.0",
     "openai==1.98.0",
-    "rich>=13.0.0",
+    "rich>=14.1.0",
     "google-cloud-aiplatform>=1.106.0",
     "prompt-toolkit>=3.0.51",
+    "backoff>=2.2.1",
+    "fastapi>=0.116.1",
+    "orjson>=3.11.2",
+    "apscheduler>=3.11.0",
+    "fastapi-sso>=0.18.0",
+    "pyjwt>=2.10.1",
+    "python-multipart>=0.0.20",
+    "cryptography>=45.0.6",
+    "pynacl>=1.5.0",
+    "websockets>=15.0.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/feiskyer/koder"
+Repository = "https://github.com/feiskyer/koder"
+
 
 [project.scripts]
 koder = "koder_agent.cli:run"
@@ -58,11 +76,7 @@ python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
-exclude = [
-    ".venv",
-    "build",
-    "dist",
-]
+exclude = [".venv", "build", "dist"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["koder_agent"]
