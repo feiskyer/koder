@@ -35,13 +35,13 @@ async def load_context() -> str:
     context_info = []
     current_dir = os.getcwd()
     context_info.append(f"Working directory: {current_dir}")
-    koder_md_path = Path(current_dir) / "KODER.md"
+    koder_md_path = Path(current_dir) / "AGENTS.md"
     if koder_md_path.exists():
         try:
             koder_content = koder_md_path.read_text("utf-8", errors="ignore")
-            context_info.append(f"KODER.md content:\n{koder_content}")
+            context_info.append(f"AGENTS.md content:\n{koder_content}")
         except Exception as e:
-            context_info.append(f"Error reading KODER.md: {e}")
+            context_info.append(f"Error reading AGENTS.md: {e}")
     return "\n\n".join(context_info)
 
 

@@ -92,7 +92,7 @@ The project uses the `openai-agents` library with multi-provider support:
 
 ### Configuration
 
-- **Context Loading**: The CLI looks for `KODER.md` in the working directory to load project-specific context
+- **Context Loading**: The CLI looks for `AGENTS.md` in the working directory to load project-specific context
 - **Database**: SQLite database at `~/.koder/koder.db` stores conversation history and MCP server configs
 - **AI Provider Setup**: Set API credentials via environment variables (see README.md for provider-specific setup)
 - **Model Selection**: Use `KODER_MODEL` environment variable to specify which model to use across providers

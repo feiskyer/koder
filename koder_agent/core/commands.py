@@ -27,36 +27,36 @@ class SlashCommand:
 
 
 class InitCommand(SlashCommand):
-    """Initialize project by reading codebase and generating KODER.md."""
+    """Initialize project by reading codebase and generating AGENTS.md."""
 
     def __init__(self):
-        super().__init__("init", "Read through the project and generate KODER.md")
+        super().__init__("init", "Read through the project and generate AGENTS.md")
 
     async def execute(self, scheduler, *_args) -> str:
         """Execute the /init command."""
-        koder_md_path = Path(os.getcwd()) / "KODER.md"
+        koder_md_path = Path(os.getcwd()) / "AGENTS.md"
         if koder_md_path.exists():
-            console.print("[yellow]⚠️ KODER.md already exists.[/yellow]")
-            return "⚠️ KODER.md already exists."
+            console.print("[yellow]⚠️ AGENTS.md already exists.[/yellow]")
+            return "⚠️ AGENTS.md already exists."
 
-        # Use the agent to analyze the project and generate KODER.md
-        prompt = """Please analyze this codebase and create a KODER.md file containing:
+        # Use the agent to analyze the project and generate AGENTS.md
+        prompt = """Please analyze this codebase and create a AGENTS.md file containing:
 1. Build/lint/test commands - especially for running a single test
 2. Code style guidelines including imports, formatting, types, naming conventions, error handling, etc.
 
 Usage notes:
 - The file you create will be given to agentic coding agents (such as yourself) that operate in this repository. Make it about 20 lines long.\
-- If there's already a KODER.md, improve it.\
+- If there's already a AGENTS.md, improve it.\
 - If there are Cursor rules (in .cursor/rules/ or .cursorrules) or Copilot rules (in .github/copilot-instructions.md), make sure to include them.\
 - Be sure to prefix the file with the following text:
 
-# KODER.md
+# AGENTS.md
 
 This file provides guidance to Koder when working with code in this repository.
 """
 
         await scheduler.handle(prompt)
-        return "✅ KODER.md generated."
+        return "✅ AGENTS.md generated."
 
 
 class ClearCommand(SlashCommand):

@@ -338,14 +338,14 @@ class AgentScheduler:
 
     def _get_display_input(self, user_input: str) -> str:
         """Get a filtered version of user input for display purposes."""
-        # Check if input contains KODER.md content
-        if "KODER.md content:" in user_input:
+        # Check if input contains AGENTS.md content
+        if "AGENTS.md content:" in user_input:
             lines = user_input.split("\n")
             filtered_lines = []
             skip_koder_content = False
 
             for line in lines:
-                if "KODER.md content:" in line:
+                if "AGENTS.md content:" in line:
                     skip_koder_content = True
                     continue
                 elif skip_koder_content and line.startswith("User request:"):
