@@ -198,22 +198,30 @@ class StreamingDisplayManager:
             tracker.output = output
             tracker.completed = True
 
-            # Only create tool output section - tool call section was already created
-            # Find existing tool call section to mark as complete
-            for section in self.sections:
+            # Find the position of the corresponding tool call section
+            tool_call_index = -1
+            for i, section in enumerate(self.sections):
                 if (
                     section.type == OutputType.TOOL_CALL
                     and section.tool_tracker
                     and section.tool_tracker.call_id == tracker.call_id
                 ):
                     section.complete = True
+                    tool_call_index = i
                     break
 
             # Create tool output section
             output_section = OutputSection(
                 type=OutputType.TOOL_OUTPUT, content=output, tool_tracker=tracker, complete=True
             )
-            self.sections.append(output_section)
+
+            # Insert output section right after the corresponding tool call
+            if tool_call_index != -1:
+                # Insert after the tool call section (at position tool_call_index + 1)
+                self.sections.insert(tool_call_index + 1, output_section)
+            else:
+                # Fallback: append to end if tool call section not found
+                self.sections.append(output_section)
 
             # Decrement pending counter
             self.pending_tool_calls = max(0, self.pending_tool_calls - 1)
@@ -261,16 +269,18 @@ class StreamingDisplayManager:
                     if renderables:
                         renderables.append(Text())
 
-                    # Format tool call
+                    # Format tool call with simpler display
                     tool_text = Text()
-                    tool_text.append("• ", style="bold")
-                    tool_text.append(tracker.tool_name, style="dim cyan")
+                    tool_text.append("● ", style="green")
+                    tool_text.append(tracker.tool_name, style="bold cyan")
 
-                    # Add full inputs if available
+                    # Add inputs if available (show all for most tools, limited for write tools)
                     if tracker.inputs:
-                        inputs_str = self._format_tool_inputs_full(tracker.inputs)
+                        inputs_str = self._format_tool_inputs_for_display(
+                            tracker.tool_name, tracker.inputs
+                        )
                         if inputs_str:
-                            tool_text.append(" (")
+                            tool_text.append("(")
                             tool_text.append(inputs_str, style="dim")
                             tool_text.append(")")
 
@@ -278,13 +288,44 @@ class StreamingDisplayManager:
 
             elif section.type == OutputType.TOOL_OUTPUT:
                 if section.tool_tracker and section.content:
-                    # Format tool output with 500 char limit
-                    output_preview = self._format_tool_output_limited(section.content)
-                    if output_preview:
-                        output_text = Text()
-                        output_text.append("  → ", style="dim green")
-                        output_text.append(output_preview, style="dim green")
-                        renderables.append(output_text)
+                    # Generate smart summary based on tool and content
+                    summary = self._generate_smart_summary(
+                        section.tool_tracker.tool_name, section.content
+                    )
+                    is_error = self._is_error_output(section.content)
+
+                    # Determine style based on success/failure
+                    if is_error:
+                        style = "red"
+                        arrow_style = "red"
+                    else:
+                        style = "dim green"
+                        arrow_style = "dim green"
+
+                    if summary:
+                        # Handle multi-line output with proper alignment
+                        summary_lines = summary.split("\n")
+                        for i, line in enumerate(summary_lines):
+                            if line.strip():  # Skip empty lines
+                                output_text = Text()
+                                if i == 0:
+                                    # First line with arrow
+                                    output_text.append("  ╰─ ", style=arrow_style)
+                                    output_text.append(line, style=style)
+                                else:
+                                    # Subsequent lines aligned with first line text
+                                    output_text.append(
+                                        "     ", style=""
+                                    )  # 5 spaces to align with text after "╰─ "
+                                    output_text.append(line, style=style)
+                                renderables.append(output_text)
+
+                    # Show file diff if this is a file update
+                    diff_content = self._extract_diff_content(
+                        section.tool_tracker.tool_name, section.content
+                    )
+                    if diff_content:
+                        renderables.extend(diff_content)
 
         # Return a Group for proper rendering
         if renderables:
@@ -500,3 +541,306 @@ class StreamingDisplayManager:
                 text_parts.append(section.content.strip())
 
         return "\n\n".join(text_parts) if text_parts else ""
+
+    def get_final_display(self) -> str:
+        """Get the final display content including tools as plain text."""
+        from io import StringIO
+
+        from rich.console import Console
+
+        # Create a temporary console to render to string
+        temp_output = StringIO()
+        temp_console = Console(file=temp_output, width=120, color_system=None)
+
+        # Get the display content and render it
+        content = self.get_display_content()
+        temp_console.print(content)
+
+        # Get the rendered text
+        result = temp_output.getvalue()
+        temp_output.close()
+
+        return result.rstrip()  # Remove trailing whitespace
+
+    def _format_tool_inputs_simple(self, inputs: Dict[str, Any]) -> str:
+        """Format tool inputs for simplified display."""
+        if not inputs:
+            return ""
+
+        # Show only the most important parameter
+        key_params = ["file_path", "path", "pattern", "query", "command", "url"]
+
+        for key in key_params:
+            if key in inputs:
+                value = inputs[key]
+                if isinstance(value, str):
+                    if key in ["file_path", "path"] and "/" in value:
+                        # Show just filename for paths
+                        return value.split("/")[-1]
+                    elif len(value) <= 50:
+                        return value
+                    else:
+                        return f"{value[:47]}..."
+                else:
+                    return str(value)
+
+        # Fallback to first parameter
+        if inputs:
+            key, value = next(iter(inputs.items()))
+            if isinstance(value, str) and len(value) <= 50:
+                return value
+            elif isinstance(value, str):
+                return f"{value[:47]}..."
+            else:
+                return str(value)
+
+        return ""
+
+    def _generate_smart_summary(self, tool_name: str, output: str) -> str:
+        """Generate smart summary for tool output."""
+        if not output:
+            return ""
+
+        clean_output = output.strip()
+
+        # Handle read_file tool
+        if tool_name == "read_file":
+            lines = clean_output.count("\n") + 1 if clean_output else 0
+            return f"Read {lines} lines"
+
+        # Handle glob_search tool
+        elif tool_name == "glob_search":
+            if "No files found" in clean_output:
+                return "No files found"
+            else:
+                # Count files in output
+                files = [
+                    line
+                    for line in clean_output.split("\n")
+                    if line.strip() and not line.startswith("Found")
+                ]
+                # For small number of files (<=5), show them all
+                if len(files) <= 5:
+                    return "\n".join(files) if files else "No files found"
+                else:
+                    return f"Found {len(files)} files"
+
+        # Handle grep_search tool
+        elif tool_name == "grep_search":
+            if "No files found" in clean_output:
+                return "No matches found"
+            elif "Found" in clean_output and "files" in clean_output:
+                # Extract number from "Found X files"
+                import re
+
+                match = re.search(r"Found (\d+) files?", clean_output)
+                if match:
+                    return f"Found {match.group(1)} files"
+                else:
+                    return "Search completed"
+            else:
+                return "Search completed"
+
+        # Handle list_directory tool
+        elif tool_name == "list_directory":
+            lines = [
+                line
+                for line in clean_output.split("\n")
+                if line.strip() and not line.startswith("-")
+            ]
+            return f"Listed {len(lines)} items"
+
+        # Handle git_command tool
+        elif tool_name == "git_command":
+            if not clean_output:
+                return "Git command completed"
+            elif "error" in clean_output.lower() or "failed" in clean_output.lower():
+                first_line = clean_output.split("\n")[0][:60]
+                return f"Error: {first_line}"
+            else:
+                lines = clean_output.split("\n")
+                # For short outputs (<=10 lines), show all lines
+                if len(lines) <= 10 and len(clean_output) <= 500:
+                    return clean_output
+                # For longer outputs, show summary
+                elif len(lines) == 1:
+                    return clean_output[:60] + ("..." if len(clean_output) > 60 else "")
+                else:
+                    return f"Git output {len(lines)} lines"
+
+        # Handle run_shell tool
+        elif tool_name == "run_shell":
+            if not clean_output:
+                return "Command completed"
+            elif "error" in clean_output.lower() or "failed" in clean_output.lower():
+                first_line = clean_output.split("\n")[0][:60]
+                return f"Error: {first_line}"
+            else:
+                lines = clean_output.split("\n")
+                # For short outputs (<=5 lines), show all lines
+                if len(lines) <= 5 and len(clean_output) <= 200:
+                    return clean_output
+                # For longer outputs, show summary
+                elif len(lines) == 1:
+                    return clean_output[:60] + ("..." if len(clean_output) > 60 else "")
+                else:
+                    return f"Output {len(lines)} lines"
+
+        # Handle file operation tools
+        elif tool_name in ["write_file", "append_file"]:
+            if "updated" in clean_output.lower() or "written" in clean_output.lower():
+                return "File updated"
+            elif "created" in clean_output.lower():
+                return "File created"
+            else:
+                return clean_output[:60] + ("..." if len(clean_output) > 60 else "")
+
+        # Handle todo_write
+        elif tool_name == "todo_write":
+            if "Updated" in clean_output:
+                return clean_output
+            else:
+                return "Todos updated"
+
+        # Default case
+        else:
+            if len(clean_output) <= 80:
+                return clean_output
+            else:
+                # Show first line or first 60 chars
+                first_line = clean_output.split("\n")[0]
+                if len(first_line) <= 80:
+                    return first_line
+                else:
+                    return f"{first_line[:77]}..."
+
+    def _is_error_output(self, output: str) -> bool:
+        """Check if the output indicates an error."""
+        if not output:
+            return False
+
+        error_indicators = [
+            "error:",
+            "Error:",
+            "ERROR:",
+            "failed:",
+            "Failed:",
+            "FAILED:",
+            "exception:",
+            "Exception:",
+            "EXCEPTION:",
+            "traceback",
+            "Traceback",
+            "TRACEBACK",
+            "not found",
+            "Not found",
+            "NOT FOUND",
+            "permission denied",
+            "Permission denied",
+            "no such file",
+            "No such file",
+        ]
+
+        return any(indicator in output for indicator in error_indicators)
+
+    def _extract_diff_content(self, tool_name: str, output: str) -> List:
+        """Extract and format diff content for file updates."""
+        renderables = []
+
+        # Only show diffs for file editing tools
+        if tool_name not in ["Edit", "MultiEdit", "Write"]:
+            return renderables
+
+        # Look for diff-like content in the output
+        lines = output.split("\n")
+        diff_lines = []
+        in_diff = False
+
+        for line in lines:
+            # Simple diff detection
+            if line.strip().startswith(("+", "-", "@@")) and not in_diff:
+                in_diff = True
+                diff_lines.append(line)
+            elif in_diff and line.strip().startswith(("+", "-", " ", "@@")):
+                diff_lines.append(line)
+            elif in_diff and not line.strip():
+                diff_lines.append(line)
+            elif in_diff:
+                # End of diff section
+                break
+
+        # Format diff if found
+        if diff_lines:
+            renderables.append(Text())  # Add spacing
+            for line in diff_lines[:10]:  # Limit to 10 lines
+                diff_text = Text()
+                if line.startswith("+"):
+                    diff_text.append("    ", style="")
+                    diff_text.append(line, style="green")
+                elif line.startswith("-"):
+                    diff_text.append("    ", style="")
+                    diff_text.append(line, style="red")
+                elif line.startswith("@@"):
+                    diff_text.append("    ", style="")
+                    diff_text.append(line, style="cyan")
+                else:
+                    diff_text.append("    ", style="")
+                    diff_text.append(line, style="dim")
+                renderables.append(diff_text)
+
+            if len(diff_lines) > 10:
+                renderables.append(Text("    ...", style="dim"))
+
+        return renderables
+
+    def _format_tool_inputs_for_display(self, tool_name: str, inputs: Dict[str, Any]) -> str:
+        """Format tool inputs for display based on tool type."""
+        if not inputs:
+            return ""
+
+        # Special handling for Write tools - only show essential params
+        if tool_name in ["Write", "write_file"]:
+            formatted_parts = []
+            for key, value in inputs.items():
+                if key == "file_path":
+                    # Show just filename for paths
+                    if isinstance(value, str) and "/" in value:
+                        filename = value.split("/")[-1]
+                        formatted_parts.append(f"file_path={filename}")
+                    else:
+                        formatted_parts.append(f"file_path={value}")
+                elif key in ["mode", "encoding"] and len(formatted_parts) < 2:
+                    # Show some additional params but limit content length
+                    formatted_parts.append(f"{key}={value}")
+            return ", ".join(formatted_parts[:2])  # Max 2 params for write
+
+        # For all other tools - show all parameters
+        formatted_parts = []
+        for key, value in inputs.items():
+            if isinstance(value, str):
+                if key in ["file_path", "path"] and "/" in value:
+                    # Show just filename for paths
+                    filename = value.split("/")[-1]
+                    formatted_parts.append(f"{key}={filename}")
+                elif len(value) <= 100:
+                    # Show strings up to 100 chars
+                    formatted_parts.append(f"{key}={repr(value)}")
+                else:
+                    # Truncate long strings
+                    formatted_parts.append(f"{key}={repr(value[:97])}...")
+            elif isinstance(value, (int, float, bool)):
+                formatted_parts.append(f"{key}={value}")
+            elif isinstance(value, (list, dict)):
+                # Show JSON representation for structured data
+                try:
+                    json_str = json.dumps(value, ensure_ascii=False)
+                    if len(json_str) <= 100:
+                        formatted_parts.append(f"{key}={json_str}")
+                    else:
+                        formatted_parts.append(f"{key}={json_str[:97]}...")
+                except Exception:
+                    formatted_parts.append(f"{key}={str(value)}")
+            else:
+                formatted_parts.append(f"{key}={str(value)}")
+
+        return ", ".join(formatted_parts)

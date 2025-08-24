@@ -38,9 +38,27 @@ def glob_search(pattern: str, path: Optional[str] = None) -> str:
 
         # Use rglob for recursive search if pattern contains **
         if "**" in pattern:
-            matches = list(base_path.rglob(pattern.replace("**", "*")))
+            # For patterns like **/*, remove the leading **/
+            if pattern.startswith("**/"):
+                actual_pattern = pattern[3:]  # Remove "**/"
+            else:
+                actual_pattern = pattern
+            all_matches = base_path.rglob(actual_pattern)
         else:
-            matches = list(base_path.glob(pattern))
+            all_matches = base_path.glob(pattern)
+
+        # Filter out virtual environments and common ignore patterns
+        matches = []
+        for match in all_matches:
+            # Skip hidden directories and common ignore patterns
+            parts = match.parts
+            if any(part.startswith(".") and part not in {".github", ".vscode"} for part in parts):
+                continue
+            if any(
+                part in {"__pycache__", "node_modules", ".venv", "venv", ".git"} for part in parts
+            ):
+                continue
+            matches.append(match)
 
         # Sort by modification time (newest first)
         matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)

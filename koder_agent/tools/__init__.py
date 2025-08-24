@@ -32,8 +32,8 @@ tool_engine.register(SearchModel)(web_search)
 tool_engine.register(GlobModel)(glob_search)
 tool_engine.register(GrepModel)(grep_search)
 tool_engine.register(LSModel)(list_directory)
-tool_engine.register(TodoModel)(todo_read)
-tool_engine.register(TodoWriteModel)(todo_write)
+# TODO tools are already registered via @function_tool decorator
+# Removing duplicate registration to avoid naming conflicts
 tool_engine.register(WebFetchModel)(web_fetch)
 tool_engine.register(TaskDelegateModel)(task_delegate)
 tool_engine.register(GitModel)(git_command)

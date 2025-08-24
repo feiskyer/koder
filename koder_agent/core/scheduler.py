@@ -17,9 +17,8 @@ from rich.console import Group
 from rich.live import Live
 from rich.text import Text
 
-from ..agentic import ApprovalHooks, ToolApprovalError, create_dev_agent, get_display_hooks
+from ..agentic import ApprovalHooks, create_dev_agent, get_display_hooks
 from ..core.context import ContextManager
-from ..core.permissions import PermissionManager
 from ..core.streaming_display import StreamingDisplayManager
 from ..tools import get_all_tools
 from ..utils.terminal_theme import get_adaptive_console
@@ -33,13 +32,12 @@ class AgentScheduler:
     def __init__(self, session_id: str = "default", streaming: bool = False):
         self.semaphore = asyncio.Semaphore(10)
         self.context_manager = ContextManager(session_id)
-        self.permission_manager = PermissionManager()
         self.tools = get_all_tools()
         self.dev_agent = None  # Will be initialized in async method
         self.streaming = streaming
-        # Create approval hooks that wrap display hooks
+        # Create hooks that wrap display hooks (no permissions)
         display_hooks = get_display_hooks(streaming_mode=streaming)
-        self.hooks = ApprovalHooks(self.permission_manager, display_hooks)
+        self.hooks = ApprovalHooks(display_hooks)
         self._agent_initialized = False
         self._mcp_servers = []  # Track MCP servers for cleanup
 
@@ -123,10 +121,10 @@ class AgentScheduler:
                     print()  # Add space before response
                     console.print(response)
                     print()  # Add space after response
-            except ToolApprovalError as e:
-                # Handle tool denial gracefully
+            except Exception as e:
+                # Handle execution errors gracefully
                 response = (
-                    f"[red]Execution stopped: {str(e)}[/red]\n\nPlease provide new instructions."
+                    f"[red]Execution error: {str(e)}[/red]\n\nPlease provide new instructions."
                 )
                 console.print(response)
                 return response
@@ -273,17 +271,13 @@ class AgentScheduler:
                         console.print(f"[dim red]Event processing error: {e}[/dim red]")
                         continue
 
-            except ToolApprovalError as e:
-                # Handle tool denial in streaming mode
-                error_msg = f"Execution stopped: {str(e)}"
+            except Exception as e:
+                # Handle execution errors in streaming mode
+                error_msg = f"Execution error: {str(e)}"
                 console.print(f"[red]{error_msg}[/red]")
                 # Clear the display manager and return early
                 display_manager.finalize_text_sections()
                 return f"{error_msg}\n\nPlease provide new instructions."
-            except Exception as e:
-                # Handle streaming errors
-                console.print(f"[dim red]Streaming error: {e}[/dim red]")
-                # Continue to try to get some output
 
         # After Rich Live context ends, perform intelligent cleanup
         display_manager.finalize_text_sections()
@@ -312,12 +306,19 @@ class AgentScheduler:
                 except Exception:
                     pass  # Fallback to simple approach
 
-            # Strategy 2: Always show final text response, but avoid duplicate tool output
-            # Get the final text response separately to ensure it's always displayed
+            # Strategy 2: Always show final response with tools, but avoid duplicate tool output
+            # Get the final display content including tools
+            final_display_response = display_manager.get_final_display()
             final_text_response = display_manager.get_final_text()
 
-            if final_text_response and final_text_response.strip():
-                # Always show the final AI text response
+            # Show the complete display including tools if available, otherwise fallback to text only
+            if final_display_response and final_display_response.strip():
+                # Show the complete response including tool summaries
+                print()  # Add spacing
+                console.print(final_display_response)
+                print()  # Add spacing after
+            elif final_text_response and final_text_response.strip():
+                # Fallback to text-only response
                 print()  # Add spacing
                 console.print(final_text_response)
                 print()  # Add spacing after

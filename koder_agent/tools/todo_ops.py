@@ -36,23 +36,18 @@ def todo_read() -> str:
     result = []
     for i, todo in enumerate(_todos, 1):
         status = todo.get("status", "pending")
-        priority = todo.get("priority", "medium")
         content = todo.get("content", "")
-        todo_id = todo.get("id", str(i))
 
-        # Format with emojis for better readability
-        status_emoji = {
-            "pending": "⏳",
-            "in_progress": "🔄",
-            "completed": "✅",
-            "cancelled": "❌",
-        }.get(status, "❓")
-
-        priority_emoji = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(priority, "⚪")
-
-        result.append(
-            f"{i}. {status_emoji} [{priority_emoji} {priority}] {content} (id: {todo_id})"
-        )
+        # Format with improved visual hierarchy
+        if status == "completed":
+            # Completed tasks: strikethrough with checkmark
+            result.append(f"  [green]✓[/green] [dim strikethrough]{content}[/dim strikethrough]")
+        elif status == "in_progress":
+            # Current task: highlighted with arrow
+            result.append(f"  [yellow]▶[/yellow] [bold blue]{content}[/bold blue]")
+        else:
+            # Pending tasks: simple bullet
+            result.append(f"  [dim]□[/dim] {content}")
 
     return "\n".join(result)
 
