@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from rich.console import Console
 from rich.panel import Panel
 
 from .core.commands import slash_handler
@@ -15,8 +14,9 @@ from .core.context import ContextManager
 from .core.interactive import InteractivePrompt
 from .core.scheduler import AgentScheduler
 from .utils import default_session_local_ms, picker_arrows, setup_openai_client, sort_sessions_desc
+from .utils.terminal_theme import get_adaptive_console
 
-console = Console()
+console = get_adaptive_console()
 
 
 async def _prompt_select_session() -> Optional[str]:
@@ -32,6 +32,11 @@ async def _prompt_select_session() -> Optional[str]:
 
 
 async def load_context() -> str:
+    """Load context information from the project directory.
+
+    Returns:
+        str: The loaded context information.
+    """
     context_info = []
     current_dir = os.getcwd()
     context_info.append(f"Working directory: {current_dir}")
@@ -46,6 +51,11 @@ async def load_context() -> str:
 
 
 async def main():
+    """Run the Koder CLI.
+
+    Returns:
+        int: The exit code.
+    """
     try:
         setup_openai_client()
     except ValueError as e:
@@ -217,6 +227,7 @@ async def main():
 
 
 def run():
+    """Run the Koder CLI."""
     try:
         exit_code = asyncio.run(main())
         exit(exit_code)

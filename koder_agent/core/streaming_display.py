@@ -319,7 +319,18 @@ class StreamingDisplayManager:
                 # Create syntax highlighted code block
                 if code_lines:
                     code_content = "\n".join(code_lines)
-                    syntax = Syntax(code_content, language, theme="monokai", line_numbers=False)
+                    # Use adaptive theme based on terminal background
+                    from ..utils.terminal_theme import detect_terminal_theme
+
+                    theme = detect_terminal_theme()
+                    syntax_theme = "ansi_light" if theme == "light" else "ansi_dark"
+                    syntax = Syntax(
+                        code_content,
+                        language,
+                        theme=syntax_theme,
+                        line_numbers=False,
+                        background_color="default",
+                    )
                     renderables.append(syntax)
 
                 i += 1

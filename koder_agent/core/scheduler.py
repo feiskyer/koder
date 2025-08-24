@@ -13,7 +13,7 @@ from agents import (
 )
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_text_delta_event import ResponseTextDeltaEvent
-from rich.console import Console, Group
+from rich.console import Group
 from rich.live import Live
 from rich.text import Text
 
@@ -22,8 +22,9 @@ from ..core.context import ContextManager
 from ..core.permissions import PermissionManager
 from ..core.streaming_display import StreamingDisplayManager
 from ..tools import get_all_tools
+from ..utils.terminal_theme import get_adaptive_console
 
-console = Console()
+console = get_adaptive_console()
 
 
 class AgentScheduler:

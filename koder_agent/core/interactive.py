@@ -14,11 +14,11 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.shortcuts import PromptSession, confirm
-from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
-from rich.console import Console
 
-console = Console()
+from ..utils.terminal_theme import get_adaptive_console, get_adaptive_prompt_style
+
+console = get_adaptive_console()
 
 
 class DynamicCompletionsMenu(CompletionsMenu):
@@ -205,18 +205,8 @@ class InteractivePrompt:
             )
         )
 
-        # Minimal style for clean terminal look
-        style = Style.from_dict(
-            {
-                "frame.border": "#555555",  # Subtle gray border
-                "frame.title": "#888888",  # Muted title
-                "": "#ffffff",  # Normal white text for input
-                "completion-menu.completion": "#ffffff bg:#333333",  # Clean completion items
-                "completion-menu.completion.current": "#ffffff bg:#555555",  # Selected completion
-                "completion-menu.meta.completion": "#aaaaaa bg:#222222",  # Muted description
-                "completion-menu.meta.completion.current": "#ffffff bg:#444444",  # Selected desc
-            }
-        )
+        # Adaptive style that works with both light and dark terminals
+        style = get_adaptive_prompt_style()
 
         # Create application
         app = Application(
