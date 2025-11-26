@@ -170,6 +170,13 @@ def get_adaptive_prompt_style():
             "completion-menu.completion.current": "#000000 bg:#d0d0d0",  # Dark text on selected
             "completion-menu.meta.completion": "#666666 bg:#e8e8e8",  # Gray desc on light
             "completion-menu.meta.completion.current": "#000000 bg:#c0c0c0",  # Dark desc selected
+            # Status line styles
+            "status-label": "#666666",  # Gray labels
+            "status-value": "#333333",  # Dark values
+            "status-separator": "#999999",  # Light gray separators
+            "status-context-ok": "#228B22",  # Forest green for < 70%
+            "status-context-warn": "#FF8C00",  # Dark orange for 70-90%
+            "status-context-critical": "#DC143C",  # Crimson for > 90%
         }
     elif theme == "dark":
         # Dark theme: light text on dark background
@@ -181,6 +188,13 @@ def get_adaptive_prompt_style():
             "completion-menu.completion.current": "#ffffff bg:#555555",  # Light text on selected
             "completion-menu.meta.completion": "#aaaaaa bg:#222222",  # Gray desc on dark
             "completion-menu.meta.completion.current": "#ffffff bg:#444444",  # Light desc selected
+            # Status line styles
+            "status-label": "#888888",  # Gray labels
+            "status-value": "#cccccc",  # Light values
+            "status-separator": "#666666",  # Dark gray separators
+            "status-context-ok": "#32CD32",  # Lime green for < 70%
+            "status-context-warn": "#FFA500",  # Orange for 70-90%
+            "status-context-critical": "#FF6347",  # Tomato red for > 90%
         }
     else:
         # Auto/unknown theme: use system defaults where possible
@@ -192,6 +206,13 @@ def get_adaptive_prompt_style():
             "completion-menu.completion.current": "reverse",  # Just reverse colors
             "completion-menu.meta.completion": "",
             "completion-menu.meta.completion.current": "reverse",
+            # Status line styles (neutral colors)
+            "status-label": "#888888",
+            "status-value": "",  # Use terminal default
+            "status-separator": "#666666",
+            "status-context-ok": "#32CD32",  # Green
+            "status-context-warn": "#FFA500",  # Orange
+            "status-context-critical": "#FF6347",  # Red
         }
 
     return Style.from_dict(style_dict)

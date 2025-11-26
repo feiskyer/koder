@@ -20,7 +20,8 @@ from rich.text import Text
 from ..agentic import ApprovalHooks, create_dev_agent, get_display_hooks
 from ..core.context import ContextManager
 from ..core.streaming_display import StreamingDisplayManager
-from ..tools import get_all_tools
+from ..core.usage_tracker import UsageTracker
+from ..tools import BackgroundShellManager, get_all_tools
 from ..utils.terminal_theme import get_adaptive_console
 
 console = get_adaptive_console()
@@ -31,7 +32,7 @@ class AgentScheduler:
 
     def __init__(self, session_id: str = "default", streaming: bool = False):
         self.semaphore = asyncio.Semaphore(10)
-        self.context_manager = ContextManager(session_id)
+        self.context_manager = ContextManager(session_id=session_id)
         self.tools = get_all_tools()
         self.dev_agent = None  # Will be initialized in async method
         self.streaming = streaming
@@ -40,6 +41,8 @@ class AgentScheduler:
         self.hooks = ApprovalHooks(display_hooks)
         self._agent_initialized = False
         self._mcp_servers = []  # Track MCP servers for cleanup
+        self.usage_tracker = UsageTracker()  # Track token usage and cost
+        self._title_generation_task: asyncio.Task | None = None  # Async title generation
 
     def _has_content(self, content) -> bool:
         """Check if Rich or string content has any content."""
@@ -72,6 +75,15 @@ class AgentScheduler:
                 self._mcp_servers = list(self.dev_agent.mcp_servers)  # Create a copy
             self._agent_initialized = True
 
+    async def _generate_title_background(self, user_input: str) -> None:
+        """Background task to generate and save session title."""
+        try:
+            title = await self.context_manager.generate_title(user_input)
+            if title:
+                await self.context_manager.set_title(title)
+        except Exception:
+            pass  # Silent failure - best effort
+
     async def handle(self, user_input: str) -> str:
         """Handle user input and execute agent."""
         # Ensure agent is initialized with MCP servers
@@ -85,6 +97,16 @@ class AgentScheduler:
 
         # Load conversation history
         history = await self.context_manager.load()
+
+        # Trigger async title generation on first message (empty history)
+        if not history and self._title_generation_task is None:
+            # Extract actual user request (strip context prefix if present)
+            actual_request = user_input
+            if "User request:" in user_input:
+                actual_request = user_input.split("User request:")[-1].strip()
+            self._title_generation_task = asyncio.create_task(
+                self._generate_title_background(actual_request)
+            )
 
         console.print("[dim]thinking...[/dim]")
 
@@ -114,6 +136,9 @@ class AgentScheduler:
                         hooks=self.hooks,
                         max_turns=50,
                     )
+                    # Capture token usage from result
+                    self._capture_usage(result)
+
                     # Filter output for security
                     response = self._filter_output(result.final_output)
 
@@ -328,6 +353,9 @@ class AgentScheduler:
                 console.print(final_content)
                 print()  # Add spacing after
 
+        # Capture token usage from streaming result
+        self._capture_usage(result)
+
         # Get final text response for context saving
         final_response = display_manager.get_final_text()
         if not final_response:
@@ -377,9 +405,27 @@ class AgentScheduler:
         )
         return text
 
+    def _capture_usage(self, result) -> None:
+        """Capture token usage from a Runner result."""
+        try:
+            if hasattr(result, "context_wrapper") and hasattr(result.context_wrapper, "usage"):
+                usage = result.context_wrapper.usage
+                input_tokens = getattr(usage, "input_tokens", 0) or 0
+                output_tokens = getattr(usage, "output_tokens", 0) or 0
+                if input_tokens > 0 or output_tokens > 0:
+                    self.usage_tracker.record_usage(input_tokens, output_tokens)
+        except Exception:
+            # Silently ignore usage capture errors
+            pass
+
     async def cleanup(self):
         """Clean up resources, including MCP servers."""
         try:
+            # Cancel pending title generation task
+            if self._title_generation_task and not self._title_generation_task.done():
+                self._title_generation_task.cancel()
+                self._title_generation_task = None
+
             # Clean up MCP servers one by one to avoid task group issues
             if self._mcp_servers:
                 for server in self._mcp_servers:
@@ -402,6 +448,13 @@ class AgentScheduler:
                         )
 
                 self._mcp_servers.clear()
+
+            # Clean up background shells
+            for shell_id in list(BackgroundShellManager.get_available_ids()):
+                try:
+                    await BackgroundShellManager.terminate(shell_id)
+                except Exception:
+                    pass  # Best effort cleanup
 
             # Reset agent state to force re-initialization
             if self.dev_agent:

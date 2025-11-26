@@ -5,20 +5,32 @@ from typing import List
 from agents import Tool
 
 from .engine import ToolEngine
-from .file_ops import (
+from .file import (
+    FileEditModel,
     FileReadModel,
     FileWriteModel,
     LSModel,
     append_file,
+    edit_file,
     list_directory,
     read_file,
     write_file,
 )
-from .search_ops import GlobModel, GrepModel, glob_search, grep_search
-from .shell_ops import GitModel, ShellModel, git_command, run_shell
-from .task_ops import TaskDelegateModel, TaskModel, task_delegate
-from .todo_ops import TodoModel, TodoWriteModel, todo_read, todo_write
-from .web_ops import SearchModel, WebFetchModel, web_fetch, web_search
+from .search import GlobModel, GrepModel, glob_search, grep_search
+from .shell import (
+    BackgroundShellManager,
+    GitModel,
+    ShellKillModel,
+    ShellModel,
+    ShellOutputModel,
+    git_command,
+    run_shell,
+    shell_kill,
+    shell_output,
+)
+from .task import TaskDelegateModel, TaskModel, task_delegate
+from .todo import TodoModel, TodoWriteModel, todo_read, todo_write
+from .web import SearchModel, WebFetchModel, web_fetch, web_search
 
 # Create the global tool engine
 tool_engine = ToolEngine()
@@ -27,7 +39,10 @@ tool_engine = ToolEngine()
 tool_engine.register(FileReadModel)(read_file)
 tool_engine.register(FileWriteModel)(write_file)
 tool_engine.register(FileWriteModel)(append_file)
+tool_engine.register(FileEditModel)(edit_file)
 tool_engine.register(ShellModel)(run_shell)
+tool_engine.register(ShellOutputModel)(shell_output)
+tool_engine.register(ShellKillModel)(shell_kill)
 tool_engine.register(SearchModel)(web_search)
 tool_engine.register(GlobModel)(glob_search)
 tool_engine.register(GrepModel)(grep_search)
@@ -46,7 +61,10 @@ def get_all_tools() -> List[Tool]:
         read_file,
         write_file,
         append_file,
+        edit_file,
         run_shell,
+        shell_output,
+        shell_kill,
         git_command,
         web_search,
         web_fetch,
@@ -65,11 +83,16 @@ def get_all_tools() -> List[Tool]:
 __all__ = [
     "tool_engine",
     "get_all_tools",
+    # Manager for cleanup
+    "BackgroundShellManager",
     # Models
+    "FileEditModel",
     "FileReadModel",
     "FileWriteModel",
     "LSModel",
     "ShellModel",
+    "ShellOutputModel",
+    "ShellKillModel",
     "GitModel",
     "SearchModel",
     "WebFetchModel",
@@ -83,7 +106,10 @@ __all__ = [
     "read_file",
     "write_file",
     "append_file",
+    "edit_file",
     "run_shell",
+    "shell_output",
+    "shell_kill",
     "git_command",
     "web_search",
     "web_fetch",

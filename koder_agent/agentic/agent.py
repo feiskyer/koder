@@ -3,11 +3,14 @@
 import logging
 import uuid
 
-from agents import Agent
+from agents import Agent, ModelSettings
+from openai.types.shared import Reasoning
 from rich.console import Console
 
+from ..config import get_config
 from ..mcp import load_mcp_servers
 from ..utils.client import get_model_name
+from ..utils.model_info import get_maximum_output_tokens
 from ..utils.prompts import KODER_SYSTEM_PROMPT
 
 console = Console()
@@ -18,7 +21,13 @@ async def create_dev_agent(tools) -> Agent:
     """Create the main development agent with MCP servers."""
     # Get the appropriate model based on environment
     model = get_model_name()
+    config = get_config()
     mcp_servers = await load_mcp_servers()
+
+    # Build model_settings with reasoning if configured
+    model_settings = ModelSettings(max_tokens=get_maximum_output_tokens(model))
+    if config.model.reasoning_effort is not None:
+        model_settings.reasoning = Reasoning(effort=config.model.reasoning_effort)
 
     dev_agent = Agent(
         name="Koder",
@@ -26,6 +35,7 @@ async def create_dev_agent(tools) -> Agent:
         instructions=KODER_SYSTEM_PROMPT,
         tools=tools,
         mcp_servers=mcp_servers,
+        model_settings=model_settings,
     )
 
     if "github_copilot" in model:

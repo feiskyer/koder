@@ -5,60 +5,62 @@ from urllib.parse import urlparse
 import requests
 from agents import function_tool
 from bs4 import BeautifulSoup
+from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 from pydantic import BaseModel
 
 
 class SearchModel(BaseModel):
+    """Model for web search input validation."""
+
     query: str
     max_results: int = 3
 
 
 class WebFetchModel(BaseModel):
+    """Model for web fetch input validation."""
+
     url: str
     prompt: str
 
 
 @function_tool
 def web_search(query: str, max_results: int = 3) -> str:
-    """Search the web using DuckDuckGo."""
+    """Search the web using DuckDuckGo.
+
+    Args:
+        query: The search query (1-400 characters)
+        max_results: Maximum number of results to return (1-10, default 3)
+
+    Returns:
+        Formatted search results or error message
+    """
     try:
         # Validate query
-        if not query or len(query) > 200:
-            return "Invalid query: must be between 1 and 200 characters"
+        if not query:
+            return "Invalid query: query cannot be empty"
+        if len(query) > 400:
+            return "Invalid query: query must be 400 characters or less"
 
-        max_results = min(max_results, 10)  # Cap at 10 results
+        max_results = max(1, min(max_results, 10))  # Clamp between 1 and 10
 
-        response = requests.get(
-            "https://duckduckgo.com/html/",
-            params={"q": query},
-            timeout=10,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-        )
+        ddgs = DDGS()
+        results_list = list(ddgs.text(query, max_results=max_results))
 
-        if response.status_code != 200:
-            return f"Search failed with status code: {response.status_code}"
-
-        soup = BeautifulSoup(response.text, "html.parser")
+        if not results_list:
+            return "No results found"
 
         results = []
-        for result in soup.select(".result")[:max_results]:
-            title_elem = result.select_one(".result__title")
-            snippet_elem = result.select_one(".result__snippet")
-            link_elem = result.select_one(".result__url")
+        for r in results_list:
+            title = r.get("title", "No title")
+            body = r.get("body", "No description")
+            href = r.get("href", "")
+            results.append(f"**{title}**\n{body}\n{href}")
 
-            if title_elem and snippet_elem:
-                title = title_elem.get_text(strip=True)
-                snippet = snippet_elem.get_text(" ", strip=True)
-                link = link_elem.get_text(strip=True) if link_elem else ""
+        return "\n\n".join(results)
 
-                results.append(f"**{title}**\n{snippet}\n{link}")
-
-        return "\n\n".join(results) if results else "No results found"
-
-    except requests.Timeout:
-        return "Search request timed out"
-    except requests.RequestException as e:
-        return f"Search request failed: {str(e)}"
+    except DDGSException as e:
+        return f"Search failed: {str(e)}"
     except Exception as e:
         return f"Search error: {str(e)}"
 

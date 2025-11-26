@@ -1,6 +1,6 @@
 """Interactive prompt with slash command completion using prompt_toolkit."""
 
-from typing import Dict
+from typing import TYPE_CHECKING, Dict, Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -13,10 +13,13 @@ from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput
-from prompt_toolkit.shortcuts import PromptSession, confirm
+from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.widgets import Frame
 
 from ..utils.terminal_theme import get_adaptive_console, get_adaptive_prompt_style
+
+if TYPE_CHECKING:
+    from .usage_tracker import UsageTracker
 
 console = get_adaptive_console()
 
@@ -83,19 +86,36 @@ class SlashCommandCompleter(Completer):
 
 
 class InteractivePrompt:
-    """Enhanced prompt with slash command support."""
+    """Enhanced prompt with slash command support and status line."""
 
-    def __init__(self, commands: Dict[str, str]):
-        """Initialize with available slash commands."""
+    def __init__(
+        self,
+        commands: Dict[str, str],
+        usage_tracker: Optional["UsageTracker"] = None,
+        session_id: str = "",
+    ):
+        """
+        Initialize with available slash commands and optional status line.
+
+        Args:
+            commands: Dict of command name -> description
+            usage_tracker: Optional UsageTracker for token/cost display
+            session_id: Current session identifier
+        """
         self.commands = commands
         self.completer = SlashCommandCompleter(commands)
-        self.session = PromptSession(
-            completer=self.completer,
-            complete_while_typing=True,
-            mouse_support=False,
-        )
 
-    async def get_input(self, prompt_text: str = "User") -> str:
+        # Status line (optional)
+        self.status_line = None
+        if usage_tracker is not None:
+            from .status_line import StatusLine
+
+            self.status_line = StatusLine(
+                usage_tracker=usage_tracker,
+                session_id=session_id,
+            )
+
+    async def get_input(self) -> str:
         """Get user input with Rich panel display and prompt_toolkit completion."""
         # Create buffer
         buffer = Buffer(
@@ -120,7 +140,7 @@ class InteractivePrompt:
         # Create simple frame without heavy styling
         framed_input = Frame(
             body=input_window,
-            title=f"{prompt_text} (Ctrl+C to exit)",
+            title="⚡ Koder",
         )
 
         # Key bindings
@@ -195,15 +215,15 @@ class InteractivePrompt:
                 # Cancel completion if we're no longer in slash mode
                 b.cancel_completion()
 
-        # Create layout with completion menu
-        layout = Layout(
-            HSplit(
-                [
-                    framed_input,
-                    DynamicCompletionsMenu(scroll_offset=1),
-                ]
-            )
-        )
+        # Create layout with completion menu and optional status line
+        components = [
+            framed_input,
+            DynamicCompletionsMenu(scroll_offset=1),
+        ]
+        if self.status_line:
+            components.append(self.status_line.create_window())
+
+        layout = Layout(HSplit(components))
 
         # Adaptive style that works with both light and dark terminals
         style = get_adaptive_prompt_style()
@@ -235,3 +255,8 @@ class InteractivePrompt:
         for command, description in self.commands.items():
             console.print(f"  [cyan]/{command}[/cyan] - {description}")
         console.print()
+
+    def update_session(self, session_id: str) -> None:
+        """Update the session ID displayed in the status line."""
+        if self.status_line:
+            self.status_line.update_session(session_id)

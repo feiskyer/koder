@@ -289,10 +289,9 @@ class StreamingDisplayManager:
             elif section.type == OutputType.TOOL_OUTPUT:
                 if section.tool_tracker and section.content:
                     # Generate smart summary based on tool and content
-                    summary = self._generate_smart_summary(
-                        section.tool_tracker.tool_name, section.content
-                    )
-                    is_error = self._is_error_output(section.content)
+                    tool_name = section.tool_tracker.tool_name
+                    summary = self._generate_smart_summary(tool_name, section.content)
+                    is_error = self._is_error_output(section.content, tool_name)
 
                     # Determine style based on success/failure
                     if is_error:
@@ -605,6 +604,10 @@ class StreamingDisplayManager:
 
         # Handle read_file tool
         if tool_name == "read_file":
+            read_error = self._detect_read_file_error(clean_output)
+            if read_error:
+                return read_error
+
             lines = clean_output.count("\n") + 1 if clean_output else 0
             return f"Read {lines} lines"
 
@@ -654,7 +657,9 @@ class StreamingDisplayManager:
         elif tool_name == "git_command":
             if not clean_output:
                 return "Git command completed"
-            elif "error" in clean_output.lower() or "failed" in clean_output.lower():
+            # Check for actual git errors using specific patterns
+            # rather than just scanning for "error" in output content
+            elif self._is_git_error(clean_output):
                 first_line = clean_output.split("\n")[0][:60]
                 return f"Error: {first_line}"
             else:
@@ -672,9 +677,20 @@ class StreamingDisplayManager:
         elif tool_name == "run_shell":
             if not clean_output:
                 return "Command completed"
-            elif "error" in clean_output.lower() or "failed" in clean_output.lower():
-                first_line = clean_output.split("\n")[0][:60]
-                return f"Error: {first_line}"
+            # Check for actual shell errors using exit code/stderr markers
+            # rather than just scanning for "error" in output content
+            elif self._is_shell_error(clean_output):
+                # Extract error message properly
+                if "[stderr]:" in clean_output:
+                    stderr_start = clean_output.index("[stderr]:")
+                    stderr_content = clean_output[stderr_start + 9 :].split("\n")[0].strip()
+                    return f"Error: {stderr_content[:60]}"
+                elif "[exit code]:" in clean_output:
+                    first_line = clean_output.split("\n")[0][:60]
+                    return f"Error: {first_line}"
+                else:
+                    first_line = clean_output.split("\n")[0][:60]
+                    return f"Error: {first_line}"
             else:
                 lines = clean_output.split("\n")
                 # For short outputs (<=5 lines), show all lines
@@ -714,10 +730,46 @@ class StreamingDisplayManager:
                 else:
                     return f"{first_line[:77]}..."
 
-    def _is_error_output(self, output: str) -> bool:
+    def _detect_read_file_error(self, output: str) -> Optional[str]:
+        """Return the read_file error message if one exists."""
+
+        stripped = output.strip()
+        if not stripped:
+            return None
+
+        lowered = stripped.lower()
+
+        error_prefixes = (
+            "file not found",
+            "file too large",
+            "error reading",
+            "error checking",
+        )
+
+        if lowered.startswith(error_prefixes):
+            return stripped
+
+        if lowered.startswith("[errno"):
+            return stripped
+
+        return None
+
+    def _is_error_output(self, output: str, tool_name: str = "") -> bool:
         """Check if the output indicates an error."""
         if not output:
             return False
+
+        if tool_name == "read_file":
+            return self._detect_read_file_error(output) is not None
+
+        # Use specific shell error detection to avoid false positives
+        # from file content containing "error"
+        if tool_name == "run_shell":
+            return self._is_shell_error(output)
+
+        # Use specific git error detection
+        if tool_name == "git_command":
+            return self._is_git_error(output)
 
         error_indicators = [
             "error:",
@@ -742,6 +794,107 @@ class StreamingDisplayManager:
         ]
 
         return any(indicator in output for indicator in error_indicators)
+
+    def _is_shell_error(self, output: str) -> bool:
+        """Check if shell output indicates an actual command error.
+
+        This checks for specific error markers from the shell tool (exit code, stderr)
+        rather than just scanning for 'error' in the output, which could match
+        legitimate file content.
+        """
+        if not output:
+            return False
+
+        # Check for exit code marker (added by shell.py when returncode != 0)
+        if "[exit code]:" in output:
+            return True
+
+        # Check for stderr marker with actual error content
+        if "[stderr]:" in output:
+            stderr_start = output.index("[stderr]:")
+            stderr_content = output[stderr_start + 9 :].strip()
+            # Only treat as error if stderr contains error-like content
+            # (not just warnings or info messages)
+            error_patterns = [
+                "error:",
+                "Error:",
+                "ERROR:",
+                "command not found",
+                "No such file or directory",
+                "Permission denied",
+                "cannot",
+                "failed",
+                "Failed",
+            ]
+            return any(pattern in stderr_content for pattern in error_patterns)
+
+        # Check for direct error messages returned by the shell tool itself
+        # (timeouts, execution failures, or security guard rejections)
+        first_line = output.split("\n")[0].strip()
+        first_line_lower = first_line.lower()
+        direct_error_prefixes = (
+            "command timed out after",
+            "command failed:",
+            "error executing command:",
+            "forbidden command pattern detected",
+            "dangerous command pattern detected",
+        )
+        if first_line_lower.startswith(direct_error_prefixes):
+            return True
+
+        # Check for common shell error patterns at the start of output
+        shell_error_patterns = [
+            "command not found",
+            "no such file or directory",
+            "permission denied",
+            "cannot access",
+            "cannot find",
+            "bash:",
+            "sh:",
+            "zsh:",
+        ]
+        return any(pattern in first_line_lower for pattern in shell_error_patterns)
+
+    def _is_git_error(self, output: str) -> bool:
+        """Check if git output indicates an actual command error.
+
+        Git commands can return file content (like git show, git diff) that might
+        contain the word 'error'. This checks for specific git error patterns.
+        """
+        if not output:
+            return False
+
+        # Examine only the first line so that git commands that return file
+        # contents (show, diff, etc.) aren't misclassified based on their body.
+        first_line = output.split("\n")[0].strip()
+        first_lower = first_line.lower()
+
+        git_error_prefixes = (
+            "fatal:",
+            "error:",
+            "git command failed",
+            "git command failed with exit code",
+            "git command timed out",
+            "error executing git command",
+            "not a git repository",
+            "cannot",
+            "could not",
+            "unable to",
+            "does not exist",
+            "no such",
+            "permission denied",
+            "forbidden command pattern detected",
+            "dangerous command pattern detected",
+        )
+
+        if first_lower.startswith(git_error_prefixes):
+            return True
+
+        # Handle common git CLI phrasing for invalid subcommands
+        if "not a git command" in first_lower:
+            return True
+
+        return False
 
     def _extract_diff_content(self, tool_name: str, output: str) -> List:
         """Extract and format diff content for file updates."""

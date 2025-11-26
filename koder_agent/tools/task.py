@@ -4,9 +4,11 @@ import asyncio
 import uuid
 from typing import List, Union
 
-from agents import Agent, RunConfig, Runner, function_tool
+from agents import Agent, ModelSettings, RunConfig, Runner, function_tool
+from openai.types.shared import Reasoning
 from pydantic import BaseModel
 
+from ..config import get_config
 from ..mcp import load_mcp_servers
 from ..utils import get_model_name
 
@@ -33,6 +35,7 @@ async def task_delegate(tasks: Union[List[TaskModel], TaskModel]) -> str:
         else:
             task_list = tasks
 
+        config = get_config()
         mcp_servers = await load_mcp_servers()
 
         # Import tools dynamically to avoid circular imports
@@ -45,6 +48,12 @@ async def task_delegate(tasks: Union[List[TaskModel], TaskModel]) -> str:
                 tools = get_all_tools()
                 # remove task_delegate tool
                 tools = [tool for tool in tools if tool.name != "task_delegate"]
+
+                # Build model_settings with reasoning if configured
+                model_settings = ModelSettings()
+                if config.model.reasoning_effort is not None:
+                    model_settings.reasoning = Reasoning(effort=config.model.reasoning_effort)
+
                 # Create agent for the delegated task
                 delegated_agent = Agent(
                     name=f"Delegated Agent - {task.description[:30]}...",
@@ -56,6 +65,7 @@ Be concise and focused on the specific task at hand.
 Return your findings or results directly without unnecessary explanation.""",
                     tools=tools,
                     mcp_servers=mcp_servers,
+                    model_settings=model_settings,
                 )
                 if "github_copilot" in get_model_name():
                     delegated_agent.model_settings.extra_headers = {

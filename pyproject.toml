@@ -1,6 +1,6 @@
 [project]
 name = "koder"
-version = "0.3.3"
+version = "0.4.0"
 description = "An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support."
 authors = [{ name = "Pengfei Ni" }]
 readme = "README.md"
@@ -19,6 +19,7 @@ dependencies = [
     "tiktoken>=0.12.0",
     "requests>=2.32.5",
     "beautifulsoup4>=4.14.2",
+    "ddgs>=8.0.1",
     "aiosqlite>=0.21.0",
     "pydantic>=2.12.4",
     "httpx[socks]>=0.28.1",
@@ -36,6 +37,7 @@ dependencies = [
     "cryptography>=46.0.3",
     "pynacl>=1.6.1",
     "websockets>=15.0.1",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
@@ -77,6 +79,15 @@ warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
 exclude = [".venv", "build", "dist"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # Ignore asyncio subprocess transport cleanup warnings - harmless race condition
+    # when event loop closes before GC runs on subprocess transports
+    "ignore:Exception ignored in.*BaseSubprocessTransport.__del__:pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["koder_agent"]

@@ -50,33 +50,117 @@ koder -s my-project "Help me implement a new feature"
 
 # Use an explicit session flag
 koder -s my-project "Your prompt here"
+
+# Use high reasoning effort for complex problems (OpenAI reasoning models)
+koder --reasoning high "Solve this complex algorithm problem"
+
+# Use low reasoning for simple tasks
+koder --reasoning low "Add a print statement"
 ```
 
 ## 🤖 Configuration
 
-### Environment Variables
+Koder supports flexible configuration through three mechanisms (in order of priority):
 
-Koder automatically detects your AI provider based on available environment variables. The `KODER_MODEL` environment variable controls which model to use:
+1. **CLI Arguments** - Highest priority, for runtime overrides
+2. **Environment Variables** - For secrets and runtime configuration
+3. **Config File** - For persistent defaults (`~/.koder/config.yaml`)
+
+### Quick Setup
 
 ```bash
-# OpenAI models
-export KODER_MODEL="gpt-4.1"
+# Minimal setup - just set your API key and go
+export OPENAI_API_KEY="your-api-key"
 koder
 
-# Claude models (via LiteLLM)
+# Or use a different provider
+export ANTHROPIC_API_KEY="your-api-key"
 export KODER_MODEL="claude-opus-4-20250514"
-export ANTHROPIC_API_KEY=your-api-key
-koder
-
-# Google Gemini models (via LiteLLM)
-export KODER_MODEL="gemini/gemini-2.5-pro"
-export GOOGLE_API_KEY=your-api-key
-koder
-
-# Github Copilot (via LiteLLM)
-export KODER_MODEL="github_copilot/claude-sonnet-4"
 koder
 ```
+
+### Config File
+
+Koder uses a YAML config file at `~/.koder/config.yaml` for persistent settings.
+
+#### Config CLI Commands
+
+```bash
+# Initialize config file with defaults
+koder config init
+
+# Show current configuration
+koder config show
+
+# Show config file path
+koder config path
+
+# Open config file in editor (respects $EDITOR)
+koder config edit
+
+# Set specific values (supports dot notation)
+koder config set model.name gpt-4o
+koder config set model.provider anthropic
+koder config set cli.stream false
+```
+
+#### Config File Format
+
+```yaml
+# ~/.koder/config.yaml
+
+# Model configuration
+model:
+  name: "gpt-4.1"              # Model name (default: gpt-4.1)
+  provider: "openai"           # Provider name (default: openai)
+  api_key: null                # API key (prefer env vars for security)
+  base_url: null               # Custom API endpoint (optional)
+
+  # Azure-specific settings
+  azure_api_version: null      # e.g., "2025-04-01-preview"
+
+  # Vertex AI-specific settings
+  vertex_ai_location: null     # e.g., "us-central1"
+  vertex_ai_credentials_path: null  # Path to service account JSON
+
+  # Reasoning effort for OpenAI reasoning models (o1, o3, gpt-5.1, etc.)
+  reasoning_effort: "medium"   # none, minimal, low, medium, high, or null
+
+# CLI defaults
+cli:
+  session: null                # Default session name (auto-generated if null)
+  stream: true                 # Enable streaming output (default: true)
+
+# MCP servers for extended functionality
+mcp_servers: []
+```
+
+### Environment Variables
+
+#### Core Variables
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `KODER_MODEL` | Model selection (highest priority) | `gpt-4o`, `claude-opus-4-20250514` |
+| `KODER_REASONING_EFFORT` | Reasoning effort for reasoning models | `medium`, `high`, `low`, `null` |
+| `EDITOR` | Editor for `koder config edit` | `vim`, `code` |
+
+#### Provider API Keys
+
+| Provider | API Key Variable | Additional Variables |
+|----------|------------------|---------------------|
+| OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| Anthropic | `ANTHROPIC_API_KEY` | - |
+| Google/Gemini | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | - |
+| Azure | `AZURE_API_KEY` | `AZURE_API_BASE`, `AZURE_API_VERSION` |
+| Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` | `VERTEXAI_LOCATION` |
+| GitHub Copilot | `GITHUB_TOKEN` | - |
+| Groq | `GROQ_API_KEY` | - |
+| Together AI | `TOGETHERAI_API_KEY` | - |
+| OpenRouter | `OPENROUTER_API_KEY` | - |
+| Mistral | `MISTRAL_API_KEY` | - |
+| Cohere | `COHERE_API_KEY` | - |
+| Bedrock | `AWS_ACCESS_KEY_ID` | `AWS_SECRET_ACCESS_KEY` |
 
 ### Supported Providers
 
@@ -85,12 +169,10 @@ koder
 
 ```bash
 export OPENAI_API_KEY=your-api-key
+export KODER_MODEL="gpt-4o"  # Optional, default: gpt-4.1
 
-# Optional: Use custom endpoint
-export OPENAI_API_BASE=https://your-endpoint.com
-
-# Optional: Specify model (default: gpt-4.1)
-export KODER_MODEL="gpt-4o"
+# Optional: Custom endpoint
+export OPENAI_BASE_URL=https://your-endpoint.com/v1
 
 koder
 ```
@@ -101,8 +183,8 @@ koder
 <summary><b>Anthropic</b></summary>
 
 ```bash
-export KODER_MODEL="claude-opus-4-20250514"
 export ANTHROPIC_API_KEY=your-api-key
+export KODER_MODEL="claude-opus-4-20250514"
 koder
 ```
 
@@ -112,8 +194,8 @@ koder
 <summary><b>Google Gemini</b></summary>
 
 ```bash
-export KODER_MODEL="gemini/gemini-2.5-pro"
 export GOOGLE_API_KEY=your-api-key
+export KODER_MODEL="gemini/gemini-2.5-pro"
 koder
 ```
 
@@ -135,35 +217,225 @@ On first run you will see a device code in the terminal. Visit <https://github.c
 <summary><b>Azure OpenAI</b></summary>
 
 ```bash
-export KODER_MODEL=azure/gpt-5
 export AZURE_API_KEY="your-azure-api-key"
-export ZURE_API_BASE="https://your-resource.openai.azure.com"
+export AZURE_API_BASE="https://your-resource.openai.azure.com"
 export AZURE_API_VERSION="2025-04-01-preview"
+export KODER_MODEL="azure/gpt-4"
+koder
+```
+
+Or configure in `~/.koder/config.yaml`:
+
+```yaml
+model:
+  name: "gpt-4"
+  provider: "azure"
+  azure_api_version: "2025-04-01-preview"
+```
+
+</details>
+
+<details>
+<summary><b>Google Vertex AI</b></summary>
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account.json"
+export VERTEXAI_LOCATION="us-central1"
+export KODER_MODEL="vertex_ai/claude-sonnet-4@20250514"
+koder
+```
+
+Or configure in `~/.koder/config.yaml`:
+
+```yaml
+model:
+  name: "claude-sonnet-4@20250514"
+  provider: "vertex_ai"
+  vertex_ai_location: "us-central1"
+  vertex_ai_credentials_path: "path/to/service-account.json"
+```
+
+</details>
+
+<details>
+<summary><b>Other Providers (100+ via LiteLLM)</b></summary>
+
+[LiteLLM](https://docs.litellm.ai/docs/providers) supports 100+ providers. Use the format `provider/model`:
+
+```bash
+# Groq
+export GROQ_API_KEY=your-key
+export KODER_MODEL="groq/llama-3.3-70b-versatile"
+
+# Together AI
+export TOGETHERAI_API_KEY=your-key
+export KODER_MODEL="together_ai/meta-llama/Llama-3-70b-chat-hf"
+
+# OpenRouter
+export OPENROUTER_API_KEY=your-key
+export KODER_MODEL="openrouter/anthropic/claude-3-opus"
+
+# Custom OpenAI-compatible endpoints
+export OPENAI_API_KEY="your-key"
+export OPENAI_BASE_URL="https://your-custom-endpoint.com/v1"
+export KODER_MODEL="openai/your-model-name"
+
+koder
+```
+
+</details>
+
+### MCP Server Configuration
+
+Model Context Protocol (MCP) servers extend Koder's capabilities with additional tools.
+
+#### MCP CLI Commands
+
+```bash
+# Add an MCP server (stdio transport)
+koder mcp add myserver "python -m my_mcp_server" --transport stdio
+
+# Add with environment variables
+koder mcp add myserver "python -m server" -e API_KEY=xxx -e DEBUG=true
+
+# Add HTTP/SSE server
+koder mcp add webserver --transport http --url http://localhost:8000
+
+# List all MCP servers
+koder mcp list
+
+# Get server details
+koder mcp get myserver
+
+# Remove a server
+koder mcp remove myserver
+```
+
+#### MCP Config Format
+
+```yaml
+# In ~/.koder/config.yaml
+
+mcp_servers:
+  # stdio transport (runs a local command)
+  - name: "filesystem"
+    transport_type: "stdio"
+    command: "python"
+    args: ["-m", "mcp.server.filesystem"]
+    env_vars:
+      ROOT_PATH: "/home/user/projects"
+    cache_tools_list: true
+    allowed_tools:          # Optional: whitelist specific tools
+      - "read_file"
+      - "write_file"
+
+  # HTTP transport (connects to remote server)
+  - name: "web-tools"
+    transport_type: "http"
+    url: "http://localhost:8000"
+    headers:
+      Authorization: "Bearer token123"
+
+  # SSE transport (server-sent events)
+  - name: "streaming-server"
+    transport_type: "sse"
+    url: "http://localhost:9000/sse"
+```
+
+### Example Configurations
+
+<details>
+<summary><b>Minimal (OpenAI)</b></summary>
+
+```yaml
+# ~/.koder/config.yaml
+model:
+  name: "gpt-4o"
+  provider: "openai"
+```
+
+```bash
+export OPENAI_API_KEY="sk-..."
 koder
 ```
 
 </details>
 
 <details>
-<summary><b>Other AI providers (via LiteLLM)</b></summary>
+<summary><b>Enterprise Azure Setup</b></summary>
 
-[LiteLLM](https://docs.litellm.ai/docs/providers) supports 100+ providers including Anthropic, Google, Cohere, Hugging Face, and more:
+```yaml
+# ~/.koder/config.yaml
+model:
+  name: "gpt-4"
+  provider: "azure"
+  azure_api_version: "2025-04-01-preview"
+
+cli:
+  session: "enterprise-project"
+  stream: true
+
+mcp_servers:
+  - name: "company-tools"
+    transport_type: "http"
+    url: "https://internal-mcp.company.com"
+    headers:
+      X-API-Key: "${COMPANY_API_KEY}"
+```
 
 ```bash
-# Google Vertex AI
-export KODER_MODEL="vertex_ai/claude-sonnet-4@20250514"
-export GOOGLE_APPLICATION_CREDENTIALS="your-sa-path.json"
-export VERTEXAI_LOCATION="<your-region>"
-koder
-
-# Custom OpenAI-compatible endpoints
-export KODER_MODEL="openai/<your-model-name>"
-export OPENAI_API_KEY="your-key"
-export OPENAI_BASE_URL="https://your-custom-endpoint.com/v1"
+export AZURE_API_KEY="..."
+export AZURE_API_BASE="https://your-resource.openai.azure.com"
 koder
 ```
 
 </details>
+
+<details>
+<summary><b>Multi-Provider Development</b></summary>
+
+```yaml
+# ~/.koder/config.yaml - set a default
+model:
+  name: "gpt-4o"
+  provider: "openai"
+```
+
+```bash
+# Override at runtime with KODER_MODEL
+export OPENAI_API_KEY="..."
+export ANTHROPIC_API_KEY="..."
+
+# Use default (OpenAI)
+koder
+
+# Switch to Claude for specific tasks
+KODER_MODEL="claude-opus-4-20250514" koder "complex reasoning task"
+```
+
+</details>
+
+### Configuration Priority
+
+When the same setting is defined in multiple places, the priority is:
+
+```
+CLI Arguments  >  Environment Variables  >  Config File  >  Defaults
+```
+
+**Example:**
+
+```yaml
+# ~/.koder/config.yaml
+model:
+  name: "gpt-4o"
+```
+
+```bash
+# Environment variable overrides config file
+export KODER_MODEL="claude-opus-4-20250514"
+koder  # Uses claude-opus-4-20250514
+```
 
 ## 🛠️ Development
 

@@ -91,6 +91,20 @@ class StatusCommand(SlashCommand):
 
     async def execute(self, scheduler, *_args) -> str:
         """Execute the /status command."""
+        from ..utils.sessions import parse_session_dt
+
+        # Wait for any pending title generation to complete
+        if (
+            hasattr(scheduler, "_title_generation_task")
+            and scheduler._title_generation_task
+            and not scheduler._title_generation_task.done()
+        ):
+            try:
+                await scheduler._title_generation_task
+            except Exception:
+                pass
+            scheduler._title_generation_task = None
+
         # Get current model
         model = get_model_name()
 
@@ -98,8 +112,12 @@ class StatusCommand(SlashCommand):
         session_id = scheduler.context_manager.session_id
         streaming = scheduler.streaming
 
-        # Get available sessions
-        sessions = await scheduler.context_manager.list_sessions()
+        # Get session title for current session
+        session_title = await scheduler.context_manager.get_title()
+        session_display = session_title or session_id
+
+        # Get available sessions with titles
+        sessions_with_titles = await scheduler.context_manager.list_sessions_with_titles()
 
         # Get tools count
         tools = get_all_tools()
@@ -111,20 +129,33 @@ class StatusCommand(SlashCommand):
         table.add_column("Value", style="green")
 
         table.add_row("Model", model)
-        table.add_row("Current Session", session_id)
+        table.add_row("Current Session", session_display)
         table.add_row("Streaming Mode", "✅ Enabled" if streaming else "❌ Disabled")
         table.add_row("Available Tools", str(tool_count))
-        table.add_row("Total Sessions", str(len(sessions)))
+        table.add_row("Total Sessions", str(len(sessions_with_titles)))
         table.add_row("Working Directory", os.getcwd())
 
-        if sessions:
+        if sessions_with_titles:
+            # Sort by datetime descending
+            sessions_with_titles.sort(
+                key=lambda x: (parse_session_dt(x[0])[0], parse_session_dt(x[0])[1] or None),
+                reverse=True,
+            )
             table.add_section()
-            table.add_row("[bold]Available Sessions[/bold]", "[bold]ID[/bold]")
-            for session in sessions[:5]:  # Show max 5 sessions
-                marker = "👉 " if session == session_id else "   "
-                table.add_row("", f"{marker}{session}")
-            if len(sessions) > 5:
-                table.add_row("", f"... and {len(sessions) - 5} more")
+            table.add_row("[bold]Available Sessions[/bold]", "[bold]Title / ID[/bold]")
+            for sid, title in sessions_with_titles[:5]:  # Show max 5 sessions
+                if title:
+                    _, dt = parse_session_dt(sid)
+                    if dt:
+                        display = f"{title} - {dt.strftime('%Y-%m-%d %H:%M')}"
+                    else:
+                        display = title
+                else:
+                    display = sid
+                marker = "-> " if sid == session_id else "   "
+                table.add_row("", f"{marker}{display}")
+            if len(sessions_with_titles) > 5:
+                table.add_row("", f"... and {len(sessions_with_titles) - 5} more")
 
         console.print(table)
         return "Status information displayed above."
@@ -171,6 +202,22 @@ class McpCommand(SlashCommand):
 
         except Exception as e:
             return f"Error listing MCP servers: {e}"
+
+
+class ConfigCommand(SlashCommand):
+    """Show current configuration."""
+
+    def __init__(self):
+        super().__init__("config", "Show current configuration")
+
+    async def execute(self, scheduler, *_args) -> str:
+        """Execute the /config command."""
+        from ..config.cli_handler import show_config_status
+
+        try:
+            return await show_config_status()
+        except Exception as e:
+            return f"Error showing config: {e}"
 
 
 class HelpCommand(SlashCommand):
@@ -227,6 +274,7 @@ class SlashCommandHandler:
             "init": InitCommand(),
             "clear": ClearCommand(),
             "status": StatusCommand(),
+            "config": ConfigCommand(),
             "mcp": McpCommand(),
             "session": SlashCommand("session", "Switch session via picker and recreate scheduler"),
         }
@@ -259,15 +307,31 @@ class SlashCommandHandler:
         try:
             command = self.commands[command_name]
             if command_name == "session":
-                from ..utils.sessions import picker_arrows, sort_sessions_desc
+                from ..utils.sessions import parse_session_dt, picker_arrows_with_titles
 
-                # Get sessions and prompt for selection
-                sessions = await scheduler.context_manager.list_sessions()
-                if not sessions:
+                # Wait for any pending title generation to complete
+                if (
+                    hasattr(scheduler, "_title_generation_task")
+                    and scheduler._title_generation_task
+                    and not scheduler._title_generation_task.done()
+                ):
+                    try:
+                        await scheduler._title_generation_task
+                    except Exception:
+                        pass
+                    scheduler._title_generation_task = None
+
+                # Get sessions with titles and prompt for selection
+                sessions_with_titles = await scheduler.context_manager.list_sessions_with_titles()
+                if not sessions_with_titles:
                     return "No sessions found."
 
-                sessions = sort_sessions_desc(sessions)
-                selected = picker_arrows(sessions)
+                # Sort by datetime descending
+                sessions_with_titles.sort(
+                    key=lambda x: (parse_session_dt(x[0])[0], parse_session_dt(x[0])[1] or None),
+                    reverse=True,
+                )
+                selected = picker_arrows_with_titles(sessions_with_titles)
 
                 if selected:
                     return f"session_switch:{selected}"  # Special return value for CLI to handle

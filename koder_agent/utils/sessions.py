@@ -79,3 +79,63 @@ def picker_arrows(sessions: List[str]) -> Optional[str]:
 
     print("Too many invalid attempts. Cancelling selection.")
     return None
+
+
+def picker_arrows_with_titles(sessions: List[Tuple[str, Optional[str]]]) -> Optional[str]:
+    """Session picker that displays titles when available.
+
+    Args:
+        sessions: List of (session_id, title) tuples
+
+    Returns:
+        Selected session ID or None if cancelled
+    """
+    import sys
+
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return None
+
+    print("\nAvailable sessions:")
+    for i, (sid, title) in enumerate(sessions, 1):
+        if title:
+            # Parse datetime from session ID for suffix
+            _, dt = parse_session_dt(sid)
+            if dt:
+                display = f"{title} - {dt.strftime('%Y-%m-%d %H:%M')}"
+            else:
+                display = title
+        else:
+            display = sid
+        print(f"{i}. {display}")
+
+    print("\nEnter the number of the session to select (or press Enter to cancel):")
+
+    max_attempts = 3
+    for _ in range(max_attempts):
+        try:
+            user_input = input("> ").strip()
+
+            # Empty input means cancel
+            if not user_input:
+                return None
+
+            # Check if input is a valid number
+            if not user_input.isdigit():
+                print(f"Please enter a valid number between 1 and {len(sessions)}.")
+                continue
+
+            choice = int(user_input)
+
+            # Check if choice is in valid range
+            if 1 <= choice <= len(sessions):
+                return sessions[choice - 1][0]  # Return session ID, not title
+            else:
+                print(f"Please enter a number between 1 and {len(sessions)}.")
+
+        except (EOFError, KeyboardInterrupt):
+            return None
+        except Exception:
+            print("Invalid input. Please try again.")
+
+    print("Too many invalid attempts. Cancelling selection.")
+    return None
