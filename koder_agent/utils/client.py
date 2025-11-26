@@ -36,7 +36,7 @@ def setup_openai_client():
         set_default_openai_client(client)
         console.print(
             Panel(
-                f"[green]✅ Using OpenAI {model}[/green]",
+                f"[green]✅ Model: OpenAI {model}[/green]",
                 title="Model Configuration",
                 border_style="green",
             )
@@ -47,7 +47,7 @@ def setup_openai_client():
     # LiteLLM models use format: "litellm/provider/model-name"
     console.print(
         Panel(
-            f"[green]✅ Using LiteLLM {model}[/green]",
+            f"[green]✅ Model: {model}[/green]",
             title="Model Configuration",
             border_style="green",
         )
