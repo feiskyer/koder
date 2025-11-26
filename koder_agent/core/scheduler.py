@@ -155,12 +155,15 @@ class AgentScheduler:
                 return response
 
         # Save conversation to context
+        # Pass actual token count from API response (if available) instead of estimation
+        current_token_count = self.usage_tracker.session_usage.last_input_tokens or None
         await self.context_manager.save(
             history
             + [
                 {"role": "user", "content": user_input},
                 {"role": "assistant", "content": response},
-            ]
+            ],
+            current_token_count=current_token_count,
         )
 
         return response
@@ -412,6 +415,9 @@ class AgentScheduler:
                 usage = result.context_wrapper.usage
                 input_tokens = getattr(usage, "input_tokens", 0) or 0
                 output_tokens = getattr(usage, "output_tokens", 0) or 0
+                # console.print(
+                #     f"[dim][Usage] input={input_tokens}, output={output_tokens}[/dim]"
+                # )
                 if input_tokens > 0 or output_tokens > 0:
                     self.usage_tracker.record_usage(input_tokens, output_tokens)
         except Exception:

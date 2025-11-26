@@ -20,7 +20,6 @@ class ContextManager:
         db_path: Optional[str] = None,
     ):
         self.session_id = session_id
-        self._cached_token_count = 0  # Cached token count for status line
         if db_path is None:
             # Use $HOME/.koder/koder.db as default
             home_dir = os.path.expanduser("~")
@@ -44,10 +43,6 @@ class ContextManager:
                         return list(text.encode("utf-8"))
 
                 self.encoder = _NaiveEncoder()
-
-    def get_cached_token_count(self) -> int:
-        """Get the cached token count (updated after load/save operations)."""
-        return self._cached_token_count
 
     async def _ensure_table(self, conn: aiosqlite.Connection) -> None:
         """Ensure the context table exists with all columns."""
@@ -132,32 +127,30 @@ class ContextManager:
                 )
                 row = await cursor.fetchone()
                 if row and row[0]:
-                    messages = json.loads(row[0])
-                    # Update cached token count
-                    self._cached_token_count = self._estimate_tokens(messages)
-                    return messages
-                self._cached_token_count = 0
+                    return json.loads(row[0])
                 return []
         except Exception as e:
             print(f"Error loading context: {e}")
-            self._cached_token_count = 0
             return []
 
-    async def save(self, messages: List[Dict[str, str]]) -> None:
-        """Save conversation history to database, with summarization if needed."""
+    async def save(
+        self, messages: List[Dict[str, str]], current_token_count: int | None = None
+    ) -> None:
+        """Save conversation history to database, with summarization if needed.
+
+        Args:
+            messages: List of message dictionaries to save
+            current_token_count: Actual token count from API response.
+                               If None (first chat), skip summarization.
+        """
         try:
             # Check token count and summarize if needed
-            model = get_model_name()
-            total_tokens = self._estimate_tokens(messages)
-            threshold = get_summarization_threshold(model)
-
-            if total_tokens > threshold:
-                messages = await self._summarize_messages(messages, total_tokens, model)
-                # Recalculate tokens after summarization
-                total_tokens = self._estimate_tokens(messages)
-
-            # Update cached token count
-            self._cached_token_count = total_tokens
+            # Skip summarization if no token count provided (first chat)
+            if current_token_count is not None:
+                model = get_model_name()
+                threshold = get_summarization_threshold(model)
+                if current_token_count > threshold:
+                    messages = await self._summarize_messages(messages, current_token_count, model)
 
             async with aiosqlite.connect(self.db_path) as conn:
                 await self._ensure_table(conn)
@@ -172,7 +165,7 @@ class ContextManager:
             print(f"Error saving context: {e}")
 
     async def _summarize_messages(
-        self, messages: List[Dict[str, str]], estimated_tokens: int, model: str
+        self, messages: List[Dict[str, str]], current_tokens: int, model: str
     ) -> List[Dict[str, str]]:
         """
         Summarize message history using LLM when tokens exceed threshold.
@@ -184,7 +177,7 @@ class ContextManager:
 
         Args:
             messages: Original message list
-            estimated_tokens: Pre-calculated token count
+            current_tokens: Current token count (from API or estimated)
             model: Model name for context window calculation
 
         Returns:
@@ -194,7 +187,7 @@ class ContextManager:
         context_window = get_context_window_size(model)
 
         print(
-            f"\n[Context] Token estimate: {estimated_tokens}/{context_window} (threshold: {threshold})"
+            f"\n[Context] Token count: {current_tokens}/{context_window} (threshold: {threshold})"
         )
         print("[Context] Triggering message history summarization...")
 
@@ -241,7 +234,7 @@ class ContextManager:
 
         # Calculate new token count
         new_tokens = self._estimate_tokens(new_messages)
-        print(f"[Context] Summary completed: {estimated_tokens} -> {new_tokens} tokens")
+        print(f"[Context] Summary completed: {current_tokens} -> {new_tokens} tokens")
         print(
             f"[Context] Structure: system + {len(user_indices)} user messages + {summary_count} summaries"
         )

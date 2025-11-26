@@ -146,14 +146,13 @@ class StreamingDisplayManager:
         actual_call_id = call_id
 
         # Try multiple ways to extract output
-        if hasattr(tool_output_item, "output"):
+        if hasattr(tool_output_item, "output") and tool_output_item.output:
             output = str(tool_output_item.output)
-        elif hasattr(tool_output_item, "raw_item"):
-            if hasattr(tool_output_item.raw_item, "output"):
+        if not output and hasattr(tool_output_item, "raw_item"):
+            if hasattr(tool_output_item.raw_item, "output") and tool_output_item.raw_item.output:
                 output = str(tool_output_item.raw_item.output)
-            elif (
-                isinstance(tool_output_item.raw_item, dict)
-                and "output" in tool_output_item.raw_item
+            elif isinstance(tool_output_item.raw_item, dict) and tool_output_item.raw_item.get(
+                "output"
             ):
                 output = str(tool_output_item.raw_item["output"])
 
@@ -194,12 +193,12 @@ class StreamingDisplayManager:
                                 tracker = t
                             break
 
+        # Find the position of the corresponding tool call section
+        tool_call_index = -1
         if tracker:
             tracker.output = output
             tracker.completed = True
 
-            # Find the position of the corresponding tool call section
-            tool_call_index = -1
             for i, section in enumerate(self.sections):
                 if (
                     section.type == OutputType.TOOL_CALL
@@ -210,7 +209,8 @@ class StreamingDisplayManager:
                     tool_call_index = i
                     break
 
-            # Create tool output section
+        # Create tool output section (even if tracker not found, still show output)
+        if output or tracker:
             output_section = OutputSection(
                 type=OutputType.TOOL_OUTPUT, content=output, tool_tracker=tracker, complete=True
             )
@@ -287,9 +287,11 @@ class StreamingDisplayManager:
                     renderables.append(tool_text)
 
             elif section.type == OutputType.TOOL_OUTPUT:
-                if section.tool_tracker and section.content:
+                if section.content:
                     # Generate smart summary based on tool and content
-                    tool_name = section.tool_tracker.tool_name
+                    tool_name = (
+                        section.tool_tracker.tool_name if section.tool_tracker else "unknown"
+                    )
                     summary = self._generate_smart_summary(tool_name, section.content)
                     is_error = self._is_error_output(section.content, tool_name)
 
@@ -320,9 +322,7 @@ class StreamingDisplayManager:
                                 renderables.append(output_text)
 
                     # Show file diff if this is a file update
-                    diff_content = self._extract_diff_content(
-                        section.tool_tracker.tool_name, section.content
-                    )
+                    diff_content = self._extract_diff_content(tool_name, section.content)
                     if diff_content:
                         renderables.extend(diff_content)
 
@@ -717,6 +717,14 @@ class StreamingDisplayManager:
                 return clean_output
             else:
                 return "Todos updated"
+
+        # Handle todo_read - show all todos for visibility
+        elif tool_name == "todo_read":
+            if "No todos found" in clean_output:
+                return "No todos found. The list is empty."
+            else:
+                # Return the full todo list for display
+                return clean_output
 
         # Default case
         else:

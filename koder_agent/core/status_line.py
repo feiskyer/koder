@@ -87,7 +87,9 @@ class StatusLine:
         usage = self.usage_tracker.session_usage
         cost_str = f"${usage.total_cost:.4f}"
 
-        # Context window usage: last API call's input tokens / max context
+        # Context window usage: use last_input_tokens from the most recent Runner.run() call
+        # Since Koder sends full conversation history each time, last_input_tokens
+        # represents the current context size (not cumulative across calls)
         current_tokens = usage.last_input_tokens
         max_context = get_context_window_size(model)
         context_pct = (current_tokens / max_context * 100) if max_context > 0 else 0

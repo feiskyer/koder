@@ -34,20 +34,20 @@ def todo_read() -> str:
         return "No todos found. The list is empty."
 
     result = []
-    for i, todo in enumerate(_todos, 1):
+    for todo in _todos:
         status = todo.get("status", "pending")
         content = todo.get("content", "")
 
-        # Format with improved visual hierarchy
+        # Format with plain text symbols (no Rich markup to avoid color leaking)
         if status == "completed":
-            # Completed tasks: strikethrough with checkmark
-            result.append(f"  [green]✓[/green] [dim strikethrough]{content}[/dim strikethrough]")
+            # Completed tasks: checkmark
+            result.append(f"  ✓ {content}")
         elif status == "in_progress":
-            # Current task: highlighted with arrow
-            result.append(f"  [yellow]▶[/yellow] [bold blue]{content}[/bold blue]")
+            # Current task: arrow indicator
+            result.append(f"  ▶ {content}")
         else:
-            # Pending tasks: simple bullet
-            result.append(f"  [dim]□[/dim] {content}")
+            # Pending tasks: empty box
+            result.append(f"  □ {content}")
 
     return "\n".join(result)
 
