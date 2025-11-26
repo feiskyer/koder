@@ -346,7 +346,14 @@ async def main():
                                 pass
                             scheduler._title_generation_task = None
     finally:
-        await scheduler.cleanup()
+        try:
+            await scheduler.cleanup()
+        except (asyncio.CancelledError, KeyboardInterrupt, EOFError):
+            # Silently ignore interruption during cleanup
+            pass
+        except Exception:
+            # Ignore other cleanup errors on exit
+            pass
 
     return 0
 
@@ -356,11 +363,12 @@ def run():
     try:
         exit_code = asyncio.run(main())
         exit(exit_code)
-    except KeyboardInterrupt:
-        console.print(
-            Panel("[yellow]Interrupted![/yellow]", title="Interruption", border_style="yellow")
-        )
+    except (KeyboardInterrupt, EOFError, asyncio.CancelledError):
+        # Silently exit on Ctrl+C, Ctrl+D, or task cancellation
         exit(0)
+    except SystemExit:
+        # Re-raise SystemExit to allow normal exit
+        raise
     except Exception as e:
         console.print(
             Panel(f"[red]Fatal error: {e}[/red]", title="Fatal Error", border_style="red")
