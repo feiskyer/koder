@@ -21,33 +21,55 @@ class TodoWriteModel(BaseModel):
     todos: List[TodoItem]
 
 
-# Global todo list storage (in production, this should be persistent)
-_todos: List[dict] = []
+class TodoStore:
+    """Singleton store for todos to ensure shared state across all agents."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._todos = []  # Initialize on first creation only
+        return cls._instance
+
+    @property
+    def todos(self) -> List[dict]:
+        return self._todos
+
+    @todos.setter
+    def todos(self, value: List[dict]):
+        self._todos = value
+
+
+# Global singleton instance - created once at module load
+_store = TodoStore()
 
 
 @function_tool
 def todo_read() -> str:
     """Read all todos from the list."""
-    global _todos
-
-    if not _todos:
+    if not _store.todos:
         return "No todos found. The list is empty."
 
+    return _format_todo_list(_store.todos)
+
+
+def _format_todo_list(todos: List[dict]) -> str:
+    """Format todo list with emoji indicators."""
     result = []
-    for todo in _todos:
+    for todo in todos:
         status = todo.get("status", "pending")
         content = todo.get("content", "")
 
-        # Format with plain text symbols (no Rich markup to avoid color leaking)
         if status == "completed":
-            # Completed tasks: checkmark
-            result.append(f"  ✓ {content}")
+            # Completed: green checkmark
+            result.append(f"✅ {content}")
         elif status == "in_progress":
-            # Current task: arrow indicator
-            result.append(f"  ▶ {content}")
+            # In progress: spinning/working indicator
+            result.append(f"🔄 {content}")
         else:
-            # Pending tasks: empty box
-            result.append(f"  □ {content}")
+            # Pending: waiting/todo indicator
+            result.append(f"⏳ {content}")
 
     return "\n".join(result)
 
@@ -55,22 +77,10 @@ def todo_read() -> str:
 @function_tool
 def todo_write(todos: List[TodoItem]) -> str:
     """Write/update the todo list."""
-    global _todos
-
     # Convert TodoItem objects to dictionaries
-    _todos = [todo.model_dump() for todo in todos]
+    _store.todos = [todo.model_dump() for todo in todos]
 
-    # Count items by status
-    status_counts = {}
-    for todo in _todos:
-        status = todo.get("status", "pending")
-        status_counts[status] = status_counts.get(status, 0) + 1
+    if not _store.todos:
+        return "Todo list cleared."
 
-    # Create summary
-    summary_parts = []
-    for status, count in status_counts.items():
-        summary_parts.append(f"{count} {status}")
-
-    summary = f"Updated {len(todos)} todos: " + ", ".join(summary_parts)
-
-    return summary
+    return _format_todo_list(_store.todos)

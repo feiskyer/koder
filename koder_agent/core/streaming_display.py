@@ -287,11 +287,10 @@ class StreamingDisplayManager:
                     renderables.append(tool_text)
 
             elif section.type == OutputType.TOOL_OUTPUT:
+                # Get tool name for summary generation
+                tool_name = section.tool_tracker.tool_name if section.tool_tracker else "unknown"
+
                 if section.content:
-                    # Generate smart summary based on tool and content
-                    tool_name = (
-                        section.tool_tracker.tool_name if section.tool_tracker else "unknown"
-                    )
                     summary = self._generate_smart_summary(tool_name, section.content)
                     is_error = self._is_error_output(section.content, tool_name)
 
@@ -302,6 +301,12 @@ class StreamingDisplayManager:
                     else:
                         style = "dim green"
                         arrow_style = "dim green"
+
+                    # Fallback to truncated content if no summary
+                    if not summary:
+                        summary = section.content.strip()[:80]
+                        if len(section.content.strip()) > 80:
+                            summary += "..."
 
                     if summary:
                         # Handle multi-line output with proper alignment
@@ -325,6 +330,12 @@ class StreamingDisplayManager:
                     diff_content = self._extract_diff_content(tool_name, section.content)
                     if diff_content:
                         renderables.extend(diff_content)
+                else:
+                    # Empty content - show a placeholder
+                    output_text = Text()
+                    output_text.append("  ╰─ ", style="dim green")
+                    output_text.append("(no output)", style="dim")
+                    renderables.append(output_text)
 
         # Return a Group for proper rendering
         if renderables:
@@ -711,9 +722,12 @@ class StreamingDisplayManager:
             else:
                 return clean_output[:60] + ("..." if len(clean_output) > 60 else "")
 
-        # Handle todo_write
+        # Handle todo_write - show full todo list with emoji
         elif tool_name == "todo_write":
-            if "Updated" in clean_output:
+            if "Todo list cleared" in clean_output:
+                return "Todo list cleared."
+            elif clean_output.strip():
+                # Return the full todo list for display (with emoji indicators)
                 return clean_output
             else:
                 return "Todos updated"
@@ -722,9 +736,11 @@ class StreamingDisplayManager:
         elif tool_name == "todo_read":
             if "No todos found" in clean_output:
                 return "No todos found. The list is empty."
-            else:
-                # Return the full todo list for display
+            elif clean_output.strip():
+                # Return the full todo list for display (with emoji indicators)
                 return clean_output
+            else:
+                return "No todos found."
 
         # Default case
         else:

@@ -83,27 +83,6 @@ koder
 
 Koder uses a YAML config file at `~/.koder/config.yaml` for persistent settings.
 
-#### Config CLI Commands
-
-```bash
-# Initialize config file with defaults
-koder config init
-
-# Show current configuration
-koder config show
-
-# Show config file path
-koder config path
-
-# Open config file in editor (respects $EDITOR)
-koder config edit
-
-# Set specific values (supports dot notation)
-koder config set model.name gpt-4o
-koder config set model.provider anthropic
-koder config set cli.stream false
-```
-
 #### Config File Format
 
 ```yaml
@@ -115,13 +94,6 @@ model:
   provider: "openai"           # Provider name (default: openai)
   api_key: null                # API key (prefer env vars for security)
   base_url: null               # Custom API endpoint (optional)
-
-  # Azure-specific settings
-  azure_api_version: null      # e.g., "2025-04-01-preview"
-
-  # Vertex AI-specific settings
-  vertex_ai_location: null     # e.g., "us-central1"
-  vertex_ai_credentials_path: null  # Path to service account JSON
 
   # Reasoning effort for OpenAI reasoning models (o1, o3, gpt-5.1, etc.)
   reasoning_effort: "medium"   # none, minimal, low, medium, high, or null

@@ -20,7 +20,7 @@ litellm.suppress_debug_info = True
 # to the provider's expected env var (e.g., {PROVIDER}_API_KEY)
 PROVIDER_ENV_VARS = {
     "openai": {"api_key": "OPENAI_API_KEY", "base_url": "OPENAI_BASE_URL"},
-    "anthropic": {"api_key": "ANTHROPIC_API_KEY"},
+    "anthropic": {"api_key": "ANTHROPIC_API_KEY", "base_url": "ANTHROPIC_BASE_URL"},
     "google": {"api_key": "GOOGLE_API_KEY"},
     "gemini": {"api_key": "GEMINI_API_KEY"},
     "azure": {
@@ -173,6 +173,55 @@ def get_api_key():
     """Get the API key for the current provider with priority: ENV > Config."""
     config, config_manager, provider, _ = _resolve_model_settings()
     return _get_provider_api_key(config, config_manager, provider)
+
+
+def get_base_url():
+    """Get the base URL for the current provider with priority: ENV > Config."""
+    config, config_manager, provider, _ = _resolve_model_settings()
+    # Get the provider-specific base_url env var, or fall back to a generic pattern
+    base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
+        "base_url", f"{provider.upper()}_BASE_URL"
+    )
+    base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
+    return config_manager.get_effective_value(base_url_config, base_url_env_var)
+
+
+def get_litellm_model_kwargs() -> dict:
+    """Get kwargs for creating a LitellmModel instance.
+
+    Returns a dict with 'model', 'api_key', and 'base_url' that can be passed
+    directly to LitellmModel constructor.
+    """
+    config, config_manager, provider, raw_model = _resolve_model_settings()
+
+    # Get normalized model name for LiteLLM
+    model = _normalize_model_name(provider, raw_model)
+    # Strip the 'litellm/' prefix since LitellmModel adds it internally
+    if model.startswith("litellm/"):
+        model = model[len("litellm/") :]
+
+    # Get API key
+    api_key = _get_provider_api_key(config, config_manager, provider)
+
+    # Get base URL with priority: ENV > Config
+    base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
+        "base_url", f"{provider.upper()}_BASE_URL"
+    )
+    base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
+    base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
+
+    return {
+        "model": model,
+        "api_key": api_key,
+        "base_url": base_url,
+    }
+
+
+def is_native_openai_provider() -> bool:
+    """Check if the current provider should use native OpenAI client."""
+    config, config_manager, provider, _ = _resolve_model_settings()
+    api_key = _get_provider_api_key(config, config_manager, provider)
+    return provider in ("openai", "custom") and api_key is not None
 
 
 async def llm_completion(messages: list, model: Optional[str] = None) -> str:
