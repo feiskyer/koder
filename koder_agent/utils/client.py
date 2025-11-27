@@ -3,6 +3,7 @@
 import os
 from typing import Optional
 
+import backoff
 import litellm
 from agents import (
     set_default_openai_client,
@@ -14,6 +15,12 @@ from ..config import get_config, get_config_manager
 
 # Suppress debug info from litellm
 litellm.suppress_debug_info = True
+litellm.drop_params = True
+
+# Configure global retry settings for LiteLLM
+# num_retries will be applied to all litellm API calls unless overridden
+litellm.num_retries = 3  # Default, will be updated with config values
+litellm.num_retries_per_request = 3
 
 # Well-known environment variable mappings for common providers
 # For providers not listed here, the api_key from config will be set
@@ -189,8 +196,8 @@ def get_base_url():
 def get_litellm_model_kwargs() -> dict:
     """Get kwargs for creating a LitellmModel instance.
 
-    Returns a dict with 'model', 'api_key', and 'base_url' that can be passed
-    directly to LitellmModel constructor.
+    Returns a dict with 'model', 'api_key', 'base_url', and retry configuration
+    that can be passed directly to LitellmModel constructor.
     """
     config, config_manager, provider, raw_model = _resolve_model_settings()
 
@@ -210,11 +217,14 @@ def get_litellm_model_kwargs() -> dict:
     base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
     base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
 
-    return {
+    kwargs = {
         "model": model,
         "api_key": api_key,
         "base_url": base_url,
+        "max_retries": 3,
     }
+
+    return kwargs
 
 
 def is_native_openai_provider() -> bool:
@@ -224,12 +234,24 @@ def is_native_openai_provider() -> bool:
     return provider in ("openai", "custom") and api_key is not None
 
 
+@backoff.on_exception(
+    backoff.expo,
+    (
+        litellm.exceptions.ServiceUnavailableError,
+        litellm.exceptions.RateLimitError,
+        litellm.exceptions.APIConnectionError,
+        litellm.exceptions.Timeout,
+        litellm.exceptions.InternalServerError,
+    ),
+    max_tries=3,
+    jitter=backoff.full_jitter,
+)
 async def llm_completion(messages: list, model: Optional[str] = None) -> str:
     """
     Make an LLM completion call using the configured provider settings.
 
     This function reuses the same configuration as the main agent, ensuring
-    consistent API key and model settings.
+    consistent API key and model settings. Includes automatic retry for 429 errors.
 
     Args:
         messages: List of message dicts with 'role' and 'content' keys
@@ -255,7 +277,7 @@ async def llm_completion(messages: list, model: Optional[str] = None) -> str:
     base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
     base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
 
-    # Build kwargs for litellm
+    # Build kwargs for litellm with retry configuration
     kwargs = {
         "model": model,
         "messages": messages,
@@ -270,7 +292,10 @@ async def llm_completion(messages: list, model: Optional[str] = None) -> str:
 
 
 def setup_openai_client():
-    """Set up the OpenAI client with priority: ENV > Config > Default."""
+    """Set up the OpenAI client with priority: ENV > Config > Default.
+
+    Also configures global LiteLLM retry settings for all providers.
+    """
     set_tracing_disabled(True)
     config, config_manager, provider, raw_model = _resolve_model_settings()
 
@@ -291,6 +316,7 @@ def setup_openai_client():
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            max_retries=3,
         )
         set_default_openai_client(client)
         return client

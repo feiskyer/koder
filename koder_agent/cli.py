@@ -12,9 +12,9 @@ from rich.panel import Panel
 
 from .config import get_config, get_config_manager
 from .core.commands import slash_handler
-from .core.context import ContextManager
 from .core.interactive import InteractivePrompt
 from .core.scheduler import AgentScheduler
+from .core.session import EnhancedSQLiteSession
 from .utils import (
     default_session_local_ms,
     parse_session_dt,
@@ -28,8 +28,7 @@ console = get_adaptive_console()
 
 
 async def _prompt_select_session() -> Optional[str]:
-    ctx = ContextManager()
-    sessions_with_titles = await ctx.list_sessions_with_titles()
+    sessions_with_titles = await EnhancedSQLiteSession.list_sessions_with_titles()
     if not sessions_with_titles:
         console.print(Panel("No sessions found.", title="Sessions", border_style="yellow"))
         return None
@@ -284,7 +283,7 @@ async def main():
                 # Check for completed title generation (might have finished while waiting for input)
                 if scheduler._title_generation_task and scheduler._title_generation_task.done():
                     try:
-                        display_name = await scheduler.context_manager.get_display_name()
+                        display_name = await scheduler.session.get_display_name()
                         if interactive_prompt.status_line:
                             interactive_prompt.status_line.update_display_name(display_name)
                     except Exception:
@@ -313,9 +312,7 @@ async def main():
                                     )
                                     # Load existing title for the session if available
                                     try:
-                                        display_name = (
-                                            await scheduler.context_manager.get_display_name()
-                                        )
+                                        display_name = await scheduler.session.get_display_name()
                                         interactive_prompt.status_line.update_display_name(
                                             display_name
                                         )
@@ -339,7 +336,7 @@ async def main():
                             and scheduler._title_generation_task.done()
                         ):
                             try:
-                                display_name = await scheduler.context_manager.get_display_name()
+                                display_name = await scheduler.session.get_display_name()
                                 if interactive_prompt.status_line:
                                     interactive_prompt.status_line.update_display_name(display_name)
                             except Exception:

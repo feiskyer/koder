@@ -17,7 +17,9 @@ class SessionUsage:
     output_tokens: int = 0  # Cumulative output tokens
     total_cost: float = 0.0
     request_count: int = 0
-    last_input_tokens: int = 0  # Last API call's input tokens (for context usage display)
+    last_input_tokens: int = 0  # Last API call's input tokens
+    last_output_tokens: int = 0  # Last API call's output tokens
+    current_context_tokens: int = 0  # Estimated current context size (tokens)
 
 
 class UsageTracker:
@@ -76,20 +78,30 @@ class UsageTracker:
         input_cost_per_token, output_cost_per_token = self.get_model_costs()
         return (input_tokens * input_cost_per_token) + (output_tokens * output_cost_per_token)
 
-    def record_usage(self, input_tokens: int, output_tokens: int) -> None:
+    def record_usage(
+        self, input_tokens: int, output_tokens: int, context_tokens: Optional[int] = None
+    ) -> None:
         """
         Record usage from an API call.
 
         Args:
             input_tokens: Number of input tokens used
             output_tokens: Number of output tokens generated
+            context_tokens: Optional explicit context size (if different from input+output)
         """
         cost = self.calculate_cost(input_tokens, output_tokens)
         self.session_usage.input_tokens += input_tokens
         self.session_usage.output_tokens += output_tokens
         self.session_usage.total_cost += cost
         self.session_usage.request_count += 1
-        self.session_usage.last_input_tokens = input_tokens  # Track last call for context display
+        self.session_usage.last_input_tokens = input_tokens
+        self.session_usage.last_output_tokens = output_tokens
+
+        if context_tokens is not None:
+            self.session_usage.current_context_tokens = context_tokens
+        else:
+            # Fallback: assume context is roughly input + output of the run
+            self.session_usage.current_context_tokens = input_tokens + output_tokens
 
     def reset(self) -> None:
         """Reset session usage (for new session)."""

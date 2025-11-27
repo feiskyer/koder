@@ -3,6 +3,8 @@
 import logging
 import uuid
 
+import backoff
+import litellm
 from agents import Agent, ModelSettings
 from agents.extensions.models.litellm_model import LitellmModel
 from openai.types.shared import Reasoning
@@ -18,6 +20,41 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 
+class RetryingLitellmModel(LitellmModel):
+    """LitellmModel with backoff retry logic."""
+
+    @backoff.on_exception(
+        backoff.expo,
+        (
+            litellm.exceptions.ServiceUnavailableError,
+            litellm.exceptions.RateLimitError,
+            litellm.exceptions.APIConnectionError,
+            litellm.exceptions.Timeout,
+            litellm.exceptions.InternalServerError,
+        ),
+        max_tries=3,
+        jitter=backoff.full_jitter,
+    )
+    async def get_response(self, *args, **kwargs):
+        return await super().get_response(*args, **kwargs)
+
+    @backoff.on_exception(
+        backoff.expo,
+        (
+            litellm.exceptions.ServiceUnavailableError,
+            litellm.exceptions.RateLimitError,
+            litellm.exceptions.APIConnectionError,
+            litellm.exceptions.Timeout,
+            litellm.exceptions.InternalServerError,
+        ),
+        max_tries=5,
+        jitter=backoff.full_jitter,
+    )
+    async def stream_response(self, *args, **kwargs):
+        async for chunk in super().stream_response(*args, **kwargs):
+            yield chunk
+
+
 async def create_dev_agent(tools) -> Agent:
     """Create the main development agent with MCP servers."""
     config = get_config()
@@ -28,9 +65,9 @@ async def create_dev_agent(tools) -> Agent:
         # Use string model name for native OpenAI providers (handled by default client)
         model = get_model_name()
     else:
-        # Use LitellmModel with explicit base_url and api_key for all other providers
+        # Use LitellmModel with explicit base_url and api_key
         litellm_kwargs = get_litellm_model_kwargs()
-        model = LitellmModel(
+        model = RetryingLitellmModel(
             model=litellm_kwargs["model"],
             base_url=litellm_kwargs["base_url"],
             api_key=litellm_kwargs["api_key"],
@@ -40,7 +77,10 @@ async def create_dev_agent(tools) -> Agent:
     model_name_str = get_model_name()  # Always get string name for max_tokens lookup
     model_settings = ModelSettings(max_tokens=get_maximum_output_tokens(model_name_str))
     if config.model.reasoning_effort is not None:
-        model_settings.reasoning = Reasoning(effort=config.model.reasoning_effort)
+        effort = None if config.model.reasoning_effort == "none" else config.model.reasoning_effort
+        model_settings.reasoning = Reasoning(effort=effort, summary="detailed")
+    if "gpt-5" in model_name_str:
+        model_settings.verbosity = "high"
 
     dev_agent = Agent(
         name="Koder",

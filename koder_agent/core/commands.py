@@ -109,15 +109,17 @@ class StatusCommand(SlashCommand):
         model = get_model_name()
 
         # Get session info
-        session_id = scheduler.context_manager.session_id
+        session_id = scheduler.session.session_id
         streaming = scheduler.streaming
 
         # Get session title for current session
-        session_title = await scheduler.context_manager.get_title()
+        session_title = await scheduler.session.get_title()
         session_display = session_title or session_id
 
         # Get available sessions with titles
-        sessions_with_titles = await scheduler.context_manager.list_sessions_with_titles()
+        from .session import EnhancedSQLiteSession
+
+        sessions_with_titles = await EnhancedSQLiteSession.list_sessions_with_titles()
 
         # Get tools count
         tools = get_all_tools()
@@ -322,7 +324,9 @@ class SlashCommandHandler:
                     scheduler._title_generation_task = None
 
                 # Get sessions with titles and prompt for selection
-                sessions_with_titles = await scheduler.context_manager.list_sessions_with_titles()
+                from .session import EnhancedSQLiteSession
+
+                sessions_with_titles = await EnhancedSQLiteSession.list_sessions_with_titles()
                 if not sessions_with_titles:
                     return "No sessions found."
 

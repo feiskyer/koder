@@ -18,7 +18,7 @@ from rich.live import Live
 from rich.text import Text
 
 from ..agentic import ApprovalHooks, create_dev_agent, get_display_hooks
-from ..core.context import ContextManager
+from ..core.session import EnhancedSQLiteSession, migrate_legacy_sessions
 from ..core.streaming_display import StreamingDisplayManager
 from ..core.usage_tracker import UsageTracker
 from ..tools import BackgroundShellManager, get_all_tools
@@ -32,7 +32,7 @@ class AgentScheduler:
 
     def __init__(self, session_id: str = "default", streaming: bool = False):
         self.semaphore = asyncio.Semaphore(10)
-        self.context_manager = ContextManager(session_id=session_id)
+        self.session = EnhancedSQLiteSession(session_id=session_id)
         self.tools = get_all_tools()
         self.dev_agent = None  # Will be initialized in async method
         self.streaming = streaming
@@ -43,6 +43,7 @@ class AgentScheduler:
         self._mcp_servers = []  # Track MCP servers for cleanup
         self.usage_tracker = UsageTracker()  # Track token usage and cost
         self._title_generation_task: asyncio.Task | None = None  # Async title generation
+        self._migration_done = False  # Track if migration has been performed
 
     def _has_content(self, content) -> bool:
         """Check if Rich or string content has any content."""
@@ -67,7 +68,12 @@ class AgentScheduler:
             return 50  # Conservative estimate
 
     async def _ensure_agent_initialized(self):
-        """Ensure the dev agent is initialized."""
+        """Ensure the dev agent is initialized and migration is complete."""
+        # Run migration once per process
+        if not self._migration_done:
+            await migrate_legacy_sessions(self.session.db_path)
+            self._migration_done = True
+
         if not self._agent_initialized:
             self.dev_agent = await create_dev_agent(self.tools)
             # Track MCP servers for cleanup
@@ -78,15 +84,15 @@ class AgentScheduler:
     async def _generate_title_background(self, user_input: str) -> None:
         """Background task to generate and save session title."""
         try:
-            title = await self.context_manager.generate_title(user_input)
+            title = await self.session.generate_title(user_input)
             if title:
-                await self.context_manager.set_title(title)
+                await self.session.set_title(title)
         except Exception:
             pass  # Silent failure - best effort
 
     async def handle(self, user_input: str) -> str:
         """Handle user input and execute agent."""
-        # Ensure agent is initialized with MCP servers
+        # Ensure agent is initialized with MCP servers and migration complete
         await self._ensure_agent_initialized()
 
         if self.dev_agent is None:
@@ -95,10 +101,8 @@ class AgentScheduler:
 
         # Note: Input panel is now displayed in InteractivePrompt, so we skip showing it here
 
-        # Load conversation history
-        history = await self.context_manager.load()
-
-        # Trigger async title generation on first message (empty history)
+        # Check if this is the first message for title generation
+        history = await self.session.get_items()
         if not history and self._title_generation_task is None:
             # Extract actual user request (strip context prefix if present)
             actual_request = user_input
@@ -108,30 +112,19 @@ class AgentScheduler:
                 self._generate_title_background(actual_request)
             )
 
+        console.print()
         console.print("[dim]thinking...[/dim]")
 
-        # Build context from history
-        context_str = ""
-        if history:
-            context_str = "Previous conversation:\n"
-            for msg in history:
-                role = msg["role"].capitalize()
-                content = msg["content"]
-                context_str += f"{role}: {content}\n"
-            context_str += "\nCurrent request:\n"
-
-        # Combine context with current user input
-        full_input = context_str + user_input if context_str else user_input
-
-        # Run the agent
+        # Run the agent with session - history is managed automatically
         async with self.semaphore:
             try:
                 if self.streaming:
-                    response = await self._handle_streaming(full_input)
+                    response = await self._handle_streaming(user_input)
                 else:
                     result = await Runner.run(
                         self.dev_agent,
-                        full_input,
+                        user_input,  # Just current input - session handles history
+                        session=self.session,  # Automatic history management
                         run_config=RunConfig(),
                         hooks=self.hooks,
                         max_turns=50,
@@ -154,21 +147,12 @@ class AgentScheduler:
                 console.print(response)
                 return response
 
-        # Save conversation to context
-        # Pass actual token count from API response (if available) instead of estimation
-        current_token_count = self.usage_tracker.session_usage.last_input_tokens or None
-        await self.context_manager.save(
-            history
-            + [
-                {"role": "user", "content": user_input},
-                {"role": "assistant", "content": response},
-            ],
-            current_token_count=current_token_count,
-        )
+        # History is automatically saved by the session
+        # No manual save needed!
 
         return response
 
-    async def _handle_streaming(self, full_input: str) -> str:
+    async def _handle_streaming(self, user_input: str) -> str:
         """Handle streaming execution with Rich Live and smart cleanup."""
         import os
         import sys
@@ -193,7 +177,8 @@ class AgentScheduler:
 
         result = Runner.run_streamed(
             self.dev_agent,
-            full_input,
+            user_input,  # Just current input - session handles history
+            session=self.session,  # Automatic history management
             run_config=RunConfig(),
             hooks=self.hooks,
             max_turns=50,
@@ -419,7 +404,17 @@ class AgentScheduler:
                 #     f"[dim][Usage] input={input_tokens}, output={output_tokens}[/dim]"
                 # )
                 if input_tokens > 0 or output_tokens > 0:
-                    self.usage_tracker.record_usage(input_tokens, output_tokens)
+                    # Calculate context tokens from the last request if available
+                    context_tokens = None
+                    if hasattr(usage, "request_usage_entries") and usage.request_usage_entries:
+                        last_req = usage.request_usage_entries[-1]
+                        # Context size is roughly input + output of the last request
+                        # (Input includes history, Output becomes new history)
+                        context_tokens = last_req.total_tokens
+
+                    self.usage_tracker.record_usage(
+                        input_tokens, output_tokens, context_tokens=context_tokens
+                    )
         except Exception:
             # Silently ignore usage capture errors
             pass

@@ -47,10 +47,12 @@ class StatusLine:
             return f"{val:.1f}k"
         return str(n)
 
-    def _truncate(self, s: str, max_len: int) -> str:
-        """Truncate string with ellipsis prefix if too long."""
+    def _truncate(self, s: str, max_len: int, from_start: bool = False) -> str:
+        """Truncate string with ellipsis."""
         if len(s) <= max_len:
             return s
+        if from_start:
+            return s[: max_len - 3] + "..."
         return "..." + s[-(max_len - 3) :]
 
     def _get_context_style(self, percentage: float) -> str:
@@ -81,16 +83,16 @@ class StatusLine:
 
         # Session: use display name if available, otherwise session ID (truncated)
         session_display = self._display_name or self.session_id
-        session = self._truncate(session_display, 40)
+        session = self._truncate(session_display, 20, from_start=True)
 
         # Usage data
         usage = self.usage_tracker.session_usage
         cost_str = f"${usage.total_cost:.4f}"
 
-        # Context window usage: use last_input_tokens from the most recent Runner.run() call
-        # Since Koder sends full conversation history each time, last_input_tokens
-        # represents the current context size (not cumulative across calls)
-        current_tokens = usage.last_input_tokens
+        # Context window usage: current_context_tokens
+        # This represents the total context that will be sent in the next turn
+        # (assuming sessions automatically include previous conversation history)
+        current_tokens = usage.current_context_tokens
         max_context = get_context_window_size(model)
         context_pct = (current_tokens / max_context * 100) if max_context > 0 else 0
         context_style = self._get_context_style(context_pct)
