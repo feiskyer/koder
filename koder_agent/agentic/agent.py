@@ -75,12 +75,13 @@ async def create_dev_agent(tools) -> Agent:
 
     # Build model_settings with reasoning if configured
     model_name_str = get_model_name()  # Always get string name for max_tokens lookup
-    model_settings = ModelSettings(max_tokens=get_maximum_output_tokens(model_name_str))
+    model_settings = ModelSettings(
+        metadata={"source": "koder"},
+        max_tokens=get_maximum_output_tokens(model_name_str),
+    )
     if config.model.reasoning_effort is not None:
         effort = None if config.model.reasoning_effort == "none" else config.model.reasoning_effort
         model_settings.reasoning = Reasoning(effort=effort, summary="detailed")
-    if "gpt-5" in model_name_str:
-        model_settings.verbosity = "high"
 
     dev_agent = Agent(
         name="Koder",

@@ -137,12 +137,6 @@ async def main():
             "--stream", action="store_true", help="Force enable streaming mode"
         )
         stream_group.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
-        parser.add_argument(
-            "--reasoning",
-            choices=["none", "minimal", "low", "medium", "high", "null"],
-            default=None,
-            help=("Reasoning effort for reasoning models (null to disable)"),
-        )
 
         subparsers = parser.add_subparsers(dest="command", help="Available commands")
         create_mcp_subparsers(subparsers)
@@ -159,12 +153,7 @@ async def main():
             "--stream", action="store_true", help="Force enable streaming mode"
         )
         stream_group.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
-        parser.add_argument(
-            "--reasoning",
-            choices=["none", "minimal", "low", "medium", "high", "null"],
-            default=None,
-            help=("Reasoning effort for reasoning models (null to disable)"),
-        )
+
         parser.add_argument(
             "prompt", nargs="*", help="Prompt text (if not provided, starts interactive mode)"
         )
@@ -180,23 +169,6 @@ async def main():
         from .config.cli_handler import handle_config_command
 
         return await handle_config_command(args)
-
-    # Apply reasoning effort override from CLI or ENV (CLI > ENV > Config)
-    if config:
-        cli_reasoning = getattr(args, "reasoning", None)
-        if cli_reasoning is not None:
-            if cli_reasoning == "null":
-                config.model.reasoning_effort = None
-            else:
-                config.model.reasoning_effort = cli_reasoning
-        else:
-            env_reasoning = os.environ.get("KODER_REASONING_EFFORT")
-            if env_reasoning is not None:
-                env_reasoning_lower = env_reasoning.lower()
-                if env_reasoning_lower in ("null", "none", ""):
-                    config.model.reasoning_effort = None
-                elif env_reasoning_lower in ("minimal", "low", "medium", "high"):
-                    config.model.reasoning_effort = env_reasoning_lower
 
     if getattr(args, "resume", False):
         selected = await _prompt_select_session()

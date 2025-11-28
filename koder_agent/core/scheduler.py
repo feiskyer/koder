@@ -18,6 +18,7 @@ from rich.live import Live
 from rich.text import Text
 
 from ..agentic import ApprovalHooks, create_dev_agent, get_display_hooks
+from ..core.keyboard_listener import CancellationToken, escape_listener, iter_with_cancellation
 from ..core.session import EnhancedSQLiteSession, migrate_legacy_sessions
 from ..core.streaming_display import StreamingDisplayManager
 from ..core.usage_tracker import UsageTracker
@@ -153,7 +154,7 @@ class AgentScheduler:
         return response
 
     async def _handle_streaming(self, user_input: str) -> str:
-        """Handle streaming execution with Rich Live and smart cleanup."""
+        """Handle streaming execution with Rich Live, smart cleanup, and ESC cancellation."""
         import os
         import sys
 
@@ -164,11 +165,11 @@ class AgentScheduler:
         terminal_type = os.environ.get("TERM_PROGRAM", "unknown")
         supports_advanced_clearing = terminal_type in ["iTerm.app", "Apple_Terminal", "vscode"]
 
+        # Check if ESC listener should be enabled (Unix TTY only)
+        esc_enabled = sys.platform != "win32" and sys.stdin.isatty()
+
         # Add space before streaming starts
         print()
-
-        # Skip cursor position capture - it causes escape sequence leaks
-        # The terminal clearing strategies below work without explicit position tracking
 
         # Run the agent in streaming mode
         if self.dev_agent is None:
@@ -187,6 +188,30 @@ class AgentScheduler:
         # Track if we displayed content during streaming
         content_displayed = False
 
+        # Track cancellation state with token for immediate response
+        cancel_token = CancellationToken()
+        cancelled = False
+
+        async def handle_escape():
+            """Callback when ESC key is pressed."""
+            nonlocal cancelled
+            cancelled = True
+            cancel_token.cancel()  # Signal to break out of iterator immediately
+            result.cancel(mode="immediate")  # Also cancel the underlying stream
+
+        # Show ESC hint if enabled (will be cleared after streaming)
+        esc_hint_shown = False
+        if esc_enabled:
+            console.print("[dim]Press ESC to cancel[/dim]")
+            esc_hint_shown = True
+
+        def clear_esc_hint():
+            """Clear the ESC hint line using ANSI escape sequences."""
+            if esc_hint_shown:
+                # Move cursor up one line and clear it
+                sys.stdout.write("\033[A\033[2K")
+                sys.stdout.flush()
+
         # Use Rich Live for proper formatting during streaming
         with Live(
             "",
@@ -196,93 +221,107 @@ class AgentScheduler:
             vertical_overflow="crop",
         ) as live:
             try:
-                # Process streaming events
-                async for event in result.stream_events():
-                    try:
-                        should_update = False
+                # Wrap event loop with ESC listener
+                async with escape_listener(on_escape=handle_escape, enabled=esc_enabled):
+                    # Process streaming events with cancellation support
+                    # iter_with_cancellation allows immediate break when ESC is pressed
+                    stream_iter = result.stream_events()
+                    async for event in iter_with_cancellation(stream_iter, cancel_token):
+                        # Check if cancelled (redundant but explicit)
+                        if cancelled:
+                            break
 
-                        # Handle raw response events (token-by-token streaming)
-                        if isinstance(event, RawResponsesStreamEvent):
-                            if isinstance(event.data, ResponseTextDeltaEvent):
-                                delta_text = event.data.delta
-                                output_index = event.data.output_index
+                        try:
+                            should_update = False
 
-                                if delta_text:
-                                    should_update = display_manager.handle_text_delta(
-                                        output_index, delta_text
+                            # Handle raw response events (token-by-token streaming)
+                            if isinstance(event, RawResponsesStreamEvent):
+                                if isinstance(event.data, ResponseTextDeltaEvent):
+                                    delta_text = event.data.delta
+                                    output_index = event.data.output_index
+
+                                    if delta_text:
+                                        should_update = display_manager.handle_text_delta(
+                                            output_index, delta_text
+                                        )
+
+                            # Handle run item events (tool calls, outputs, etc.)
+                            elif isinstance(event, RunItemStreamEvent):
+                                if event.name == "tool_called":
+                                    if (
+                                        hasattr(event, "item")
+                                        and isinstance(event.item, ToolCallItem)
+                                        and isinstance(
+                                            event.item.raw_item, ResponseFunctionToolCall
+                                        )
+                                    ):
+                                        should_update = display_manager.handle_tool_called(
+                                            event.item
+                                        )
+
+                                elif event.name == "tool_output":
+                                    if hasattr(event, "item") and isinstance(
+                                        event.item, ToolCallOutputItem
+                                    ):
+                                        should_update = display_manager.handle_tool_output(
+                                            event.item
+                                        )
+
+                                elif event.name == "message_output_created":
+                                    pass
+                                elif event.name == "handoff_requested":
+                                    # Handle agent handoff as a special tool call
+                                    should_update = display_manager.handle_tool_called(
+                                        type(
+                                            "HandoffItem",
+                                            (),
+                                            {
+                                                "raw_item": type(
+                                                    "RawItem",
+                                                    (),
+                                                    {
+                                                        "name": "agent_handoff",
+                                                        "arguments": "{}",
+                                                        "id": "handoff",
+                                                    },
+                                                )()
+                                            },
+                                        )()
                                     )
+                                elif event.name == "handoff_occured":
+                                    # Handle as tool output
+                                    should_update = display_manager.handle_tool_output(
+                                        type(
+                                            "HandoffOutput",
+                                            (),
+                                            {"output": "Agent switched", "tool_call_id": "handoff"},
+                                        )()
+                                    )
+                                elif event.name == "reasoning_item_created":
+                                    # Don't show reasoning steps in display
+                                    pass
 
-                        # Handle run item events (tool calls, outputs, etc.)
-                        elif isinstance(event, RunItemStreamEvent):
-                            if event.name == "tool_called":
-                                if (
-                                    hasattr(event, "item")
-                                    and isinstance(event.item, ToolCallItem)
-                                    and isinstance(event.item.raw_item, ResponseFunctionToolCall)
-                                ):
-                                    should_update = display_manager.handle_tool_called(event.item)
-
-                            elif event.name == "tool_output":
-                                if hasattr(event, "item") and isinstance(
-                                    event.item, ToolCallOutputItem
-                                ):
-                                    should_update = display_manager.handle_tool_output(event.item)
-
-                            elif event.name == "message_output_created":
-                                pass
-                            elif event.name == "handoff_requested":
-                                # Handle agent handoff as a special tool call
-                                should_update = display_manager.handle_tool_called(
-                                    type(
-                                        "HandoffItem",
-                                        (),
-                                        {
-                                            "raw_item": type(
-                                                "RawItem",
-                                                (),
-                                                {
-                                                    "name": "agent_handoff",
-                                                    "arguments": "{}",
-                                                    "id": "handoff",
-                                                },
-                                            )()
-                                        },
-                                    )()
-                                )
-                            elif event.name == "handoff_occured":
-                                # Handle as tool output
-                                should_update = display_manager.handle_tool_output(
-                                    type(
-                                        "HandoffOutput",
-                                        (),
-                                        {"output": "Agent switched", "tool_call_id": "handoff"},
-                                    )()
-                                )
-                            elif event.name == "reasoning_item_created":
-                                # Don't show reasoning steps in display
+                            # Handle agent updates (handoffs, etc.)
+                            elif isinstance(event, AgentUpdatedStreamEvent):
+                                # This is handled by handoff events above
                                 pass
 
-                        # Handle agent updates (handoffs, etc.)
-                        elif isinstance(event, AgentUpdatedStreamEvent):
-                            # This is handled by handoff events above
-                            pass
-
-                        # Update Rich Live display
-                        if should_update:
-                            current_content = display_manager.get_display_content()
-                            # Handle both string and renderable objects
-                            if isinstance(current_content, str):
-                                if current_content.strip():
+                            # Update Rich Live display
+                            if should_update:
+                                current_content = display_manager.get_display_content()
+                                # Handle both string and renderable objects
+                                if isinstance(current_content, str):
+                                    if current_content.strip():
+                                        live.update(current_content)
+                                        content_displayed = True
+                                elif current_content:  # For renderables like Group
                                     live.update(current_content)
                                     content_displayed = True
-                            elif current_content:  # For renderables like Group
-                                live.update(current_content)
-                                content_displayed = True
 
-                    except Exception as e:
-                        # Log event processing errors but continue streaming
-                        console.print(f"[dim red]Event processing error: {e}[/dim red]")
-                        continue
+                        except Exception as e:
+                            # Log event processing errors but continue streaming
+                            console.print(f"[dim red]Event processing error: {e}[/dim red]")
+                            continue
 
             except Exception as e:
                 # Handle execution errors in streaming mode
@@ -290,10 +329,39 @@ class AgentScheduler:
                 console.print(f"[red]{error_msg}[/red]")
                 # Clear the display manager and return early
                 display_manager.finalize_text_sections()
+                clear_esc_hint()  # Clear ESC hint on error path too
                 return f"{error_msg}\n\nPlease provide new instructions."
 
         # After Rich Live context ends, perform intelligent cleanup
         display_manager.finalize_text_sections()
+
+        # Clear the ESC hint line
+        clear_esc_hint()
+
+        # Handle cancellation case
+        if cancelled:
+            # Rich Live with transient=True clears content on exit, so we need to re-print
+            # Get partial content that was accumulated during streaming
+            partial_display = display_manager.get_final_display()
+            partial_text = display_manager.get_final_text()
+
+            # Show the partial output (text + tool summaries)
+            if partial_display and partial_display.strip():
+                print()  # Add spacing
+                console.print(partial_display)
+            elif partial_text and partial_text.strip():
+                print()  # Add spacing
+                console.print(partial_text)
+
+            # Show cancellation message
+            console.print("\n[yellow]Operation cancelled by user[/yellow]")
+            console.print()
+
+            # Capture any usage data we can
+            self._capture_usage(result)
+
+            # Return partial text for session history
+            return partial_text or "Operation cancelled. You can provide additional instructions."
 
         # Get final content for permanent display
         final_content = display_manager.get_display_content()

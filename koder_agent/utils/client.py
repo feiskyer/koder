@@ -229,9 +229,22 @@ def get_litellm_model_kwargs() -> dict:
 
 def is_native_openai_provider() -> bool:
     """Check if the current provider should use native OpenAI client."""
-    config, config_manager, provider, _ = _resolve_model_settings()
+    config, config_manager, provider, raw_model = _resolve_model_settings()
     api_key = _get_provider_api_key(config, config_manager, provider)
-    return provider in ("openai", "custom") and api_key is not None
+
+    if provider not in ("openai", "custom") or api_key is None:
+        return False
+
+    # Only use native client for standard OpenAI models
+    # This ensures compatible providers (like GLM) use LiteLLM which uses chat completions
+    model_lower = raw_model.lower()
+    return (
+        model_lower.startswith("gpt-")
+        or model_lower.startswith("o1-")
+        or model_lower.startswith("o3-")
+        or model_lower.startswith("o4-")
+        or model_lower.startswith("chatgpt-")
+    )
 
 
 @backoff.on_exception(
@@ -281,6 +294,7 @@ async def llm_completion(messages: list, model: Optional[str] = None) -> str:
     kwargs = {
         "model": model,
         "messages": messages,
+        "metadata": {"source": "koder"},
     }
     if api_key:
         kwargs["api_key"] = api_key
