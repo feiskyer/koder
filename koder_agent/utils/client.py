@@ -17,6 +17,16 @@ from ..config import get_config, get_config_manager
 litellm.suppress_debug_info = True
 litellm.drop_params = True
 
+# LiteLLM changed exception namespace in some versions; unify access.
+_LITELLM_EXC = getattr(litellm, "exceptions", litellm)
+_LITELLM_ERRORS = (
+    getattr(_LITELLM_EXC, "ServiceUnavailableError", Exception),
+    getattr(_LITELLM_EXC, "RateLimitError", Exception),
+    getattr(_LITELLM_EXC, "APIConnectionError", Exception),
+    getattr(_LITELLM_EXC, "Timeout", Exception),
+    getattr(_LITELLM_EXC, "InternalServerError", Exception),
+)
+
 # Configure global retry settings for LiteLLM
 # num_retries will be applied to all litellm API calls unless overridden
 litellm.num_retries = 3  # Default, will be updated with config values
@@ -91,6 +101,28 @@ def _split_model_identifier(model: str) -> tuple[Optional[str], str, bool]:
 
     provider_part, model_part = remainder.split("/", 1)
     return provider_part.lower(), model_part, had_prefix
+
+
+def _is_openai_native_model(raw_model: str) -> bool:
+    """
+    Detect whether a model string refers to an OpenAI-native model.
+
+    Handles plain names ("gpt-4o") and provider-prefixed strings
+    ("openai/gpt-4o", "litellm/openai/gpt-4o").
+    """
+    if not raw_model:
+        return False
+    _, model_part, _ = _split_model_identifier(raw_model)
+    ml = model_part.lower()
+    return ml.startswith(("gpt-", "o1-", "o3-", "o4-", "chatgpt-"))
+
+
+def _strip_matching_provider(raw_model: str, provider: str) -> str:
+    """Strip provider prefix if it matches the resolved provider."""
+    explicit_provider, model_part, _ = _split_model_identifier(raw_model)
+    if explicit_provider and explicit_provider == provider.lower():
+        return model_part
+    return raw_model
 
 
 def _resolve_model_settings():
@@ -190,10 +222,16 @@ def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = 
 def _compute_effective_model(config, config_manager, provider, raw_model, model_from_env=False):
     """Determine the model name and whether to use native OpenAI integration."""
     api_key = _get_provider_api_key(config, config_manager, provider)
-    use_native = provider in ("openai", "custom") and api_key
+    use_native = (
+        provider in ("openai", "custom")
+        and api_key
+        and _is_openai_native_model(raw_model)
+    )
 
     if use_native:
-        return raw_model, True, api_key
+        # If the raw model string included a provider prefix, strip it for native calls
+        normalized_raw = _strip_matching_provider(raw_model, provider)
+        return normalized_raw, True, api_key
 
     return _normalize_model_name(provider, raw_model, model_from_env), False, api_key
 
@@ -263,30 +301,12 @@ def is_native_openai_provider() -> bool:
     config, config_manager, provider, raw_model, _ = _resolve_model_settings()
     api_key = _get_provider_api_key(config, config_manager, provider)
 
-    if provider not in ("openai", "custom") or api_key is None:
-        return False
-
-    # Only use native client for standard OpenAI models
-    # This ensures compatible providers (like GLM) use LiteLLM which uses chat completions
-    model_lower = raw_model.lower()
-    return (
-        model_lower.startswith("gpt-")
-        or model_lower.startswith("o1-")
-        or model_lower.startswith("o3-")
-        or model_lower.startswith("o4-")
-        or model_lower.startswith("chatgpt-")
-    )
+    return provider in ("openai", "custom") and api_key is not None and _is_openai_native_model(raw_model)
 
 
 @backoff.on_exception(
     backoff.expo,
-    (
-        litellm.exceptions.ServiceUnavailableError,
-        litellm.exceptions.RateLimitError,
-        litellm.exceptions.APIConnectionError,
-        litellm.exceptions.Timeout,
-        litellm.exceptions.InternalServerError,
-    ),
+    _LITELLM_ERRORS,
     max_tries=3,
     jitter=backoff.full_jitter,
 )

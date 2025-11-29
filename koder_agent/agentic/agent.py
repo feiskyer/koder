@@ -23,15 +23,18 @@ logger = logging.getLogger(__name__)
 class RetryingLitellmModel(LitellmModel):
     """LitellmModel with backoff retry logic."""
 
+    _EXC = getattr(litellm, "exceptions", litellm)
+    _EXC_TUPLE = (
+        getattr(_EXC, "ServiceUnavailableError", Exception),
+        getattr(_EXC, "RateLimitError", Exception),
+        getattr(_EXC, "APIConnectionError", Exception),
+        getattr(_EXC, "Timeout", Exception),
+        getattr(_EXC, "InternalServerError", Exception),
+    )
+
     @backoff.on_exception(
         backoff.expo,
-        (
-            litellm.exceptions.ServiceUnavailableError,
-            litellm.exceptions.RateLimitError,
-            litellm.exceptions.APIConnectionError,
-            litellm.exceptions.Timeout,
-            litellm.exceptions.InternalServerError,
-        ),
+        _EXC_TUPLE,
         max_tries=3,
         jitter=backoff.full_jitter,
     )
@@ -40,13 +43,7 @@ class RetryingLitellmModel(LitellmModel):
 
     @backoff.on_exception(
         backoff.expo,
-        (
-            litellm.exceptions.ServiceUnavailableError,
-            litellm.exceptions.RateLimitError,
-            litellm.exceptions.APIConnectionError,
-            litellm.exceptions.Timeout,
-            litellm.exceptions.InternalServerError,
-        ),
+        _EXC_TUPLE,
         max_tries=5,
         jitter=backoff.full_jitter,
     )
