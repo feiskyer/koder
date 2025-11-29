@@ -94,17 +94,35 @@ def _split_model_identifier(model: str) -> tuple[Optional[str], str, bool]:
 
 
 def _resolve_model_settings():
-    """Resolve the effective config, provider, and raw model string."""
+    """Resolve the effective config, provider, and raw model string.
+
+    When model comes from KODER_MODEL env var, it may use 'provider/model' format
+    (e.g., 'openrouter/x-ai/grok-4.1-fast:free'), so we extract the provider from it.
+
+    When model comes from config file, the provider is explicitly specified in
+    config.model.provider, so we use that directly without parsing the model name.
+    Model names can contain '/' (e.g., 'x-ai/grok-4.1-fast:free') which should not
+    be interpreted as a provider prefix.
+    """
     config = get_config()
     config_manager = get_config_manager()
+
+    # Check if KODER_MODEL env var is set
+    env_model = os.environ.get("KODER_MODEL")
+    model_from_env = env_model is not None
+
     raw_model = config_manager.get_effective_value(config.model.name, "KODER_MODEL")
     provider = config.model.provider.lower()
 
-    explicit_provider, _, _ = _split_model_identifier(raw_model)
-    if explicit_provider:
-        provider = explicit_provider
+    # Only extract provider from model string if it came from environment variable
+    # Environment variable uses 'provider/model' format (e.g., 'openrouter/deepseek-r1')
+    # Config file has separate 'provider' field, so model name may contain '/' as part of name
+    if model_from_env:
+        explicit_provider, _, _ = _split_model_identifier(raw_model)
+        if explicit_provider:
+            provider = explicit_provider
 
-    return config, config_manager, provider, raw_model
+    return config, config_manager, provider, raw_model, model_from_env
 
 
 def _get_provider_api_key(config, config_manager, provider: str):
@@ -143,22 +161,33 @@ def _setup_provider_env_vars(config, provider: str):
             os.environ[env_var_name] = api_key
 
 
-def _normalize_model_name(provider: str, raw_model: str) -> str:
-    """Return a LiteLLM-compatible identifier, always using litellm/<provider>/<model>."""
+def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = False) -> str:
+    """Return a LiteLLM-compatible identifier, always using litellm/<provider>/<model>.
+
+    Args:
+        provider: The resolved provider name
+        raw_model: The raw model string
+        model_from_env: If True, the model string came from KODER_MODEL env var and may
+                       contain an explicit provider prefix (e.g., 'openrouter/model-name').
+                       If False, the model name should be used as-is since provider comes
+                       from config file.
+    """
     if not raw_model:
         return raw_model
     if raw_model.startswith("litellm/"):
         return raw_model
 
-    explicit_provider, remainder, _ = _split_model_identifier(raw_model)
-    if explicit_provider:
-        return f"litellm/{explicit_provider}/{remainder}"
+    # Only parse provider from model string if it came from environment variable
+    if model_from_env:
+        explicit_provider, remainder, _ = _split_model_identifier(raw_model)
+        if explicit_provider:
+            return f"litellm/{explicit_provider}/{remainder}"
 
     provider = provider.lower()
     return f"litellm/{provider}/{raw_model}"
 
 
-def _compute_effective_model(config, config_manager, provider, raw_model):
+def _compute_effective_model(config, config_manager, provider, raw_model, model_from_env=False):
     """Determine the model name and whether to use native OpenAI integration."""
     api_key = _get_provider_api_key(config, config_manager, provider)
     use_native = provider in ("openai", "custom") and api_key
@@ -166,25 +195,27 @@ def _compute_effective_model(config, config_manager, provider, raw_model):
     if use_native:
         return raw_model, True, api_key
 
-    return _normalize_model_name(provider, raw_model), False, api_key
+    return _normalize_model_name(provider, raw_model, model_from_env), False, api_key
 
 
 def get_model_name():
     """Get the appropriate model name with priority: ENV > Config > Default."""
-    config, config_manager, provider, raw_model = _resolve_model_settings()
-    model, _, _ = _compute_effective_model(config, config_manager, provider, raw_model)
+    config, config_manager, provider, raw_model, model_from_env = _resolve_model_settings()
+    model, _, _ = _compute_effective_model(
+        config, config_manager, provider, raw_model, model_from_env
+    )
     return model
 
 
 def get_api_key():
     """Get the API key for the current provider with priority: ENV > Config."""
-    config, config_manager, provider, _ = _resolve_model_settings()
+    config, config_manager, provider, _, _ = _resolve_model_settings()
     return _get_provider_api_key(config, config_manager, provider)
 
 
 def get_base_url():
     """Get the base URL for the current provider with priority: ENV > Config."""
-    config, config_manager, provider, _ = _resolve_model_settings()
+    config, config_manager, provider, _, _ = _resolve_model_settings()
     # Get the provider-specific base_url env var, or fall back to a generic pattern
     base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
         "base_url", f"{provider.upper()}_BASE_URL"
@@ -199,10 +230,10 @@ def get_litellm_model_kwargs() -> dict:
     Returns a dict with 'model', 'api_key', 'base_url', and retry configuration
     that can be passed directly to LitellmModel constructor.
     """
-    config, config_manager, provider, raw_model = _resolve_model_settings()
+    config, config_manager, provider, raw_model, model_from_env = _resolve_model_settings()
 
     # Get normalized model name for LiteLLM
-    model = _normalize_model_name(provider, raw_model)
+    model = _normalize_model_name(provider, raw_model, model_from_env)
     # Strip the 'litellm/' prefix since LitellmModel adds it internally
     if model.startswith("litellm/"):
         model = model[len("litellm/") :]
@@ -229,7 +260,7 @@ def get_litellm_model_kwargs() -> dict:
 
 def is_native_openai_provider() -> bool:
     """Check if the current provider should use native OpenAI client."""
-    config, config_manager, provider, raw_model = _resolve_model_settings()
+    config, config_manager, provider, raw_model, _ = _resolve_model_settings()
     api_key = _get_provider_api_key(config, config_manager, provider)
 
     if provider not in ("openai", "custom") or api_key is None:
@@ -274,14 +305,16 @@ async def llm_completion(messages: list, model: Optional[str] = None) -> str:
         The completion response content as string
     """
 
-    config, config_manager, provider, raw_model = _resolve_model_settings()
+    config, config_manager, provider, raw_model, model_from_env = _resolve_model_settings()
 
     # Ensure provider env vars are set (for litellm to pick up)
     _setup_provider_env_vars(config, provider)
 
     # Get model name and API key
     if model is None:
-        model, _, api_key = _compute_effective_model(config, config_manager, provider, raw_model)
+        model, _, api_key = _compute_effective_model(
+            config, config_manager, provider, raw_model, model_from_env
+        )
     else:
         api_key = _get_provider_api_key(config, config_manager, provider)
 
@@ -311,13 +344,13 @@ def setup_openai_client():
     Also configures global LiteLLM retry settings for all providers.
     """
     set_tracing_disabled(True)
-    config, config_manager, provider, raw_model = _resolve_model_settings()
+    config, config_manager, provider, raw_model, model_from_env = _resolve_model_settings()
 
     # Setup provider environment variables for LiteLLM
     _setup_provider_env_vars(config, provider)
 
     model, use_native, api_key = _compute_effective_model(
-        config, config_manager, provider, raw_model
+        config, config_manager, provider, raw_model, model_from_env
     )
 
     # Get base URL with priority: ENV > Config
