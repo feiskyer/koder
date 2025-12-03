@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from pathlib import Path
 
 import backoff
 import litellm
@@ -12,9 +13,11 @@ from rich.console import Console
 
 from ..config import get_config
 from ..mcp import load_mcp_servers
+from ..tools.skill import SkillLoader
 from ..utils.client import get_litellm_model_kwargs, get_model_name, is_native_openai_provider
 from ..utils.model_info import get_maximum_output_tokens
 from ..utils.prompts import KODER_SYSTEM_PROMPT
+from .skill_guardrail import skill_restriction_guardrail
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -52,6 +55,42 @@ class RetryingLitellmModel(LitellmModel):
             yield chunk
 
 
+def _get_skills_metadata(config) -> str:
+    """Load and return skills metadata from configured directories.
+
+    Priority: project skills directory > user skills directory.
+    Skills with the same name in project dir override user dir.
+    """
+    if not config.skills.enabled:
+        return "Skills are disabled."
+
+    all_skills = {}
+
+    # Load user skills first (lower priority)
+    user_dir = Path(config.skills.user_skills_dir).expanduser()
+    if user_dir.exists():
+        user_loader = SkillLoader(user_dir)
+        for skill in user_loader.discover_skills():
+            all_skills[skill.name] = skill
+
+    # Load project skills (higher priority - overrides user skills)
+    project_dir = Path(config.skills.project_skills_dir)
+    if project_dir.exists():
+        project_loader = SkillLoader(project_dir)
+        for skill in project_loader.discover_skills():
+            all_skills[skill.name] = skill
+
+    if not all_skills:
+        return "No skills are currently available."
+
+    lines = ["Available skills:", ""]
+    for skill in sorted(all_skills.values(), key=lambda s: s.name.lower()):
+        description = skill.description.strip()
+        lines.append(f"- {skill.name}: {description}")
+
+    return "\n".join(lines)
+
+
 async def create_dev_agent(tools) -> Agent:
     """Create the main development agent with MCP servers."""
     config = get_config()
@@ -80,13 +119,19 @@ async def create_dev_agent(tools) -> Agent:
         effort = None if config.model.reasoning_effort == "none" else config.model.reasoning_effort
         model_settings.reasoning = Reasoning(effort=effort, summary="detailed")
 
+    # Build system prompt with skills metadata (Progressive Disclosure Level 1)
+    skills_metadata = _get_skills_metadata(config)
+    system_prompt = KODER_SYSTEM_PROMPT.replace("{SKILLS_METADATA}", skills_metadata)
+
     dev_agent = Agent(
         name="Koder",
         model=model,
-        instructions=KODER_SYSTEM_PROMPT,
+        instructions=system_prompt,
         tools=tools,
         mcp_servers=mcp_servers,
         model_settings=model_settings,
+        # Add skill-based tool restriction enforcement
+        input_guardrails=[skill_restriction_guardrail],
     )
 
     if "github_copilot" in model_name_str:

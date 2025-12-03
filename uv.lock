@@ -1839,7 +1839,7 @@ wheels = [
 
 [[package]]
 name = "koder"
-version = "0.4.3"
+version = "0.4.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },

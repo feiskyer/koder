@@ -119,6 +119,7 @@ class ToolEngine:
             "todo_write",
             "web_fetch",
             "task_delegate",
+            "get_skill",
             "git_command",
         }
         return name in allowed_tools

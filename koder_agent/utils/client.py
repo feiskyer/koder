@@ -222,11 +222,7 @@ def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = 
 def _compute_effective_model(config, config_manager, provider, raw_model, model_from_env=False):
     """Determine the model name and whether to use native OpenAI integration."""
     api_key = _get_provider_api_key(config, config_manager, provider)
-    use_native = (
-        provider in ("openai", "custom")
-        and api_key
-        and _is_openai_native_model(raw_model)
-    )
+    use_native = provider in ("openai", "custom") and api_key and _is_openai_native_model(raw_model)
 
     if use_native:
         # If the raw model string included a provider prefix, strip it for native calls
@@ -301,7 +297,11 @@ def is_native_openai_provider() -> bool:
     config, config_manager, provider, raw_model, _ = _resolve_model_settings()
     api_key = _get_provider_api_key(config, config_manager, provider)
 
-    return provider in ("openai", "custom") and api_key is not None and _is_openai_native_model(raw_model)
+    return (
+        provider in ("openai", "custom")
+        and api_key is not None
+        and _is_openai_native_model(raw_model)
+    )
 
 
 @backoff.on_exception(

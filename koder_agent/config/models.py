@@ -71,9 +71,22 @@ class MCPServerConfigYaml(BaseModel):
     blocked_tools: Optional[List[str]] = Field(default=None, description="Blocked tools blacklist")
 
 
+class SkillsConfig(BaseModel):
+    """Skills configuration settings for progressive disclosure."""
+
+    enabled: bool = Field(default=True, description="Enable skills feature")
+    project_skills_dir: str = Field(
+        default=".koder/skills", description="Project-level skills directory"
+    )
+    user_skills_dir: str = Field(
+        default="~/.koder/skills", description="User-level skills directory"
+    )
+
+
 class KoderConfig(BaseModel):
     """Root configuration model for Koder CLI."""
 
     model: ModelConfig = Field(default_factory=ModelConfig)
     cli: CLIConfig = Field(default_factory=CLIConfig)
     mcp_servers: List[MCPServerConfigYaml] = Field(default_factory=list)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)

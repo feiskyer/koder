@@ -4,14 +4,15 @@
 
 Koder is an experimental, universal AI coding assistant designed to explore how to build an advanced terminal-based AI coding assistant. Written entirely in Python, it serves as both a functional tool and a learning playground for AI agent development.
 
-**🎯 Project Status**: Under active vibe coding! This is a learning-focused project where we explore building AI coding agents.
+**🎯 Project Status**: Alpha! This is a learning-focused project where we explore building AI coding agents.
 
 ## ✨ Features
 
 - **🤖 Universal AI Support**: Works with OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers via LiteLLM with intelligent auto-detection
 - **💾 Smart Context Management**: Persistent sessions with SQLite storage and automatic token-aware compression (50k token limit)
 - **🔄 Real-time Streaming**: Rich Live displays with intelligent terminal cleanup for responsive user experience
-- **🛠️ Comprehensive Toolset**: file operations, search, shell, task delegation and todos.
+- **🛠️ Comprehensive Toolset**: file operations, search, shell, task delegation, todos, and skills
+- **📚 Progressive Disclosure Skills**: Load specialized knowledge on-demand with 90%+ token savings
 - **🔌 MCP Integration**: Model Context Protocol support with stdio, SSE, and HTTP transports for extensible tool ecosystem
 - **🛡️ Enterprise Security**: SecurityGuard validation, output filtering, permission system, and input sanitization
 - **🎯 Zero Configuration**: Automatic provider detection with fallback defaults
@@ -312,6 +313,84 @@ mcp_servers:
   - name: "streaming-server"
     transport_type: "sse"
     url: "http://localhost:9000/sse"
+```
+
+### Skills
+
+Skills provide specialized knowledge and guidance that Koder can load on-demand. This uses a **Progressive Disclosure** pattern to minimize token usage - only skill metadata is loaded at startup, with full content fetched when needed.
+
+#### Skills Directory Structure
+
+Skills are loaded from two locations (project skills take priority):
+
+1. **Project skills**: `.koder/skills/` in your current directory
+2. **User skills**: `~/.koder/skills/` for personal skills
+
+Each skill lives in its own directory with a `SKILL.md` file:
+
+```
+.koder/skills/
+├── api-design/
+│   └── SKILL.md
+├── code-review/
+│   ├── SKILL.md
+│   └── checklist.md    # Supplementary resource
+└── testing/
+    └── SKILL.md
+```
+
+#### Creating a Skill
+
+Create a `SKILL.md` file with YAML frontmatter:
+
+```markdown
+---
+name: api-design
+description: Best practices for designing RESTful APIs
+allowed_tools:
+  - read_file
+  - write_file
+---
+
+# API Design Guidelines
+
+## RESTful Principles
+
+Use nouns for resources, HTTP verbs for actions...
+
+## Versioning
+
+Always version your APIs using URL path (`/v1/users`)...
+
+## Error Handling
+
+Return consistent error responses with status codes...
+```
+
+#### Frontmatter Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique skill identifier |
+| `description` | Yes | Brief description (shown in metadata) |
+| `allowed_tools` | No | Tools the skill recommends using |
+
+#### How Skills Work
+
+1. **Startup**: Only skill names and descriptions are loaded (Level 1 - minimal tokens)
+2. **On-demand**: When Koder needs a skill, it calls `get_skill(name)` to load full content (Level 2)
+3. **Supplementary**: Skills can reference additional files that Koder reads with `read_file` (Level 3)
+
+This progressive approach saves **90%+ tokens** compared to loading all skill content at startup.
+
+#### Skills Configuration
+
+```yaml
+# ~/.koder/config.yaml
+skills:
+  enabled: true                        # Enable/disable skills (default: true)
+  project_skills_dir: ".koder/skills"  # Project skills location
+  user_skills_dir: "~/.koder/skills"   # User skills location
 ```
 
 ### Example Configurations

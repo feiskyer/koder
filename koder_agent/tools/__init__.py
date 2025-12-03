@@ -28,6 +28,14 @@ from .shell import (
     shell_kill,
     shell_output,
 )
+from .skill import Skill, SkillLoader, SkillModel, get_skill
+from .skill_context import (
+    SkillRestrictions,
+    add_skill_restrictions,
+    clear_restrictions,
+    get_active_restrictions,
+    has_active_restrictions,
+)
 from .task import TaskDelegateModel, TaskModel, task_delegate
 from .todo import TodoModel, TodoWriteModel, todo_read, todo_write
 from .web import SearchModel, WebFetchModel, web_fetch, web_search
@@ -49,6 +57,7 @@ tool_engine.register(GrepModel)(grep_search)
 tool_engine.register(LSModel)(list_directory)
 # TODO tools are already registered via @function_tool decorator
 # Removing duplicate registration to avoid naming conflicts
+tool_engine.register(SkillModel)(get_skill)
 tool_engine.register(WebFetchModel)(web_fetch)
 tool_engine.register(TaskDelegateModel)(task_delegate)
 tool_engine.register(GitModel)(git_command)
@@ -74,6 +83,7 @@ def get_all_tools() -> List[Tool]:
         todo_read,
         todo_write,
         task_delegate,
+        get_skill,
     ]
 
     # Filter to only include properly decorated tools
@@ -98,6 +108,14 @@ __all__ = [
     "WebFetchModel",
     "GlobModel",
     "GrepModel",
+    "Skill",
+    "SkillLoader",
+    "SkillModel",
+    "SkillRestrictions",
+    "add_skill_restrictions",
+    "clear_restrictions",
+    "get_active_restrictions",
+    "has_active_restrictions",
     "TodoModel",
     "TodoWriteModel",
     "TaskModel",
@@ -119,4 +137,5 @@ __all__ = [
     "todo_read",
     "todo_write",
     "task_delegate",
+    "get_skill",
 ]

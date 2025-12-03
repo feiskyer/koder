@@ -1,6 +1,7 @@
+from pathlib import Path
+
 import pytest
 import yaml
-from pathlib import Path
 
 from koder_agent.config import reset_config_manager
 from koder_agent.config.manager import ConfigManager
@@ -55,10 +56,7 @@ def test_env_model_provider_overrides_config(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
 
     # Env-supplied provider should be used and normalized for LiteLLM
-    assert (
-        get_model_name()
-        == "litellm/openrouter/x-ai/grok-4.1-fast:free"
-    )
+    assert get_model_name() == "litellm/openrouter/x-ai/grok-4.1-fast:free"
     kwargs = get_litellm_model_kwargs()
     assert kwargs["model"] == "openrouter/x-ai/grok-4.1-fast:free"
 
