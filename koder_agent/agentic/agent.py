@@ -17,7 +17,6 @@ from ..tools.skill import SkillLoader
 from ..utils.client import get_litellm_model_kwargs, get_model_name, is_native_openai_provider
 from ..utils.model_info import get_maximum_output_tokens
 from ..utils.prompts import KODER_SYSTEM_PROMPT
-from .skill_guardrail import skill_restriction_guardrail
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -130,8 +129,6 @@ async def create_dev_agent(tools) -> Agent:
         tools=tools,
         mcp_servers=mcp_servers,
         model_settings=model_settings,
-        # Add skill-based tool restriction enforcement
-        input_guardrails=[skill_restriction_guardrail],
     )
 
     if "github_copilot" in model_name_str:

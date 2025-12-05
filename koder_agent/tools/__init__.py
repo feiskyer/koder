@@ -2,8 +2,9 @@
 
 from typing import List
 
-from agents import Tool
+from agents import FunctionTool, Tool
 
+from ..agentic.skill_guardrail import skill_restriction_guardrail
 from .engine import ToolEngine
 from .file import (
     FileEditModel,
@@ -64,7 +65,11 @@ tool_engine.register(GitModel)(git_command)
 
 
 def get_all_tools() -> List[Tool]:
-    """Get all registered tools as a list."""
+    """Get all registered tools as a list.
+
+    Each FunctionTool is configured with the skill_restriction_guardrail
+    to enforce skill-based tool restrictions when skills are active.
+    """
     # Collect all @function_tool decorated functions directly
     tools = [
         read_file,
@@ -86,8 +91,18 @@ def get_all_tools() -> List[Tool]:
         get_skill,
     ]
 
-    # Filter to only include properly decorated tools
-    return [tool for tool in tools if hasattr(tool, "name")]
+    # Filter to only include properly decorated tools and attach guardrails
+    result = []
+    for tool in tools:
+        if hasattr(tool, "name"):
+            # Attach skill restriction guardrail to each FunctionTool
+            if isinstance(tool, FunctionTool):
+                if tool.tool_input_guardrails is None:
+                    tool.tool_input_guardrails = [skill_restriction_guardrail]
+                elif skill_restriction_guardrail not in tool.tool_input_guardrails:
+                    tool.tool_input_guardrails.append(skill_restriction_guardrail)
+            result.append(tool)
+    return result
 
 
 __all__ = [

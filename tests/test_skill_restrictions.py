@@ -338,3 +338,376 @@ class TestSkillGuardrail:
 
         assert result.behavior["type"] == "reject_content"
         assert result.output_info.get("error") == "missing_tool_name"
+
+
+class TestToolGuardrailIntegration:
+    """Tests for proper guardrail integration with tools and agent.
+
+    These tests ensure that:
+    1. ToolInputGuardrail is attached to tools (not agent's input_guardrails)
+    2. Agent creation works without AttributeError for run_in_parallel
+    3. The guardrail type is correct for the SDK's expectations
+    """
+
+    def test_all_tools_have_skill_guardrail_attached(self):
+        """Test that get_all_tools() attaches skill_restriction_guardrail to each tool."""
+        from agents import FunctionTool
+
+        from koder_agent.agentic.skill_guardrail import skill_restriction_guardrail
+        from koder_agent.tools import get_all_tools
+
+        tools = get_all_tools()
+
+        # Verify we have tools
+        assert len(tools) > 0, "Expected at least one tool"
+
+        # Verify each FunctionTool has the guardrail attached
+        for tool in tools:
+            if isinstance(tool, FunctionTool):
+                assert tool.tool_input_guardrails is not None, (
+                    f"Tool '{tool.name}' should have tool_input_guardrails"
+                )
+                assert len(tool.tool_input_guardrails) > 0, (
+                    f"Tool '{tool.name}' should have at least one guardrail"
+                )
+                assert skill_restriction_guardrail in tool.tool_input_guardrails, (
+                    f"Tool '{tool.name}' should have skill_restriction_guardrail"
+                )
+
+    def test_skill_restriction_guardrail_is_correct_type(self):
+        """Test that skill_restriction_guardrail is a ToolInputGuardrail, not InputGuardrail."""
+        from agents import ToolInputGuardrail
+
+        from koder_agent.agentic.skill_guardrail import skill_restriction_guardrail
+
+        # The guardrail must be ToolInputGuardrail (for per-tool validation)
+        # NOT InputGuardrail (which has run_in_parallel and is for agent-level)
+        assert isinstance(skill_restriction_guardrail, ToolInputGuardrail), (
+            "skill_restriction_guardrail must be a ToolInputGuardrail instance"
+        )
+
+        # ToolInputGuardrail should NOT have run_in_parallel attribute
+        # (that's only on InputGuardrail for agent-level guardrails)
+        assert not hasattr(skill_restriction_guardrail, "run_in_parallel"), (
+            "ToolInputGuardrail should not have run_in_parallel attribute"
+        )
+
+    def test_agent_creation_with_tools_no_attribute_error(self):
+        """Test that Agent can be created with tools without run_in_parallel AttributeError.
+
+        This is a regression test for the bug where ToolInputGuardrail was incorrectly
+        passed to Agent's input_guardrails (which expects InputGuardrail with run_in_parallel).
+        """
+        from agents import Agent
+
+        from koder_agent.tools import get_all_tools
+
+        tools = get_all_tools()
+
+        # This should NOT raise AttributeError: 'ToolInputGuardrail' has no attribute 'run_in_parallel'
+        agent = Agent(
+            name="test-agent",
+            instructions="Test agent for guardrail integration",
+            tools=tools,
+        )
+
+        assert agent is not None
+        assert len(agent.tools) == len(tools)
+        # Agent should NOT have input_guardrails set (guardrails are on tools now)
+        assert len(agent.input_guardrails) == 0
+
+    def test_tool_guardrails_not_duplicated_on_repeated_calls(self):
+        """Test that calling get_all_tools() multiple times doesn't duplicate guardrails."""
+        from koder_agent.agentic.skill_guardrail import skill_restriction_guardrail
+        from koder_agent.tools import get_all_tools
+
+        # Call get_all_tools multiple times to simulate repeated usage
+        get_all_tools()
+        get_all_tools()
+        tools = get_all_tools()
+
+        # Check that guardrails aren't duplicated
+        for tool in tools:
+            if hasattr(tool, "tool_input_guardrails") and tool.tool_input_guardrails:
+                guardrail_count = tool.tool_input_guardrails.count(skill_restriction_guardrail)
+                assert guardrail_count == 1, (
+                    f"Tool '{tool.name}' has {guardrail_count} copies of skill_restriction_guardrail, expected 1"
+                )
+
+
+class TestPatternBasedRestrictions:
+    """Tests for pattern-based tool restriction matching.
+
+    Pattern syntax:
+    - "read_file"           - Exact tool name match
+    - "run_shell:git *"     - Shell commands matching glob pattern
+    - "run_shell:*"         - All shell commands allowed
+    - "*"                   - Wildcard, all tools allowed
+    """
+
+    def test_exact_tool_name_match(self):
+        """Test that exact tool names still work."""
+        restrictions = SkillRestrictions(
+            loaded_skills=["test-skill"],
+            allowed_tools={"read_file", "write_file"},
+        )
+
+        assert restrictions.is_tool_allowed("read_file") is True
+        assert restrictions.is_tool_allowed("write_file") is True
+        assert restrictions.is_tool_allowed("run_shell") is False
+
+    def test_wildcard_allows_all_tools(self):
+        """Test that '*' pattern allows all tools."""
+        restrictions = SkillRestrictions(
+            loaded_skills=["permissive-skill"],
+            allowed_tools={"*"},
+        )
+
+        assert restrictions.is_tool_allowed("read_file") is True
+        assert restrictions.is_tool_allowed("write_file") is True
+        assert restrictions.is_tool_allowed("run_shell") is True
+        assert restrictions.is_tool_allowed("any_tool_name") is True
+
+    def test_shell_command_pattern_allows_matching_commands(self):
+        """Test that 'run_shell:pattern' allows matching shell commands."""
+        import json
+
+        restrictions = SkillRestrictions(
+            loaded_skills=["git-skill"],
+            allowed_tools={"run_shell:git *"},
+        )
+
+        # Should allow git commands
+        git_status_args = json.dumps({"command": "git status"})
+        assert restrictions.is_tool_allowed("run_shell", git_status_args) is True
+
+        git_commit_args = json.dumps({"command": "git commit -m 'test'"})
+        assert restrictions.is_tool_allowed("run_shell", git_commit_args) is True
+
+        # Should block non-git commands
+        cat_args = json.dumps({"command": "cat /etc/passwd"})
+        assert restrictions.is_tool_allowed("run_shell", cat_args) is False
+
+        rm_args = json.dumps({"command": "rm -rf /"})
+        assert restrictions.is_tool_allowed("run_shell", rm_args) is False
+
+    def test_shell_command_pattern_with_wildcard(self):
+        """Test that 'run_shell:*' allows all shell commands."""
+        import json
+
+        restrictions = SkillRestrictions(
+            loaded_skills=["shell-skill"],
+            allowed_tools={"run_shell:*"},
+        )
+
+        # Should allow any command
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "cat foo.txt"}))
+            is True
+        )
+        assert restrictions.is_tool_allowed("run_shell", json.dumps({"command": "ls -la"})) is True
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "rm -rf /"})) is True
+        )
+
+    def test_shell_pattern_blocks_run_shell_without_args(self):
+        """Test that shell patterns require tool_args to match."""
+        restrictions = SkillRestrictions(
+            loaded_skills=["git-skill"],
+            allowed_tools={"run_shell:git *"},
+        )
+
+        # Without tool_args, pattern can't match
+        assert restrictions.is_tool_allowed("run_shell") is False
+        assert restrictions.is_tool_allowed("run_shell", None) is False
+        assert restrictions.is_tool_allowed("run_shell", "") is False
+
+    def test_multiple_shell_patterns(self):
+        """Test multiple shell command patterns work together."""
+        import json
+
+        restrictions = SkillRestrictions(
+            loaded_skills=["dev-skill"],
+            allowed_tools={"run_shell:git *", "run_shell:npm *", "run_shell:cat *"},
+        )
+
+        # All patterns should work
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "git status"})) is True
+        )
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "npm install"}))
+            is True
+        )
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "cat README.md"}))
+            is True
+        )
+
+        # Non-matching commands should be blocked
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "rm -rf /"})) is False
+        )
+
+    def test_git_command_pattern_matching(self):
+        """Test that 'git_command:pattern' matches git command args."""
+        import json
+
+        restrictions = SkillRestrictions(
+            loaded_skills=["git-readonly"],
+            allowed_tools={"git_command:status", "git_command:log *", "git_command:diff *"},
+        )
+
+        # Exact match
+        assert restrictions.is_tool_allowed("git_command", json.dumps({"args": "status"})) is True
+
+        # Pattern match
+        assert (
+            restrictions.is_tool_allowed("git_command", json.dumps({"args": "log --oneline"}))
+            is True
+        )
+        assert (
+            restrictions.is_tool_allowed("git_command", json.dumps({"args": "diff HEAD~1"})) is True
+        )
+
+        # Non-matching
+        assert (
+            restrictions.is_tool_allowed("git_command", json.dumps({"args": "push origin main"}))
+            is False
+        )
+        assert (
+            restrictions.is_tool_allowed("git_command", json.dumps({"args": "commit -m 'test'"}))
+            is False
+        )
+
+    def test_mixed_exact_and_pattern_restrictions(self):
+        """Test combining exact tool names with patterns."""
+        import json
+
+        restrictions = SkillRestrictions(
+            loaded_skills=["mixed-skill"],
+            allowed_tools={"read_file", "glob_search", "run_shell:cat *"},
+        )
+
+        # Exact matches work
+        assert restrictions.is_tool_allowed("read_file") is True
+        assert restrictions.is_tool_allowed("glob_search") is True
+
+        # Pattern matches work
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "cat foo.txt"}))
+            is True
+        )
+
+        # Non-allowed tools blocked
+        assert restrictions.is_tool_allowed("write_file") is False
+        assert (
+            restrictions.is_tool_allowed("run_shell", json.dumps({"command": "rm foo.txt"}))
+            is False
+        )
+
+    def test_glob_pattern_on_tool_names(self):
+        """Test glob patterns on tool names themselves."""
+        restrictions = SkillRestrictions(
+            loaded_skills=["file-skill"],
+            allowed_tools={"*_file", "glob_*"},
+        )
+
+        # Matching patterns
+        assert restrictions.is_tool_allowed("read_file") is True
+        assert restrictions.is_tool_allowed("write_file") is True
+        assert restrictions.is_tool_allowed("edit_file") is True
+        assert restrictions.is_tool_allowed("glob_search") is True
+
+        # Non-matching
+        assert restrictions.is_tool_allowed("run_shell") is False
+        assert restrictions.is_tool_allowed("web_search") is False
+
+    def test_invalid_json_in_tool_args_is_safe(self):
+        """Test that invalid JSON in tool_args doesn't crash."""
+        restrictions = SkillRestrictions(
+            loaded_skills=["test-skill"],
+            allowed_tools={"run_shell:git *"},
+        )
+
+        # Invalid JSON should not match (but also not crash)
+        assert restrictions.is_tool_allowed("run_shell", "not valid json") is False
+        assert restrictions.is_tool_allowed("run_shell", "{broken") is False
+        assert restrictions.is_tool_allowed("run_shell", "null") is False
+
+    def test_always_allowed_tools_bypass_patterns(self):
+        """Test that always-allowed tools work even with restrictive patterns."""
+        restrictions = SkillRestrictions(
+            loaded_skills=["restrictive-skill"],
+            allowed_tools={"read_file"},  # Very restrictive
+        )
+
+        # Always-allowed should still work
+        assert restrictions.is_tool_allowed("get_skill") is True
+        assert restrictions.is_tool_allowed("todo_read") is True
+        assert restrictions.is_tool_allowed("todo_write") is True
+
+
+class TestPatternGuardrailIntegration:
+    """Tests for pattern matching through the guardrail."""
+
+    def test_guardrail_with_shell_pattern(self):
+        """Test that guardrail correctly enforces shell command patterns."""
+        import json
+
+        from agents import ToolInputGuardrailData
+
+        from koder_agent.agentic.skill_guardrail import skill_tool_restriction_guardrail
+
+        # Set up restrictions with shell pattern
+        skill = Skill(
+            name="git-only-skill",
+            description="Only allows git commands",
+            content="Content",
+            allowed_tools=["run_shell:git *", "read_file"],
+        )
+        add_skill_restrictions(skill)
+
+        # Test allowed git command
+        mock_context = MagicMock()
+        mock_context.tool_name = "run_shell"
+        mock_context.tool_arguments = json.dumps({"command": "git status"})
+        data = MagicMock(spec=ToolInputGuardrailData)
+        data.context = mock_context
+
+        result = skill_tool_restriction_guardrail(data)
+        assert result.behavior["type"] == "allow"
+
+        # Test blocked command
+        mock_context.tool_arguments = json.dumps({"command": "rm -rf /"})
+        result = skill_tool_restriction_guardrail(data)
+        assert result.behavior["type"] == "reject_content"
+
+    def test_guardrail_with_wildcard_pattern(self):
+        """Test that guardrail correctly handles wildcard pattern."""
+        from agents import ToolInputGuardrailData
+
+        from koder_agent.agentic.skill_guardrail import skill_tool_restriction_guardrail
+
+        # Set up restrictions with wildcard
+        skill = Skill(
+            name="permissive-skill",
+            description="Allows everything",
+            content="Content",
+            allowed_tools=["*"],
+        )
+        add_skill_restrictions(skill)
+
+        # Any tool should be allowed
+        mock_context = MagicMock()
+        mock_context.tool_name = "any_tool"
+        mock_context.tool_arguments = None
+        data = MagicMock(spec=ToolInputGuardrailData)
+        data.context = mock_context
+
+        result = skill_tool_restriction_guardrail(data)
+        assert result.behavior["type"] == "allow"
+
+        mock_context.tool_name = "another_tool"
+        result = skill_tool_restriction_guardrail(data)
+        assert result.behavior["type"] == "allow"

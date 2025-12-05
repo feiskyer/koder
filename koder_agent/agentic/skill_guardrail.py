@@ -26,6 +26,12 @@ def skill_tool_restriction_guardrail(
     (plus always-allowed tools like get_skill, todo_read, todo_write)
     can be used.
 
+    Supports pattern matching for fine-grained control:
+    - "read_file"           - Exact tool name match
+    - "run_shell:git *"     - Shell commands matching glob pattern
+    - "run_shell:*"         - All shell commands allowed
+    - "*"                   - Wildcard, all tools allowed
+
     Args:
         data: The guardrail input data containing tool context
 
@@ -47,8 +53,11 @@ def skill_tool_restriction_guardrail(
             output_info={"error": "missing_tool_name"},
         )
 
-    # Check if tool is allowed
-    if restrictions.is_tool_allowed(tool_name):
+    # Get tool arguments for pattern matching (e.g., shell command matching)
+    tool_args = getattr(data.context, "tool_arguments", None)
+
+    # Check if tool is allowed (with pattern matching support)
+    if restrictions.is_tool_allowed(tool_name, tool_args):
         return ToolGuardrailFunctionOutput.allow()
 
     # Tool is not allowed - reject with informative message

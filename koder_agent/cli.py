@@ -132,11 +132,8 @@ async def main():
         parser.add_argument(
             "--resume", action="store_true", help="List and select a previous session to resume"
         )
-        stream_group = parser.add_mutually_exclusive_group()
-        stream_group.add_argument(
-            "--stream", action="store_true", help="Force enable streaming mode"
-        )
-        stream_group.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
+        parser.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
+        parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
         subparsers = parser.add_subparsers(dest="command", help="Available commands")
         create_mcp_subparsers(subparsers)
@@ -148,17 +145,19 @@ async def main():
         parser.add_argument(
             "--resume", action="store_true", help="List and select a previous session to resume"
         )
-        stream_group = parser.add_mutually_exclusive_group()
-        stream_group.add_argument(
-            "--stream", action="store_true", help="Force enable streaming mode"
-        )
-        stream_group.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
+        parser.add_argument("--no-stream", action="store_true", help="Disable streaming mode")
+        parser.add_argument("--debug", action="store_true", help="Enable debug logging")
 
         parser.add_argument(
             "prompt", nargs="*", help="Prompt text (if not provided, starts interactive mode)"
         )
 
     args = parser.parse_args()
+
+    # Configure logging level based on --debug flag
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logging.debug("Debug logging enabled")
 
     # Set command to None for prompt mode
     if not hasattr(args, "command"):
@@ -195,13 +194,8 @@ async def main():
 
     context = await load_context()
 
-    # Determine streaming setting: CLI flag overrides config
-    if args.stream:
-        streaming = True
-    elif args.no_stream:
-        streaming = False
-    else:
-        streaming = config.cli.stream
+    # Determine streaming setting: --no-stream overrides config default
+    streaming = config.cli.stream and not args.no_stream
 
     scheduler = AgentScheduler(session_id=args.session, streaming=streaming)
 
