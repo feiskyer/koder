@@ -108,3 +108,25 @@ def get_summarization_threshold(model: str, threshold_ratio: float = 0.8) -> int
     """
     context_size = get_context_window_size(model)
     return int(context_size * threshold_ratio)
+
+
+def should_use_reasoning_param() -> bool:
+    """
+    Check if the current provider/model configuration supports the Reasoning parameter.
+
+    The Reasoning object from openai.types.shared is only compatible with:
+    - Native OpenAI API calls (not through LiteLLM)
+    - Models that actually support reasoning (o1, o3, o4, gpt-5 series, etc.)
+
+    When using LiteLLM with providers like GitHub Copilot, Anthropic, etc.,
+    the Reasoning object causes schema validation errors.
+
+    Returns:
+        True if Reasoning parameter should be used, False otherwise
+    """
+    # Import here to avoid circular imports
+    from .client import is_native_openai_provider
+
+    # Only use Reasoning parameter when using native OpenAI provider
+    # For LiteLLM-based providers (including GitHub Copilot), skip it
+    return is_native_openai_provider()

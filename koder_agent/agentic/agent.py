@@ -15,7 +15,7 @@ from ..config import get_config
 from ..mcp import load_mcp_servers
 from ..tools.skill import SkillLoader
 from ..utils.client import get_litellm_model_kwargs, get_model_name, is_native_openai_provider
-from ..utils.model_info import get_maximum_output_tokens
+from ..utils.model_info import get_maximum_output_tokens, should_use_reasoning_param
 from ..utils.prompts import KODER_SYSTEM_PROMPT
 
 console = Console()
@@ -114,7 +114,9 @@ async def create_dev_agent(tools) -> Agent:
         metadata={"source": "koder"},
         max_tokens=get_maximum_output_tokens(model_name_str),
     )
-    if config.model.reasoning_effort is not None:
+    # Only set reasoning parameter for native OpenAI providers
+    # LiteLLM-based providers (GitHub Copilot, Anthropic, etc.) don't support the Reasoning object
+    if config.model.reasoning_effort is not None and should_use_reasoning_param():
         effort = None if config.model.reasoning_effort == "none" else config.model.reasoning_effort
         model_settings.reasoning = Reasoning(effort=effort, summary="detailed")
 

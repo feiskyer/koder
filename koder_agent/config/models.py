@@ -39,7 +39,7 @@ class ModelConfig(BaseModel):
 
     # NEW: Reasoning effort setting
     reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high"]] = Field(
-        default="medium",
+        default=None,
         description=(
             "Reasoning effort for reasoning models (none, minimal, low, medium, high, or null to"
             " not set)"

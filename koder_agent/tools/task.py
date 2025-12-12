@@ -50,8 +50,12 @@ async def task_delegate(tasks: Union[List[TaskModel], TaskModel]) -> str:
                 tools = [tool for tool in tools if tool.name != "task_delegate"]
 
                 # Build model_settings with reasoning if configured
+                # Only set reasoning parameter for native OpenAI providers
+                # LiteLLM-based providers (GitHub Copilot, Anthropic, etc.) don't support it
+                from ..utils.model_info import should_use_reasoning_param
+
                 model_settings = ModelSettings()
-                if config.model.reasoning_effort is not None:
+                if config.model.reasoning_effort is not None and should_use_reasoning_param():
                     model_settings.reasoning = Reasoning(effort=config.model.reasoning_effort)
 
                 # Create agent for the delegated task
