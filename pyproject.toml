@@ -1,6 +1,6 @@
 [project]
 name = "koder"
-version = "0.4.6"
+version = "0.4.7"
 description = "An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support."
 authors = [{ name = "Pengfei Ni" }]
 readme = "README.md"

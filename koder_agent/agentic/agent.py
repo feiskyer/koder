@@ -3,11 +3,19 @@
 import logging
 import uuid
 from pathlib import Path
+from typing import Any
 
 import backoff
 import litellm
 from agents import Agent, ModelSettings
 from agents.extensions.models.litellm_model import LitellmModel
+from agents.items import ItemHelpers, ModelResponse, TResponseStreamEvent
+from agents.models.openai_responses import Converter as ResponsesConverter
+from agents.tracing import generation_span
+from agents.usage import Usage
+from agents.util._json import _to_dump_compatible
+from openai import omit
+from openai._models import construct_type
 from openai.types.shared import Reasoning
 from rich.console import Console
 
@@ -34,14 +42,183 @@ class RetryingLitellmModel(LitellmModel):
         getattr(_EXC, "InternalServerError", Exception),
     )
 
+    def _should_use_responses_api(self) -> bool:
+        """
+        GitHub Copilot Codex models are not accessible via /chat/completions.
+        Route them through LiteLLM's Responses API instead.
+        """
+        model_lower = str(self.model).lower()
+        return "github_copilot/" in model_lower and "codex" in model_lower
+
+    async def _fetch_responses_api(
+        self,
+        system_instructions: str | None,
+        input: str | list,
+        model_settings: ModelSettings,
+        tools: list,
+        output_schema,
+        handoffs: list,
+        *,
+        previous_response_id: str | None,
+        stream: bool,
+        prompt: Any | None,
+    ):
+        if not hasattr(litellm, "aresponses"):
+            raise RuntimeError(
+                "GitHub Copilot Codex models require LiteLLM Responses API support. "
+                "Please upgrade litellm to a version that provides `aresponses`."
+            )
+        list_input = ItemHelpers.input_to_new_input_list(input)
+        list_input = _to_dump_compatible(list_input)
+
+        if model_settings.parallel_tool_calls and tools:
+            parallel_tool_calls: bool | None = True
+        elif model_settings.parallel_tool_calls is False:
+            parallel_tool_calls = False
+        else:
+            parallel_tool_calls = None
+
+        tool_choice = ResponsesConverter.convert_tool_choice(model_settings.tool_choice)
+        if tool_choice is omit:
+            tool_choice = None
+
+        converted_tools = ResponsesConverter.convert_tools(tools, handoffs)
+        tools_payload = _to_dump_compatible(converted_tools.tools)
+        if not tools_payload:
+            tools_payload = None
+
+        text_param = ResponsesConverter.get_response_format(output_schema)
+        if text_param is omit:
+            text_param = None
+
+        include_set = set(converted_tools.includes)
+        response_include = getattr(model_settings, "response_include", None)
+        if response_include is not None:
+            include_set.update(response_include)
+        top_logprobs = getattr(model_settings, "top_logprobs", None)
+        if top_logprobs is not None:
+            include_set.add("message.output_text.logprobs")
+        include = list(include_set) if include_set else None
+
+        extra_args: dict[str, Any] = dict(model_settings.extra_args or {})
+        if top_logprobs is not None:
+            extra_args["top_logprobs"] = top_logprobs
+        verbosity = getattr(model_settings, "verbosity", None)
+        if verbosity is not None:
+            if text_param is not None and isinstance(text_param, dict):
+                text_param["verbosity"] = verbosity
+            else:
+                text_param = {"verbosity": verbosity}
+
+        aresponses_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": list_input,
+            "include": include,
+            "instructions": system_instructions,
+            "tools": tools_payload,
+            "tool_choice": tool_choice,
+            "parallel_tool_calls": parallel_tool_calls,
+            "temperature": model_settings.temperature,
+            "top_p": model_settings.top_p,
+            "truncation": getattr(model_settings, "truncation", None),
+            "max_output_tokens": model_settings.max_tokens,
+            "reasoning": getattr(model_settings, "reasoning", None),
+            "metadata": model_settings.metadata,
+            "previous_response_id": previous_response_id,
+            "prompt": prompt,
+            "stream": stream,
+            "extra_headers": self._merge_headers(model_settings),
+            "extra_query": model_settings.extra_query,
+            "extra_body": model_settings.extra_body,
+            **extra_args,
+        }
+        if self.api_key:
+            aresponses_kwargs["api_key"] = self.api_key
+        if self.base_url:
+            aresponses_kwargs["base_url"] = self.base_url
+
+        return await litellm.aresponses(**aresponses_kwargs)
+
     @backoff.on_exception(
         backoff.expo,
         _EXC_TUPLE,
         max_tries=3,
         jitter=backoff.full_jitter,
     )
-    async def get_response(self, *args, **kwargs):
-        return await super().get_response(*args, **kwargs)
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: str | list,
+        model_settings: ModelSettings,
+        tools: list,
+        output_schema,
+        handoffs: list,
+        tracing,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,  # unused for LiteLLM responses
+        prompt: Any | None = None,
+    ) -> ModelResponse:
+        if not self._should_use_responses_api():
+            return await super().get_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+
+        with generation_span(
+            model=str(self.model),
+            model_config=model_settings.to_json_dict()
+            | {"base_url": str(self.base_url or ""), "model_impl": "litellm-responses"},
+            disabled=tracing.is_disabled(),
+        ) as span_generation:
+            response = await self._fetch_responses_api(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                previous_response_id=previous_response_id,
+                stream=False,
+                prompt=prompt,
+            )
+
+            response_usage = getattr(response, "usage", None)
+            if response_usage:
+                usage_kwargs: dict[str, Any] = {
+                    "requests": 1,
+                    "input_tokens": getattr(response_usage, "input_tokens", 0) or 0,
+                    "output_tokens": getattr(response_usage, "output_tokens", 0) or 0,
+                    "total_tokens": getattr(response_usage, "total_tokens", 0) or 0,
+                }
+                usage = Usage(**usage_kwargs)
+                span_generation.span_data.usage = {
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                }
+            else:
+                usage = Usage()
+
+            if tracing.include_data():
+                try:
+                    span_generation.span_data.output = (
+                        [response.model_dump()] if hasattr(response, "model_dump") else [response]
+                    )
+                except Exception:
+                    pass
+
+        return ModelResponse(
+            output=getattr(response, "output", []) or [],
+            usage=usage,
+            response_id=getattr(response, "id", None),
+        )
 
     @backoff.on_exception(
         backoff.expo,
@@ -49,9 +226,92 @@ class RetryingLitellmModel(LitellmModel):
         max_tries=5,
         jitter=backoff.full_jitter,
     )
-    async def stream_response(self, *args, **kwargs):
-        async for chunk in super().stream_response(*args, **kwargs):
-            yield chunk
+    async def stream_response(
+        self,
+        system_instructions: str | None,
+        input: str | list,
+        model_settings: ModelSettings,
+        tools: list,
+        output_schema,
+        handoffs: list,
+        tracing,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,  # unused for LiteLLM responses
+        prompt: Any | None = None,
+    ):
+        if not self._should_use_responses_api():
+            async for chunk in super().stream_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            ):
+                yield chunk
+            return
+
+        with generation_span(
+            model=str(self.model),
+            model_config=model_settings.to_json_dict()
+            | {"base_url": str(self.base_url or ""), "model_impl": "litellm-responses"},
+            disabled=tracing.is_disabled(),
+        ) as span_generation:
+            stream = await self._fetch_responses_api(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                previous_response_id=previous_response_id,
+                stream=True,
+                prompt=prompt,
+            )
+
+            final_response = None
+            async for chunk in stream:
+                if hasattr(chunk, "model_dump"):
+                    try:
+                        data = chunk.model_dump()
+                    except Exception:
+                        data = chunk
+                else:
+                    data = chunk
+
+                if isinstance(data, dict):
+                    event_type = data.get("type")
+                    if hasattr(event_type, "value"):
+                        data["type"] = event_type.value
+                    elif not isinstance(event_type, str):
+                        data["type"] = str(event_type)
+                    event = construct_type(value=data, type_=TResponseStreamEvent)
+                else:
+                    event = chunk
+
+                if getattr(event, "type", None) == "response.completed":
+                    final_response = getattr(event, "response", None)
+                yield event
+
+            if final_response is not None and getattr(final_response, "usage", None):
+                usage_obj = final_response.usage
+                span_generation.span_data.usage = {
+                    "input_tokens": getattr(usage_obj, "input_tokens", 0) or 0,
+                    "output_tokens": getattr(usage_obj, "output_tokens", 0) or 0,
+                }
+            if tracing.include_data() and final_response is not None:
+                try:
+                    span_generation.span_data.output = (
+                        [final_response.model_dump()]
+                        if hasattr(final_response, "model_dump")
+                        else [final_response]
+                    )
+                except Exception:
+                    pass
 
 
 def _get_skills_metadata(config) -> str:

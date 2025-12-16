@@ -1,6 +1,7 @@
 """OpenAI client setup with configuration support."""
 
 import os
+import uuid
 from typing import Optional
 
 import backoff
@@ -354,8 +355,99 @@ async def llm_completion(messages: list, model: Optional[str] = None) -> str:
     if base_url:
         kwargs["base_url"] = base_url
 
+    model_lower = str(model).lower()
+    is_copilot = "github_copilot/" in model_lower
+    extra_headers = None
+    if is_copilot:
+        extra_headers = {
+            "copilot-integration-id": "vscode-chat",
+            "editor-version": "vscode/1.98.1",
+            "editor-plugin-version": "copilot-chat/0.26.7",
+            "user-agent": "GitHubCopilotChat/0.26.7",
+            "openai-intent": "conversation-panel",
+            "x-github-api-version": "2025-04-01",
+            "x-request-id": str(uuid.uuid4()),
+            "x-vscode-user-agent-library-version": "electron-fetch",
+        }
+
+    if is_copilot and "codex" in model_lower:
+        if not hasattr(litellm, "aresponses"):
+            raise RuntimeError(
+                "GitHub Copilot Codex models require LiteLLM Responses API support. "
+                "Please upgrade litellm to a version that provides `aresponses`."
+            )
+        responses_kwargs = {
+            "model": model,
+            "input": messages,
+            "metadata": {"source": "koder"},
+            "stream": False,
+        }
+        if api_key:
+            responses_kwargs["api_key"] = api_key
+        if base_url:
+            responses_kwargs["base_url"] = base_url
+        if extra_headers:
+            responses_kwargs["extra_headers"] = extra_headers
+        response = await litellm.aresponses(**responses_kwargs)
+        return _extract_responses_text(response)
+
+    if extra_headers:
+        kwargs["extra_headers"] = extra_headers
     response = await litellm.acompletion(**kwargs)
     return response.choices[0].message.content
+
+
+def _extract_responses_text(response: object) -> str:
+    """
+    Best-effort extraction of assistant text from a LiteLLM Responses API response.
+    Handles dict-like and pydantic-like objects.
+    """
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+
+    output = getattr(response, "output", None)
+    if output is None and isinstance(response, dict):
+        output = response.get("output")
+
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            item_dict = item
+            if hasattr(item, "model_dump"):
+                try:
+                    item_dict = item.model_dump()
+                except Exception:
+                    item_dict = item
+            if not isinstance(item_dict, dict):
+                continue
+            if item_dict.get("type") == "message":
+                for content in item_dict.get("content", []) or []:
+                    if isinstance(content, dict) and content.get("type") in (
+                        "output_text",
+                        "text",
+                    ):
+                        text_val = content.get("text") or content.get("content")
+                        if text_val:
+                            parts.append(str(text_val))
+            elif item_dict.get("type") in ("output_text", "text"):
+                text_val = item_dict.get("text")
+                if text_val:
+                    parts.append(str(text_val))
+        if parts:
+            return "".join(parts).strip()
+
+    if isinstance(response, dict):
+        try:
+            first = response.get("output", [])[0]
+            if isinstance(first, dict):
+                content = first.get("content", [])
+                if content and isinstance(content[0], dict):
+                    return str(content[0].get("text", "")).strip()
+        except Exception:
+            pass
+
+    return ""
 
 
 def setup_openai_client():
