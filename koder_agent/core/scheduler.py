@@ -131,7 +131,7 @@ class AgentScheduler:
                         max_turns=50,
                     )
                     # Capture token usage from result
-                    self._capture_usage(result)
+                    await self._capture_usage(result)
 
                     # Filter output for security
                     response = self._filter_output(result.final_output)
@@ -358,7 +358,7 @@ class AgentScheduler:
             console.print()
 
             # Capture any usage data we can
-            self._capture_usage(result)
+            await self._capture_usage(result)
 
             # Return partial text for session history
             return partial_text or "Operation cancelled. You can provide additional instructions."
@@ -410,7 +410,7 @@ class AgentScheduler:
                 print()  # Add spacing after
 
         # Capture token usage from streaming result
-        self._capture_usage(result)
+        await self._capture_usage(result)
 
         # Get final text response for context saving
         final_response = display_manager.get_final_text()
@@ -461,28 +461,49 @@ class AgentScheduler:
         )
         return text
 
-    def _capture_usage(self, result) -> None:
-        """Capture token usage from a Runner result."""
+    async def _capture_usage(self, result) -> None:
+        """Capture token usage from a Runner result.
+
+        If the API doesn't return usage data, falls back to tiktoken estimation
+        using the session's existing _estimate_tokens method.
+        """
         try:
+            input_tokens = 0
+            output_tokens = 0
+            context_tokens = None
+
+            # Try to get usage from the API response
             if hasattr(result, "context_wrapper") and hasattr(result.context_wrapper, "usage"):
                 usage = result.context_wrapper.usage
                 input_tokens = getattr(usage, "input_tokens", 0) or 0
                 output_tokens = getattr(usage, "output_tokens", 0) or 0
-                # console.print(
-                #     f"[dim][Usage] input={input_tokens}, output={output_tokens}[/dim]"
-                # )
-                if input_tokens > 0 or output_tokens > 0:
-                    # Calculate context tokens from the last request if available
-                    context_tokens = None
-                    if hasattr(usage, "request_usage_entries") and usage.request_usage_entries:
-                        last_req = usage.request_usage_entries[-1]
-                        # Context size is roughly input + output of the last request
-                        # (Input includes history, Output becomes new history)
-                        context_tokens = last_req.total_tokens
 
-                    self.usage_tracker.record_usage(
-                        input_tokens, output_tokens, context_tokens=context_tokens
-                    )
+                if hasattr(usage, "request_usage_entries") and usage.request_usage_entries:
+                    last_req = usage.request_usage_entries[-1]
+                    context_tokens = last_req.total_tokens
+
+            # Fallback: estimate tokens using session's tiktoken encoder
+            if input_tokens <= 0 and output_tokens <= 0:
+                # Estimate output tokens from final_output
+                final_output = getattr(result, "final_output", None)
+                if final_output and hasattr(self.session, "encoder"):
+                    output_text = str(final_output)
+                    output_tokens = len(self.session.encoder.encode(output_text))
+
+                # Estimate input/context tokens from session history
+                try:
+                    session_items = await self.session.get_items()
+                    if session_items:
+                        input_tokens = self.session._estimate_tokens(session_items)
+                        context_tokens = input_tokens + output_tokens
+                except Exception:
+                    pass
+
+            # Record usage if we have any tokens
+            if input_tokens > 0 or output_tokens > 0:
+                self.usage_tracker.record_usage(
+                    input_tokens, output_tokens, context_tokens=context_tokens
+                )
         except Exception:
             # Silently ignore usage capture errors
             pass

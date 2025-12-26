@@ -29,6 +29,14 @@ def get_model_name_variants_for_lookup(model: str) -> list[str]:
             provider_model = "/".join(parts[-2:])
             names_to_try.extend([provider_model, provider_model.lower()])
 
+    # Add variants with dots replaced by hyphens (e.g., claude-opus-4.5 -> claude-opus-4-5)
+    # litellm uses hyphens in model names like "claude-opus-4-5"
+    dot_to_hyphen_variants = []
+    for name in names_to_try:
+        if "." in name:
+            dot_to_hyphen_variants.append(name.replace(".", "-"))
+    names_to_try.extend(dot_to_hyphen_variants)
+
     # Remove duplicates while preserving order
     return list(dict.fromkeys(names_to_try))
 
