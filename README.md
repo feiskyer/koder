@@ -1,27 +1,29 @@
 # Koder
 
-[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black) [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) [![PyPI Downloads](https://static.pepy.tech/badge/koder)](https://pepy.tech/projects/koder)
+[![Python](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![PyPI Downloads](https://static.pepy.tech/badge/koder)](https://pepy.tech/projects/koder)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-Koder is an experimental, universal AI coding assistant designed to explore how to build an advanced terminal-based AI coding assistant. Written entirely in Python, it serves as both a functional tool and a learning playground for AI agent development.
+An experimental, universal AI coding assistant for the terminal. Built in Python, Koder works with OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers via LiteLLM.
 
-**🎯 Project Status**: Alpha! This is a learning-focused project where we explore building AI coding agents.
+🎯 **Status**: Alpha - This is a learning-focused project exploring AI agent development.
 
-## ✨ Features
+## Features
 
-- **🤖 Universal AI Support**: Works with OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers via LiteLLM with intelligent auto-detection
-- **💾 Smart Context Management**: Persistent sessions with SQLite storage and automatic token-aware compression (50k token limit)
-- **🔄 Real-time Streaming**: Rich Live displays with intelligent terminal cleanup for responsive user experience
-- **🛠️ Comprehensive Toolset**: file operations, search, shell, task delegation, todos, and skills
-- **📚 Progressive Disclosure Skills**: Load specialized knowledge on-demand with 90%+ token savings
-- **🔌 MCP Integration**: Model Context Protocol support with stdio, SSE, and HTTP transports for extensible tool ecosystem
-- **🛡️ Enterprise Security**: SecurityGuard validation, output filtering, permission system, and input sanitization
-- **🎯 Zero Configuration**: Automatic provider detection with fallback defaults
+- **Universal AI Support** - Works with OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers
+- **Smart Context** - Persistent sessions with SQLite storage and automatic token-aware compression
+- **Real-time Streaming** - Rich terminal displays with live output
+- **Comprehensive Tools** - File operations, search, shell, task delegation, todos, and skills
+- **MCP Integration** - Extensible tool ecosystem via Model Context Protocol
+- **Zero Config** - Automatic provider detection with sensible defaults
 
-## 🛠️ Installation
+## Installation
 
 ### Using uv (Recommended)
 
-```sh
+```bash
 uv tool install koder
 ```
 
@@ -31,266 +33,105 @@ uv tool install koder
 pip install koder
 ```
 
-## ⚡ Quick Start
-
-Simply run Koder with your question or request:
+## Quick Start
 
 ```bash
-# Configure one provider (example: OpenAI)
-export OPENAI_API_KEY="your-openai-api-key"
-export KODER_MODEL="gpt-4o"
+# 1. Set your API key
+export OPENAI_API_KEY="your-api-key"
 
-# Run in interactive mode
+# 2. Run Koder
+koder
+```
+
+That's it! Koder auto-detects your provider from the API key.
+
+### Basic Usage
+
+```bash
+# Interactive mode
 koder
 
-# Run with prompt
+# Single prompt
 koder "create a Python function to calculate fibonacci numbers"
 
-# Execute a single prompt in a named session
-koder -s my-project "Help me implement a new feature"
+# Named session (persists conversation)
+koder -s my-project "help me implement a new feature"
 
-# Use an explicit session flag
-koder -s my-project "Your prompt here"
-
-# Use high reasoning effort for complex problems (OpenAI reasoning models)
-koder --reasoning high "Solve this complex algorithm problem"
-
-# Use low reasoning for simple tasks
-koder --reasoning low "Add a print statement"
+# Use a different model
+KODER_MODEL="claude-opus-4-20250514" koder "your prompt"
 ```
 
-## 🤖 Configuration
+## Configuration
 
-Koder supports flexible configuration through three mechanisms (in order of priority):
+Koder can be configured via (in priority order):
 
-1. **CLI Arguments** - Highest priority, for runtime overrides
-2. **Environment Variables** - For secrets and runtime configuration
-3. **Config File** - For persistent defaults (`~/.koder/config.yaml`)
+1. **CLI arguments** - Highest priority
+2. **Environment variables** - `KODER_MODEL`, `KODER_REASONING_EFFORT`
+3. **Config file** - `~/.koder/config.yaml`
 
-### Quick Setup
+### Providers
 
-```bash
-# Minimal setup - just set your API key and go
-export OPENAI_API_KEY="your-api-key"
-koder
+| Provider | Environment Variable | Model Example |
+|----------|---------------------|---------------|
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o`, `gpt-4.1` |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-opus-4-20250514` |
+| Google | `GOOGLE_API_KEY` | `gemini/gemini-2.5-pro` |
+| GitHub Copilot | *(device auth)* | `github_copilot/claude-sonnet-4` |
+| Azure | `AZURE_API_KEY` | `azure/gpt-4` |
 
-# Or use a different provider
-export ANTHROPIC_API_KEY="your-api-key"
-export KODER_MODEL="claude-opus-4-20250514"
-koder
-```
+See [Configuration Guide](docs/configuration.md) for all 100+ providers.
 
-### Config File
-
-Koder uses a YAML config file at `~/.koder/config.yaml` for persistent settings.
-
-#### Config File Format
+### Config File Example
 
 ```yaml
 # ~/.koder/config.yaml
 
-# Model configuration
 model:
-  name: "gpt-4.1"              # Model name (default: gpt-4.1)
-  provider: "openai"           # Provider name (default: openai)
-  api_key: null                # API key (prefer env vars for security)
-  base_url: null               # Custom API endpoint (optional)
+  name: "gpt-4o"
+  provider: "openai"
+  reasoning_effort: null    # For reasoning models: low, medium, high
 
-  # Reasoning effort for OpenAI reasoning models (o1, o3, gpt-5.1, etc.)
-  reasoning_effort: null       # none, minimal, low, medium, high, or null (default: null)
-
-# CLI defaults
 cli:
-  session: null                # Default session name (auto-generated if null)
-  stream: true                 # Enable streaming output (default: true)
+  session: null             # Default session name
+  stream: true              # Enable streaming output
 
-# MCP servers for extended functionality
-mcp_servers: []
+mcp_servers: []             # MCP server configurations
 ```
 
-### Environment Variables
-
-#### Core Variables
-
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `KODER_MODEL` | Model selection (highest priority) | `gpt-4o`, `claude-opus-4-20250514` |
-| `KODER_REASONING_EFFORT` | Reasoning effort for reasoning models | `medium`, `high`, `low`, `null` |
-| `EDITOR` | Editor for `koder config edit` | `vim`, `code` |
-
-#### Provider API Keys
-
-| Provider | API Key Variable | Additional Variables |
-|----------|------------------|---------------------|
-| OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
-| Anthropic | `ANTHROPIC_API_KEY` | - |
-| Google/Gemini | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | - |
-| Azure | `AZURE_API_KEY` | `AZURE_API_BASE`, `AZURE_API_VERSION` |
-| Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS` | `VERTEXAI_LOCATION` |
-| GitHub Copilot | `GITHUB_TOKEN` | - |
-| Groq | `GROQ_API_KEY` | - |
-| Together AI | `TOGETHERAI_API_KEY` | - |
-| OpenRouter | `OPENROUTER_API_KEY` | - |
-| Mistral | `MISTRAL_API_KEY` | - |
-| Cohere | `COHERE_API_KEY` | - |
-| Bedrock | `AWS_ACCESS_KEY_ID` | `AWS_SECRET_ACCESS_KEY` |
-
-### Supported Providers
-
-<details>
-<summary><b>OpenAI</b></summary>
+### Commands
 
 ```bash
-export OPENAI_API_KEY=your-api-key
-export KODER_MODEL="gpt-4o"  # Optional, default: gpt-4.1
-
-# Optional: Custom endpoint
-export OPENAI_BASE_URL=https://your-endpoint.com/v1
-
-koder
+koder config show          # Show current config
+koder config edit          # Edit config file
+koder -s SESSION_NAME      # Use named session
 ```
 
-</details>
+## MCP Servers
 
-<details>
-<summary><b>Anthropic</b></summary>
+Model Context Protocol (MCP) servers extend Koder with additional tools.
+
+### CLI Commands
 
 ```bash
-export ANTHROPIC_API_KEY=your-api-key
-export KODER_MODEL="claude-opus-4-20250514"
-koder
-```
+# Add servers
+koder mcp add myserver "python -m my_mcp_server"
+koder mcp add myserver "python -m server" -e API_KEY=xxx
 
-</details>
-
-<details>
-<summary><b>Google Gemini</b></summary>
-
-```bash
-export GOOGLE_API_KEY=your-api-key
-export KODER_MODEL="gemini/gemini-2.5-pro"
-koder
-```
-
-</details>
-
-<details>
-<summary><b>GitHub Copilot</b></summary>
-
-```bash
-export KODER_MODEL="github_copilot/claude-sonnet-4"
-koder
-```
-
-On first run you will see a device code in the terminal. Visit <https://github.com/login/device> and enter the code to authenticate.
-
-</details>
-
-<details>
-<summary><b>Azure OpenAI</b></summary>
-
-```bash
-export AZURE_API_KEY="your-azure-api-key"
-export AZURE_API_BASE="https://your-resource.openai.azure.com"
-export AZURE_API_VERSION="2025-04-01-preview"
-export KODER_MODEL="azure/gpt-4"
-koder
-```
-
-Or configure in `~/.koder/config.yaml`:
-
-```yaml
-model:
-  name: "gpt-4"
-  provider: "azure"
-  azure_api_version: "2025-04-01-preview"
-```
-
-</details>
-
-<details>
-<summary><b>Google Vertex AI</b></summary>
-
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS="path/to/service-account.json"
-export VERTEXAI_LOCATION="us-central1"
-export KODER_MODEL="vertex_ai/claude-sonnet-4@20250514"
-koder
-```
-
-Or configure in `~/.koder/config.yaml`:
-
-```yaml
-model:
-  name: "claude-sonnet-4@20250514"
-  provider: "vertex_ai"
-  vertex_ai_location: "us-central1"
-  vertex_ai_credentials_path: "path/to/service-account.json"
-```
-
-</details>
-
-<details>
-<summary><b>Other Providers (100+ via LiteLLM)</b></summary>
-
-[LiteLLM](https://docs.litellm.ai/docs/providers) supports 100+ providers. Use the format `provider/model`:
-
-```bash
-# Groq
-export GROQ_API_KEY=your-key
-export KODER_MODEL="groq/llama-3.3-70b-versatile"
-
-# Together AI
-export TOGETHERAI_API_KEY=your-key
-export KODER_MODEL="together_ai/meta-llama/Llama-3-70b-chat-hf"
-
-# OpenRouter
-export OPENROUTER_API_KEY=your-key
-export KODER_MODEL="openrouter/anthropic/claude-3-opus"
-
-# Custom OpenAI-compatible endpoints
-export OPENAI_API_KEY="your-key"
-export OPENAI_BASE_URL="https://your-custom-endpoint.com/v1"
-export KODER_MODEL="openai/your-model-name"
-
-koder
-```
-
-</details>
-
-### MCP Server Configuration
-
-Model Context Protocol (MCP) servers extend Koder's capabilities with additional tools.
-
-#### MCP CLI Commands
-
-```bash
-# Add an MCP server (stdio transport)
-koder mcp add myserver "python -m my_mcp_server" --transport stdio
-
-# Add with environment variables
-koder mcp add myserver "python -m server" -e API_KEY=xxx -e DEBUG=true
-
-# Add HTTP/SSE server
+# HTTP/SSE transport
 koder mcp add webserver --transport http --url http://localhost:8000
 
-# List all MCP servers
+# Manage servers
 koder mcp list
-
-# Get server details
 koder mcp get myserver
-
-# Remove a server
 koder mcp remove myserver
 ```
 
-#### MCP Config Format
+### Config Example
 
 ```yaml
 # In ~/.koder/config.yaml
-
 mcp_servers:
-  # stdio transport (runs a local command)
+  # stdio transport (local command)
   - name: "filesystem"
     transport_type: "stdio"
     command: "python"
@@ -298,35 +139,33 @@ mcp_servers:
     env_vars:
       ROOT_PATH: "/home/user/projects"
     cache_tools_list: true
-    allowed_tools:          # Optional: whitelist specific tools
+    allowed_tools:
       - "read_file"
       - "write_file"
 
-  # HTTP transport (connects to remote server)
+  # HTTP transport (remote server)
   - name: "web-tools"
     transport_type: "http"
     url: "http://localhost:8000"
     headers:
       Authorization: "Bearer token123"
 
-  # SSE transport (server-sent events)
+  # SSE transport
   - name: "streaming-server"
     transport_type: "sse"
     url: "http://localhost:9000/sse"
 ```
 
-### Skills
+## Skills
 
-Skills provide specialized knowledge and guidance that Koder can load on-demand. This uses a **Progressive Disclosure** pattern to minimize token usage - only skill metadata is loaded at startup, with full content fetched when needed.
+Skills provide specialized knowledge loaded on-demand, saving 90%+ tokens via progressive disclosure.
 
-#### Skills Directory Structure
+### Directory Structure
 
-Skills are loaded from two locations (project skills take priority):
+Skills are loaded from (project skills take priority):
 
-1. **Project skills**: `.koder/skills/` in your current directory
-2. **User skills**: `~/.koder/skills/` for personal skills
-
-Each skill lives in its own directory with a `SKILL.md` file:
+1. **Project**: `.koder/skills/`
+2. **User**: `~/.koder/skills/`
 
 ```
 .koder/skills/
@@ -334,14 +173,14 @@ Each skill lives in its own directory with a `SKILL.md` file:
 │   └── SKILL.md
 ├── code-review/
 │   ├── SKILL.md
-│   └── checklist.md    # Supplementary resource
+│   └── checklist.md
 └── testing/
     └── SKILL.md
 ```
 
-#### Creating a Skill
+### Creating a Skill
 
-Create a `SKILL.md` file with YAML frontmatter:
+Create a `SKILL.md` with YAML frontmatter:
 
 ```markdown
 ---
@@ -357,146 +196,48 @@ allowed_tools:
 ## RESTful Principles
 
 Use nouns for resources, HTTP verbs for actions...
-
-## Versioning
-
-Always version your APIs using URL path (`/v1/users`)...
-
-## Error Handling
-
-Return consistent error responses with status codes...
 ```
 
-#### Frontmatter Fields
+### How Skills Work
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Unique skill identifier |
-| `description` | Yes | Brief description (shown in metadata) |
-| `allowed_tools` | No | Tools the skill recommends using |
+1. **Startup**: Only skill names and descriptions are loaded (minimal tokens)
+2. **On-demand**: Full content fetched when needed via `get_skill(name)`
+3. **Supplementary**: Skills can reference additional files
 
-#### How Skills Work
+## Architecture
 
-1. **Startup**: Only skill names and descriptions are loaded (Level 1 - minimal tokens)
-2. **On-demand**: When Koder needs a skill, it calls `get_skill(name)` to load full content (Level 2)
-3. **Supplementary**: Skills can reference additional files that Koder reads with `read_file` (Level 3)
-
-This progressive approach saves **90%+ tokens** compared to loading all skill content at startup.
-
-#### Skills Configuration
-
-```yaml
-# ~/.koder/config.yaml
-skills:
-  enabled: true                        # Enable/disable skills (default: true)
-  project_skills_dir: ".koder/skills"  # Project skills location
-  user_skills_dir: "~/.koder/skills"   # User skills location
+```
+koder_agent/
+├── agentic/        # Agent creation, hooks, and approval system
+├── cli.py          # Main CLI entry point
+├── config/         # Configuration management
+├── core/           # Scheduler, context, streaming, security
+├── mcp/            # Model Context Protocol integration
+├── tools/          # Tool implementations
+└── utils/          # Helpers and utilities
 ```
 
-### Example Configurations
+### Core Flow
 
-<details>
-<summary><b>Minimal (OpenAI)</b></summary>
+1. **CLI** (`cli.py`) parses arguments, initializes session
+2. **AgentScheduler** (`core/scheduler.py`) orchestrates execution with streaming
+3. **Agent** (`agentic/agent.py`) builds agent with tools, MCP servers, model settings
+4. **Tools** (`tools/engine.py`) register tools, validate inputs, filter output
+5. **Context** (`core/context.py`) persists conversations in SQLite
 
-```yaml
-# ~/.koder/config.yaml
-model:
-  name: "gpt-4o"
-  provider: "openai"
-```
+### Data Storage
+
+- **Database**: `~/.koder/koder.db` (SQLite)
+- **Config**: `~/.koder/config.yaml`
+- **Skills**: `~/.koder/skills/` or `.koder/skills/`
+
+## Development
+
+### Setup
 
 ```bash
-export OPENAI_API_KEY="sk-..."
-koder
-```
-
-</details>
-
-<details>
-<summary><b>Enterprise Azure Setup</b></summary>
-
-```yaml
-# ~/.koder/config.yaml
-model:
-  name: "gpt-4"
-  provider: "azure"
-  azure_api_version: "2025-04-01-preview"
-
-cli:
-  session: "enterprise-project"
-  stream: true
-
-mcp_servers:
-  - name: "company-tools"
-    transport_type: "http"
-    url: "https://internal-mcp.company.com"
-    headers:
-      X-API-Key: "${COMPANY_API_KEY}"
-```
-
-```bash
-export AZURE_API_KEY="..."
-export AZURE_API_BASE="https://your-resource.openai.azure.com"
-koder
-```
-
-</details>
-
-<details>
-<summary><b>Multi-Provider Development</b></summary>
-
-```yaml
-# ~/.koder/config.yaml - set a default
-model:
-  name: "gpt-4o"
-  provider: "openai"
-```
-
-```bash
-# Override at runtime with KODER_MODEL
-export OPENAI_API_KEY="..."
-export ANTHROPIC_API_KEY="..."
-
-# Use default (OpenAI)
-koder
-
-# Switch to Claude for specific tasks
-KODER_MODEL="claude-opus-4-20250514" koder "complex reasoning task"
-```
-
-</details>
-
-### Configuration Priority
-
-When the same setting is defined in multiple places, the priority is:
-
-```
-CLI Arguments  >  Environment Variables  >  Config File  >  Defaults
-```
-
-**Example:**
-
-```yaml
-# ~/.koder/config.yaml
-model:
-  name: "gpt-4o"
-```
-
-```bash
-# Environment variable overrides config file
-export KODER_MODEL="claude-opus-4-20250514"
-koder  # Uses claude-opus-4-20250514
-```
-
-## 🛠️ Development
-
-### Setup Development Environment
-
-```bash
-# Clone the repository
 git clone https://github.com/feiskyer/koder.git
 cd koder
-
 uv sync
 uv run koder
 ```
@@ -504,41 +245,36 @@ uv run koder
 ### Code Quality
 
 ```bash
-# Code formatting
-black .
-
-# Linting
-ruff check --fix
-
-# pylint
-pylint koder_agent/ --disable=C,R,W --errors-only
+uv run black .              # Format
+uv run ruff check --fix     # Lint
+uv run pytest               # Test
 ```
 
-## 🔒 Security
+## Security
 
-- **API Keys**: All API keys are stored in environment variables and never in code.
-- **Local Storage**: Sessions are stored locally in your home directory.
-- **No Telemetry**: Koder doesn't send any data besides API requests to your chosen provider.
-- **Code Execution**: Shell commands require explicit user confirmation.
+- **API Keys**: Stored in environment variables, never in code
+- **Local Storage**: Sessions stored in `~/.koder/`
+- **No Telemetry**: Only API requests to your chosen provider
+- **Shell Commands**: Require explicit user confirmation
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Here's how you can help:
+Contributions are welcome!
 
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/amazing-feature`)
-3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
-4. **Push** to the branch (`git push origin feature/amazing-feature`)
-5. **Open** a Pull Request
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-Please read our [Contributing Guidelines](CONTRIBUTING.md) for more details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## 🌐 Code of Conduct
+## License
 
-This project follows a Code of Conduct based on the Contributor Covenant. Be kind and respectful. If you observe unacceptable behavior, please open an issue.
+MIT License - see [LICENSE](LICENSE) for details.
 
-## 📄 License
+---
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-Use of third-party AI services is governed by their respective provider terms.
+<p align="center">
+  <sub>Built with Python and curiosity</sub>
+</p>

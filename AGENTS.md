@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 This file provides guidance to KODER and Agentic AI when working with code in this repository.
 
@@ -7,105 +7,106 @@ This file provides guidance to KODER and Agentic AI when working with code in th
 ### Development Setup
 
 ```bash
-# Install dependencies
-uv sync
-
-# Upgrade dependencies
-uv sync --upgrade
-
-# Run the CLI in interactive mode
-uv run koder
-
-# Run with a single prompt
-uv run koder "Help me implement a new feature"
-
-# Run with specific session
-uv run koder --session my-session "Your prompt"
-
-# Enable streaming mode (default)
-uv run koder --stream "Your prompt"
-
-# Disable streaming mode
-uv run koder --no-stream "Your prompt"
-
-# Resume a previous session
-uv run koder --resume
-
-# MCP server management
-uv run koder mcp list
-uv run koder mcp add myserver command arg1 arg2
-uv run koder mcp remove myserver
+uv sync                                    # Install dependencies
+uv run koder                               # Run in interactive mode
+uv run koder "Your prompt"                 # Single prompt
+uv run koder -s my-session "Your prompt"   # Named session
+uv run koder --resume                      # Resume previous session
 ```
 
-### Development Commands
+### Code Quality
 
 ```bash
-# Code formatting
-black .
+uv run black .                                          # Format
+uv run ruff check --fix                                 # Lint with auto-fix
+uv run pylint koder_agent/ --disable=C,R,W --errors-only  # Error-only check
+```
 
-# Linting
-ruff check --fix
+### Testing
 
-# pylint
-pylint koder_agent/ --disable=C,R,W --errors-only
+```bash
+uv run pytest                          # All tests
+uv run pytest tests/test_file_tools.py # Single file
+uv run pytest -v -k "test_name"        # Single test by name
+```
+
+### MCP Server Management
+
+```bash
+uv run koder mcp list                              # List servers
+uv run koder mcp add myserver "python -m server"   # Add server
+uv run koder mcp remove myserver                   # Remove server
 ```
 
 ## Architecture
 
-### Core Components
+Koder is a terminal-based AI coding assistant built on the `openai-agents` library with multi-provider support via LiteLLM.
 
-**Agent Scheduler (`koder_agent/core/scheduler.py`)**: Central orchestrator that manages agent execution, handles streaming with Rich Live displays, and coordinates context management. Uses semaphores for concurrency control and includes intelligent cleanup of streaming content.
+### Package Structure
 
-**Context Manager (`koder_agent/core/context.py`)**: Manages conversation history with SQLite storage at `~/.koder/koder.db`, implements token-aware compression (50k token limit using tiktoken), and handles session management across multiple projects.
+```md
+koder_agent/
+├── agentic/        # Agent creation, hooks, guardrails, approval system
+├── cli.py          # Main CLI entry point
+├── config/         # Configuration management (YAML, env vars)
+├── core/           # Scheduler, context, streaming, security, interactive mode, commands
+├── mcp/            # Model Context Protocol server integration (stdio, SSE, HTTP)
+├── tools/          # Tool implementations (file, search, shell, web, task, todo, skill)
+└── utils/          # Client setup, prompts, sessions, model info, terminal theme
+```
 
-**Tool Engine (`koder_agent/tools/engine.py`)**: Registers and executes tools with Pydantic validation, filters sensitive information from outputs, enforces security checks via SecurityGuard, and maintains an allowed tools list.
+### Core Flow
 
-**Permission Manager (`koder_agent/core/permissions.py`)**: Handles tool execution permissions and approval workflows, supporting both automatic and interactive approval modes.
+1. **CLI Entry** (`cli.py`) → parses args, initializes session
+2. **AgentScheduler** (`core/scheduler.py`) → orchestrates execution with streaming and usage tracking
+3. **Agent Creation** (`agentic/agent.py`) → builds agent with tools, MCP servers, model settings
+4. **Tool Engine** (`tools/engine.py`) → registers tools, validates inputs, filters sensitive output
+5. **Context Manager** (`core/context.py`) → persists conversations in SQLite with token-aware compression
 
-**MCP Server Manager (`koder_agent/mcp/server_manager.py`)**: Manages Model Context Protocol (MCP) server configurations stored in SQLite, supporting stdio, SSE, and HTTP transports.
+### Key Design Patterns
 
-### Agent System
-
-The project uses the `openai-agents` library with multi-provider support:
-
-- **Main Agent**: `create_dev_agent()` - Primary development agent with full tool access and MCP integration
-- **Model Selection**: Automatically chooses appropriate model via `get_model_name()` supporting OpenAI, Anthropic Claude, Google Gemini, Azure OpenAI, GitHub Copilot, and 100+ providers via LiteLLM
-- **Provider Detection**: Auto-detects provider based on environment variables with fallback defaults
+- **Provider Abstraction**: `utils/client.py` detects providers from environment; uses native OpenAI client for OpenAI/Azure, LiteLLM wrapper for others
+- **RetryingLitellmModel**: `agentic/agent.py` wraps LiteLLM with exponential backoff retry (3-5 attempts) for rate limits and transient errors
+- **Progressive Disclosure Skills**: `tools/skill.py` loads skill metadata at startup (Level 1), full content on-demand (Level 2), saving 90%+ tokens
+- **Skill Restrictions**: `tools/skill_context.py` + `agentic/skill_guardrail.py` limit tool access when specific skills are active
+- **Streaming Display**: `core/streaming_display.py` manages Rich Live displays for real-time output
+- **Approval Hooks**: `agentic/approval_hooks.py` wraps tool execution with permission checks
+- **Security Guard**: `core/security.py` validates shell commands before execution
+- **Background Shells**: `tools/shell.py` `BackgroundShellManager` tracks async shell commands
 
 ### Tool Categories
 
-1. **File Operations**: `read_file`, `write_file`, `append_file`, `list_directory`
-2. **Search Operations**: `glob_search`, `grep_search`
-3. **Shell Operations**: `run_shell`, `git_command`
-4. **Web Operations**: `web_search`, `web_fetch`
-5. **Task Management**: `todo_read`, `todo_write`, `task_delegate`
+| Category | Tools                                                                   |
+|----------|-------------------------------------------------------------------------|
+| File     | `read_file`, `write_file`, `append_file`, `edit_file`, `list_directory` |
+| Search   | `glob_search`, `grep_search`                                            |
+| Shell    | `run_shell`, `shell_output`, `shell_kill`, `git_command`                |
+| Web      | `web_search`, `web_fetch`                                               |
+| Task     | `task_delegate`, `todo_read`, `todo_write`                              |
+| Skills   | `get_skill`                                                             |
 
-### Key Features
+### Configuration Priority
 
-- **Streaming Support**: Real-time output with Rich Live displays and intelligent terminal cleanup
-- **Context Persistence**: Conversation history across sessions with automatic compression
-- **Tool Validation**: Pydantic schemas with security checks and output filtering
-- **Interactive CLI**: Rich-formatted panels, prompts, and session management
-- **MCP Integration**: Support for Model Context Protocol servers with multiple transport types
-- **Multi-Provider AI**: Universal provider support with intelligent auto-detection
-- **Session Management**: Per-project session isolation with resume capability
+CLI Arguments > Environment Variables > Config File (`~/.koder/config.yaml`) > Defaults
 
-### Configuration
+Key environment variables:
 
-- **Context Loading**: The CLI looks for `AGENTS.md` in the working directory to load project-specific context
-- **Database**: SQLite database at `~/.koder/koder.db` stores conversation history and MCP server configs
-- **AI Provider Setup**: Set API credentials via environment variables (see README.md for provider-specific setup)
-- **Model Selection**: Use `KODER_MODEL` environment variable to specify which model to use across providers
+- `KODER_MODEL` - Model name (e.g., `gpt-4o`, `claude-opus-4-20250514`, `github_copilot/gpt-5.1-codex`)
+- `KODER_REASONING_EFFORT` - Reasoning effort for o1/o3/gpt-5.1 models (`low`, `medium`, `high`)
+- Provider API keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GITHUB_TOKEN`, etc.
 
-### Security Features
+### Database
 
-- **Command Validation**: SecurityGuard validates shell commands before execution
-- **Output Filtering**: Automatic filtering of API keys, tokens, and sensitive information
-- **Permission System**: Tool execution requires permission checks, with approval hooks for interactive mode
-- **Input Sanitization**: Validation of all tool inputs using Pydantic schemas
+SQLite at `~/.koder/koder.db` stores:
 
-### Entry Points
+- Conversation history with token-aware compression (50k token limit via tiktoken)
+- Session metadata with auto-generated titles
+- MCP server configurations
 
-- **CLI Entry**: `koder_agent.cli:run` - Main CLI interface with argument parsing and session management
-- **Interactive Mode**: `koder_agent/core/interactive.py` - Rich-based interactive prompt with command completion
-- **Slash Commands**: `koder_agent/core/commands.py` - Built-in commands for session management and utilities
+### Project Context
+
+The CLI loads `AGENTS.md` from the working directory as project-specific context for the agent.
+
+### Skills System
+
+Skills are loaded from `.koder/skills/` (project) and `~/.koder/skills/` (user). Each skill has a `SKILL.md` with YAML frontmatter defining `name`, `description`, and optional `allowed_tools`.
