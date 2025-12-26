@@ -713,14 +713,37 @@ class StreamingDisplayManager:
                 else:
                     return f"Output {len(lines)} lines"
 
-        # Handle file operation tools
-        elif tool_name in ["write_file", "append_file"]:
-            if "updated" in clean_output.lower() or "written" in clean_output.lower():
-                return "File updated"
-            elif "created" in clean_output.lower():
-                return "File created"
+        # Handle edit_file tool (diff-based editing)
+        elif tool_name == "edit_file":
+            if "Successfully applied diff" in clean_output:
+                # Extract just the success message, diff content is shown separately
+                return "Diff applied"
+            elif "Failed to apply diff" in clean_output:
+                # Show error message
+                error_start = clean_output.find("Failed to apply diff")
+                error_msg = clean_output[error_start:].split("\n")[0]
+                return error_msg[:80]
+            elif "File not found" in clean_output:
+                return clean_output.split("\n")[0]
             else:
                 return clean_output[:60] + ("..." if len(clean_output) > 60 else "")
+
+        # Handle write_file tool
+        elif tool_name == "write_file":
+            if "Created" in clean_output:
+                # Extract just the first line (e.g., "Created /path/file.txt (123 bytes)")
+                return clean_output.split("\n")[0]
+            elif "Updated" in clean_output:
+                return clean_output.split("\n")[0]
+            else:
+                return clean_output.split("\n")[0][:60]
+
+        # Handle append_file tool
+        elif tool_name == "append_file":
+            if "Appended" in clean_output:
+                return clean_output.split("\n")[0]
+            else:
+                return clean_output.split("\n")[0][:60]
 
         # Handle todo_write - show full todo list with emoji
         elif tool_name == "todo_write":
@@ -921,52 +944,91 @@ class StreamingDisplayManager:
         return False
 
     def _extract_diff_content(self, tool_name: str, output: str) -> List:
-        """Extract and format diff content for file updates."""
+        """Extract and format diff content for file updates with git-style highlighting."""
         renderables = []
 
-        # Only show diffs for file editing tools
-        if tool_name not in ["Edit", "MultiEdit", "Write"]:
+        # Only show diffs for file editing/writing tools
+        if tool_name not in [
+            "Edit",
+            "MultiEdit",
+            "Write",
+            "edit_file",
+            "write_file",
+            "append_file",
+        ]:
             return renderables
 
-        # Look for diff-like content in the output
-        lines = output.split("\n")
+        # Check for our diff marker
+        diff_content = ""
+        if "---DIFF---" in output:
+            parts = output.split("---DIFF---", 1)
+            if len(parts) > 1:
+                diff_content = parts[1].strip()
+        else:
+            # Fallback: look for diff-like content directly
+            diff_content = output
+
+        if not diff_content:
+            return renderables
+
+        # Parse diff lines
+        lines = diff_content.split("\n")
         diff_lines = []
-        in_diff = False
 
         for line in lines:
-            # Simple diff detection
-            if line.strip().startswith(("+", "-", "@@")) and not in_diff:
-                in_diff = True
+            # Keep file headers for context
+            if line.startswith("--- ") or line.startswith("+++ "):
                 diff_lines.append(line)
-            elif in_diff and line.strip().startswith(("+", "-", " ", "@@")):
+            # Keep hunk headers, additions, deletions, and context lines
+            elif line.startswith("@@") or line.startswith("+") or line.startswith("-"):
                 diff_lines.append(line)
-            elif in_diff and not line.strip():
+            elif line.startswith(" "):
+                # Context line
                 diff_lines.append(line)
-            elif in_diff:
-                # End of diff section
-                break
 
         # Format diff if found
         if diff_lines:
-            renderables.append(Text())  # Add spacing
-            for line in diff_lines[:10]:  # Limit to 10 lines
+            # Count additions and deletions for summary
+            additions = sum(
+                1 for ln in diff_lines if ln.startswith("+") and not ln.startswith("+++")
+            )
+            deletions = sum(
+                1 for ln in diff_lines if ln.startswith("-") and not ln.startswith("---")
+            )
+
+            # Show summary line with change counts
+            summary_text = Text()
+            summary_text.append("     ", style="")
+            if additions > 0:
+                summary_text.append(f"+{additions}", style="bold green")
+            if additions > 0 and deletions > 0:
+                summary_text.append(" ", style="")
+            if deletions > 0:
+                summary_text.append(f"-{deletions}", style="bold red")
+            renderables.append(summary_text)
+
+            # Show ALL diff lines with git-style coloring (no limit)
+            for line in diff_lines:
                 diff_text = Text()
-                if line.startswith("+"):
-                    diff_text.append("    ", style="")
+                diff_text.append("     ", style="")  # Indent
+
+                if line.startswith("+++") or line.startswith("---"):
+                    # File header: bold
+                    diff_text.append(line, style="bold")
+                elif line.startswith("+"):
+                    # Addition: green (git style)
                     diff_text.append(line, style="green")
                 elif line.startswith("-"):
-                    diff_text.append("    ", style="")
+                    # Deletion: red (git style)
                     diff_text.append(line, style="red")
                 elif line.startswith("@@"):
-                    diff_text.append("    ", style="")
-                    diff_text.append(line, style="cyan")
+                    # Hunk header: cyan/blue bold
+                    diff_text.append(line, style="cyan bold")
                 else:
-                    diff_text.append("    ", style="")
+                    # Context line: dim
                     diff_text.append(line, style="dim")
-                renderables.append(diff_text)
 
-            if len(diff_lines) > 10:
-                renderables.append(Text("    ...", style="dim"))
+                renderables.append(diff_text)
 
         return renderables
 
