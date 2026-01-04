@@ -23,7 +23,7 @@ class SecurityGuard:
 
         # Check for dangerous patterns
         dangerous_patterns = [
-            r">\s*/dev/",  # Writing to device files
+            r">\s*/dev/(?!null\b)",  # Writing to device files (allow /dev/null)
             r"dd\s+if=",  # Disk destroyer
             r"mkfs",  # Format filesystem
             r":(){ :|:& };:",  # Fork bomb

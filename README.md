@@ -12,7 +12,7 @@ An experimental, universal AI coding assistant for the terminal. Built in Python
 
 ## Features
 
-- **Universal AI Support** - Works with OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers
+- **Universal AI Support** - Works with ChatGPT/Gemini/Claude subscriptions and API keys via OpenAI, Anthropic, Google, GitHub Copilot, and 100+ providers
 - **Smart Context** - Persistent sessions with SQLite storage and automatic token-aware compression
 - **Real-time Streaming** - Rich terminal displays with live output
 - **Comprehensive Tools** - File operations, search, shell, task delegation, todos, and skills
@@ -80,6 +80,49 @@ Koder can be configured via (in priority order):
 | Azure | `AZURE_API_KEY` | `azure/gpt-4` |
 
 See [Configuration Guide](docs/configuration.md) for all 100+ providers.
+
+### OAuth Providers (Subscription-Based)
+
+Use your existing subscriptions (Claude Max, ChatGPT Plus/Pro, Google Gemini) without API keys:
+
+```bash
+# Authenticate with a provider
+koder auth login google      # Google/Gemini CLI (free with Google account)
+koder auth login claude      # Claude Max subscription
+koder auth login chatgpt     # ChatGPT Plus/Pro subscription
+koder auth login antigravity # Antigravity (Gemini 3 + Claude models)
+
+# Check authentication status
+koder auth list              # List configured providers
+koder auth status            # Show detailed token status
+
+# Revoke access
+koder auth revoke google     # Remove stored tokens
+```
+
+**OAuth Providers:**
+
+| OAuth Provider | Subscription | Description |
+|----------------|--------------|-------------|
+| `google` | Google Gemini | Access to Gemini models via Google account |
+| `claude` | Claude Pro/Max | Access to Claude models via subscription |
+| `chatgpt` | ChatGPT Plus/Pro | Access to GPT models via subscription |
+| `antigravity` | Antigravity | Access to Gemini 3 + Claude models |
+
+Available models are fetched from each provider's API after login and cached locally (1 day TTL).
+Use `koder auth list` to see all available models for your authenticated providers.
+
+**Usage after authentication:**
+
+```bash
+# Use OAuth-authenticated models (OAuth provider prefix required)
+KODER_MODEL="google/gemini-3-pro-preview" koder "your prompt"                # Google OAuth
+KODER_MODEL="claude/claude-opus-4-5-20250514" koder "your prompt"            # Claude Max
+KODER_MODEL="chatgpt/gpt-5.2" koder "your prompt"                            # ChatGPT OAuth
+KODER_MODEL="antigravity/antigravity-gemini-3-pro-high" koder "your prompt"  # Antigravity
+```
+
+OAuth tokens and cached models are stored in `~/.koder/tokens/` and automatically refreshed before expiry.
 
 ### Config File Example
 

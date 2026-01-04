@@ -105,6 +105,46 @@ def create_config_subparsers(subparsers):
     set_parser.add_argument("value", help="Value to set")
 
 
+def create_auth_subparsers(subparsers):
+    """Create auth subcommand parsers."""
+    auth_parser = subparsers.add_parser("auth", help="Manage OAuth authentication")
+    auth_subparsers = auth_parser.add_subparsers(dest="auth_command", help="Auth actions")
+
+    # koder auth login <provider>
+    login_parser = auth_subparsers.add_parser("login", help="Authenticate with a provider")
+    login_parser.add_argument(
+        "provider",
+        choices=["google", "claude", "chatgpt", "antigravity"],
+        help="OAuth provider (google, claude, chatgpt, antigravity)",
+    )
+    login_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=300,
+        help="Timeout in seconds for OAuth flow (default: 300)",
+    )
+
+    # koder auth list
+    auth_subparsers.add_parser("list", help="List configured OAuth providers")
+
+    # koder auth revoke <provider>
+    revoke_parser = auth_subparsers.add_parser("revoke", help="Revoke OAuth tokens")
+    revoke_parser.add_argument(
+        "provider",
+        choices=["google", "claude", "chatgpt", "antigravity"],
+        help="OAuth provider to revoke",
+    )
+
+    # koder auth status [provider]
+    status_parser = auth_subparsers.add_parser("status", help="Show OAuth token status")
+    status_parser.add_argument(
+        "provider",
+        nargs="?",
+        choices=["google", "claude", "chatgpt", "antigravity"],
+        help="Optional: specific provider to show",
+    )
+
+
 async def main():
     """Run the Koder CLI.
 
@@ -113,8 +153,9 @@ async def main():
     """
     first_arg = sys.argv[1] if len(sys.argv) > 1 else None
     is_config_command = first_arg == "config"
+    is_auth_command = first_arg == "auth"
 
-    if not is_config_command:
+    if not is_config_command and not is_auth_command:
         try:
             setup_openai_client()
         except ValueError as e:
@@ -124,8 +165,8 @@ async def main():
     config_manager = get_config_manager()
     config = get_config() if not is_config_command else None
 
-    # Check if first argument is "mcp" or "config" to decide parser strategy
-    if first_arg in ("mcp", "config"):
+    # Check if first argument is "mcp", "config", or "auth" to decide parser strategy
+    if first_arg in ("mcp", "config", "auth"):
         # Use subcommand parser
         parser = argparse.ArgumentParser(description="Koder - AI Coding Assistant")
         parser.add_argument("--session", "-s", default=None, help="Session ID for context")
@@ -138,6 +179,7 @@ async def main():
         subparsers = parser.add_subparsers(dest="command", help="Available commands")
         create_mcp_subparsers(subparsers)
         create_config_subparsers(subparsers)
+        create_auth_subparsers(subparsers)
     else:
         # Use simple parser for prompt mode
         parser = argparse.ArgumentParser(description="Koder - AI Coding Assistant")
@@ -168,6 +210,12 @@ async def main():
         from .config.cli_handler import handle_config_command
 
         return await handle_config_command(args)
+
+    # Handle auth command (doesn't require full config)
+    if args.command == "auth":
+        from .auth.cli_handler import run_auth_command
+
+        return await run_auth_command(args)
 
     if getattr(args, "resume", False):
         selected = await _prompt_select_session()

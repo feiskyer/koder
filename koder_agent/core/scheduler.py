@@ -185,9 +185,6 @@ class AgentScheduler:
             max_turns=50,
         )
 
-        # Track if we displayed content during streaming
-        content_displayed = False
-
         # Track cancellation state with token for immediate response
         cancel_token = CancellationToken()
         cancelled = False
@@ -313,10 +310,8 @@ class AgentScheduler:
                                 if isinstance(current_content, str):
                                     if current_content.strip():
                                         live.update(current_content)
-                                        content_displayed = True
                                 elif current_content:  # For renderables like Group
                                     live.update(current_content)
-                                    content_displayed = True
 
                         except Exception as e:
                             # Log event processing errors but continue streaming
@@ -341,14 +336,14 @@ class AgentScheduler:
         # Handle cancellation case
         if cancelled:
             # Rich Live with transient=True clears content on exit, so we need to re-print
-            # Get partial content that was accumulated during streaming
-            partial_display = display_manager.get_final_display()
+            # Get partial content that was accumulated during streaming (as Rich renderable)
+            partial_content = display_manager.get_display_content()
             partial_text = display_manager.get_final_text()
 
-            # Show the partial output (text + tool summaries)
-            if partial_display and partial_display.strip():
+            # Show the partial output with proper formatting (colors and markdown preserved)
+            if self._has_content(partial_content):
                 print()  # Add spacing
-                console.print(partial_display)
+                console.print(partial_content)
             elif partial_text and partial_text.strip():
                 print()  # Add spacing
                 console.print(partial_text)
@@ -363,7 +358,7 @@ class AgentScheduler:
             # Return partial text for session history
             return partial_text or "Operation cancelled. You can provide additional instructions."
 
-        # Get final content for permanent display
+        # Get final content for permanent display (Rich Group with proper formatting)
         final_content = display_manager.get_display_content()
 
         # Clear the Rich Live region and show final content cleanly
@@ -387,27 +382,12 @@ class AgentScheduler:
                 except Exception:
                     pass  # Fallback to simple approach
 
-            # Strategy 2: Always show final response with tools, but avoid duplicate tool output
-            # Get the final display content including tools
-            final_display_response = display_manager.get_final_display()
-            final_text_response = display_manager.get_final_text()
-
-            # Show the complete display including tools if available, otherwise fallback to text only
-            if final_display_response and final_display_response.strip():
-                # Show the complete response including tool summaries
-                print()  # Add spacing
-                console.print(final_display_response)
-                print()  # Add spacing after
-            elif final_text_response and final_text_response.strip():
-                # Fallback to text-only response
-                print()  # Add spacing
-                console.print(final_text_response)
-                print()  # Add spacing after
-            elif not content_displayed:
-                # Fallback: show full content if no separate text and nothing was displayed
-                print()  # Add spacing
-                console.print(final_content)
-                print()  # Add spacing after
+            # Strategy 2: Always show final response with tools using Rich renderable objects
+            # Use get_display_content() directly to preserve colors and markdown formatting
+            # instead of get_final_display() which loses formatting through plain text conversion
+            print()  # Add spacing
+            console.print(final_content)
+            print()  # Add spacing after
 
         # Capture token usage from streaming result
         await self._capture_usage(result)

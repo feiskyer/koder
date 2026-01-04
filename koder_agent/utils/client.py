@@ -18,6 +18,10 @@ from ..config import get_config, get_config_manager
 litellm.suppress_debug_info = True
 litellm.drop_params = True
 
+# Register OAuth providers with LiteLLM
+# This must happen early so custom providers are available for model routing
+_oauth_providers_registered = False
+
 # LiteLLM changed exception namespace in some versions; unify access.
 _LITELLM_EXC = getattr(litellm, "exceptions", litellm)
 _LITELLM_ERRORS = (
@@ -36,6 +40,15 @@ litellm.num_retries_per_request = 3
 # Well-known environment variable mappings for common providers
 # For providers not listed here, the api_key from config will be set
 # to the provider's expected env var (e.g., {PROVIDER}_API_KEY)
+# OAuth provider to LiteLLM provider mapping
+# OAuth providers use different names than LiteLLM expects
+OAUTH_TO_LITELLM_PROVIDER = {
+    "google": "gemini",  # google OAuth → gemini/ for LiteLLM
+    "claude": "anthropic",  # claude OAuth → anthropic/ for LiteLLM
+    "chatgpt": "openai",  # chatgpt OAuth → openai/ for LiteLLM
+    # antigravity uses custom API, not LiteLLM routing
+}
+
 PROVIDER_ENV_VARS = {
     "openai": {"api_key": "OPENAI_API_KEY", "base_url": "OPENAI_BASE_URL"},
     "anthropic": {"api_key": "ANTHROPIC_API_KEY", "base_url": "ANTHROPIC_BASE_URL"},
@@ -66,6 +79,24 @@ PROVIDER_ENV_VARS = {
     "ollama": {"base_url": "OLLAMA_BASE_URL"},
     "custom": {"api_key": "OPENAI_API_KEY", "base_url": "OPENAI_BASE_URL"},
 }
+
+
+def _ensure_oauth_providers_registered() -> None:
+    """Ensure OAuth providers are registered with LiteLLM.
+
+    This function is idempotent and will only register providers once.
+    """
+    global _oauth_providers_registered
+    if _oauth_providers_registered:
+        return
+
+    try:
+        from ..auth.litellm_oauth import register_oauth_providers
+
+        register_oauth_providers()
+        _oauth_providers_registered = True
+    except ImportError:
+        pass  # Auth module not available
 
 
 def _get_provider_env_var_name(provider: str) -> str:
@@ -159,7 +190,23 @@ def _resolve_model_settings():
 
 
 def _get_provider_api_key(config, config_manager, provider: str):
-    """Get the API key for the effective provider."""
+    """Get the API key for the effective provider.
+
+    Priority: OAuth tokens > Config > Environment variables
+    """
+    # Check for OAuth tokens first
+    try:
+        from ..auth.client_integration import get_oauth_api_key, map_provider_to_oauth
+
+        oauth_provider = map_provider_to_oauth(provider)
+        if oauth_provider:
+            oauth_key = get_oauth_api_key(oauth_provider)
+            if oauth_key:
+                return oauth_key
+    except ImportError:
+        pass  # Auth module not available
+
+    # Fall back to config/env vars
     env_var_name = _get_provider_env_var_name(provider)
     config_value = config.model.api_key if config.model.provider.lower() == provider else None
     return config_manager.get_effective_value(config_value, env_var_name)
@@ -194,8 +241,73 @@ def _setup_provider_env_vars(config, provider: str):
             os.environ[env_var_name] = api_key
 
 
+def _map_oauth_to_litellm_provider(provider: str) -> str:
+    """Map OAuth provider names to LiteLLM-compatible provider names.
+
+    OAuth providers use different names than LiteLLM expects:
+    - google (OAuth) → gemini (LiteLLM)
+    - claude (OAuth) → anthropic (LiteLLM)
+    - chatgpt (OAuth) → openai (LiteLLM)
+
+    Args:
+        provider: Provider name (e.g., 'google', 'claude', 'chatgpt')
+
+    Returns:
+        LiteLLM-compatible provider name
+    """
+    return OAUTH_TO_LITELLM_PROVIDER.get(provider.lower(), provider.lower())
+
+
+def _should_use_oauth_provider(provider: str) -> bool:
+    """Check if we should use OAuth custom handler for a provider.
+
+    Returns True if:
+    1. The provider is an OAuth provider (google, claude, chatgpt, antigravity)
+    2. A valid OAuth token exists for the provider
+
+    Args:
+        provider: Provider name to check
+
+    Returns:
+        True if OAuth custom handler should be used
+    """
+    try:
+        from ..auth.client_integration import has_oauth_credentials, map_provider_to_oauth
+        from ..auth.litellm_oauth import is_oauth_provider
+
+        if not is_oauth_provider(provider):
+            return False
+
+        oauth_provider = map_provider_to_oauth(provider)
+        if oauth_provider and has_oauth_credentials(oauth_provider):
+            return True
+    except ImportError:
+        pass
+    return False
+
+
+def _get_oauth_model_prefix(provider: str) -> Optional[str]:
+    """Get the LiteLLM custom provider prefix for OAuth access.
+
+    Args:
+        provider: OAuth provider name (google, claude, chatgpt, antigravity)
+
+    Returns:
+        Custom provider prefix (e.g., 'google_oauth') or None
+    """
+    try:
+        from ..auth.litellm_oauth import get_oauth_model_prefix
+
+        return get_oauth_model_prefix(provider)
+    except ImportError:
+        return None
+
+
 def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = False) -> str:
     """Return a LiteLLM-compatible identifier, always using litellm/<provider>/<model>.
+
+    When OAuth tokens are available for the provider, uses custom OAuth handler
+    (e.g., 'google_oauth/gemini-pro') instead of standard LiteLLM provider.
 
     Args:
         provider: The resolved provider name
@@ -210,14 +322,32 @@ def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = 
     if raw_model.startswith("litellm/"):
         return raw_model
 
+    # Ensure OAuth providers are registered before checking
+    _ensure_oauth_providers_registered()
+
     # Only parse provider from model string if it came from environment variable
     if model_from_env:
         explicit_provider, remainder, _ = _split_model_identifier(raw_model)
         if explicit_provider:
-            return f"litellm/{explicit_provider}/{remainder}"
+            # Check if OAuth should be used for this provider
+            if _should_use_oauth_provider(explicit_provider):
+                oauth_prefix = _get_oauth_model_prefix(explicit_provider)
+                if oauth_prefix:
+                    return f"litellm/{oauth_prefix}/{remainder}"
 
-    provider = provider.lower()
-    return f"litellm/{provider}/{raw_model}"
+            # Fall back to standard LiteLLM provider mapping
+            litellm_provider = _map_oauth_to_litellm_provider(explicit_provider)
+            return f"litellm/{litellm_provider}/{remainder}"
+
+    # Check if OAuth should be used for this provider
+    if _should_use_oauth_provider(provider):
+        oauth_prefix = _get_oauth_model_prefix(provider)
+        if oauth_prefix:
+            return f"litellm/{oauth_prefix}/{raw_model}"
+
+    # Fall back to standard LiteLLM provider mapping
+    litellm_provider = _map_oauth_to_litellm_provider(provider)
+    return f"litellm/{litellm_provider}/{raw_model}"
 
 
 def _compute_effective_model(config, config_manager, provider, raw_model, model_from_env=False):
@@ -259,6 +389,33 @@ def get_base_url():
     return config_manager.get_effective_value(base_url_config, base_url_env_var)
 
 
+def _get_oauth_extra_headers(provider: str) -> Optional[dict]:
+    """Get OAuth-specific headers for a provider.
+
+    Args:
+        provider: Provider identifier
+
+    Returns:
+        Dict of extra headers or None
+    """
+    try:
+        from ..auth.client_integration import (
+            get_oauth_headers,
+            has_oauth_token,
+            map_provider_to_oauth,
+        )
+
+        oauth_provider = map_provider_to_oauth(provider)
+        if oauth_provider and has_oauth_token(oauth_provider):
+            headers = get_oauth_headers(oauth_provider)
+            # Remove Authorization header as it's handled via api_key
+            headers.pop("Authorization", None)
+            return headers if headers else None
+    except ImportError:
+        pass
+    return None
+
+
 def get_litellm_model_kwargs() -> dict:
     """Get kwargs for creating a LitellmModel instance.
 
@@ -289,6 +446,11 @@ def get_litellm_model_kwargs() -> dict:
         "base_url": base_url,
         "max_retries": 3,
     }
+
+    # Add OAuth-specific headers if available
+    oauth_headers = _get_oauth_extra_headers(provider)
+    if oauth_headers:
+        kwargs["extra_headers"] = oauth_headers
 
     return kwargs
 
@@ -454,8 +616,13 @@ def setup_openai_client():
     """Set up the OpenAI client with priority: ENV > Config > Default.
 
     Also configures global LiteLLM retry settings for all providers.
+    Registers OAuth custom providers with LiteLLM if auth module is available.
     """
     set_tracing_disabled(True)
+
+    # Register OAuth providers with LiteLLM
+    _ensure_oauth_providers_registered()
+
     config, config_manager, provider, raw_model, model_from_env = _resolve_model_settings()
 
     # Setup provider environment variables for LiteLLM

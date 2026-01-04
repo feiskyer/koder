@@ -1,7 +1,5 @@
 """Tests for model_info utilities."""
 
-import pytest
-
 from koder_agent.utils.model_info import (
     get_context_window_size,
     get_maximum_output_tokens,
