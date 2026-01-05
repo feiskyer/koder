@@ -315,15 +315,19 @@ class OAuthProvider(ABC):
         """
         return {"Authorization": f"Bearer {access_token}"}
 
-    async def list_models(self, access_token: str) -> list[str]:
+    async def list_models(self, access_token: str, verbose: bool = False) -> tuple[list[str], dict]:
         """List available models for this provider.
 
         Override in subclasses to call provider's models API.
 
         Args:
             access_token: Valid access token
+            verbose: If True, return detailed status info
 
         Returns:
-            List of model names with provider prefix (e.g., "google/gemini-2.5-pro")
+            Tuple of (model list, status dict with 'source' and optional 'error')
+            - source: "api", "fallback", or "hardcoded"
+            - error: Error message if API call failed (None otherwise)
+            - reason: Optional explanation (e.g., "No public API available")
         """
-        return []
+        return [], {"source": "hardcoded", "error": None}

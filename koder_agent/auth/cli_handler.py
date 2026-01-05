@@ -88,7 +88,7 @@ async def handle_login(provider_id: str, timeout: float = 300) -> bool:
 
         # Fetch available models from provider API
         console.print("Fetching available models...")
-        models = await provider.list_models(tokens.access_token)
+        models, _ = await provider.list_models(tokens.access_token)
         tokens.models = models
         tokens.models_fetched_at = int(time.time() * 1000)
 
@@ -184,12 +184,12 @@ async def _handle_manual_code_flow(auth_url: str, timeout: float) -> "CallbackRe
         )
 
 
-def handle_list() -> None:
-    """List all configured OAuth providers with their cached models."""
+async def handle_list() -> None:
+    """List all configured OAuth providers with their models."""
     storage = get_token_storage()
-    tokens = storage.get_all_tokens()
+    all_tokens = storage.get_all_tokens()
 
-    if not tokens:
+    if not all_tokens:
         console.print(
             "\n[yellow]No OAuth providers configured.[/yellow]\n"
             "Use 'koder auth login <provider>' to authenticate.\n"
@@ -197,23 +197,54 @@ def handle_list() -> None:
         )
         return
 
-    for provider_id, token in tokens.items():
-        # Build info panel
+    for provider_id, tokens in all_tokens.items():
         description = PROVIDER_DESCRIPTIONS.get(provider_id, "")
-        info = (
-            f"[bold]Account:[/bold] {token.email or 'Unknown'}\n[bold]Type:[/bold] {description}\n"
-        )
+        # Claude doesn't provide user info via OAuth
+        account = tokens.email if tokens.email else None
+        if account:
+            info = f"[bold]Account:[/bold] {account}\n[bold]Type:[/bold] {description}\n"
+        else:
+            info = f"[bold]Type:[/bold] {description}\n"
 
-        # Show cached models
-        if token.models:
-            cache_valid = token.is_models_cache_valid()
-            cache_status = "[green]cached[/green]" if cache_valid else "[yellow]stale[/yellow]"
-            info += f"\n[bold]Models ({len(token.models)}):[/bold] {cache_status}\n"
-            # Show all models in a wrapped format
-            for model in token.models:
+        # Auto-refresh token if expired
+        access_token = tokens.access_token
+        if tokens.is_expired():
+            console.print(f"[dim]Refreshing {provider_id} token...[/dim]")
+            try:
+                provider = get_provider(provider_id)
+                result = await provider.refresh_tokens(tokens.refresh_token)
+                if result.success and result.tokens:
+                    storage.save(result.tokens)
+                    tokens = result.tokens
+                    access_token = tokens.access_token
+            except Exception as e:
+                info += f"\n[red]Token refresh failed: {e}[/red]\n"
+
+        # Fetch models from API if cache is stale or empty
+        models = tokens.models
+        source = "cached"
+
+        if not tokens.is_models_cache_valid() or not models:
+            try:
+                provider = get_provider(provider_id)
+                models, status = await provider.list_models(access_token)
+                source = status.get("source", "api")
+
+                # Update cache
+                tokens.models = models
+                tokens.models_fetched_at = int(time.time() * 1000)
+                storage.save(tokens)
+            except Exception:
+                source = "cached" if models else "unavailable"
+
+        # Display models
+        if models:
+            source_label = "[green]API[/green]" if source == "api" else "[cyan]cached[/cyan]"
+            info += f"\n[bold]Models ({len(models)}):[/bold] {source_label}\n"
+            for model in sorted(models):
                 info += f"  • {model}\n"
         else:
-            info += "\n[dim]No models cached (re-login to fetch)[/dim]\n"
+            info += "\n[dim]No models available[/dim]\n"
 
         console.print(
             Panel(
@@ -258,7 +289,7 @@ async def handle_revoke(provider_id: str) -> bool:
     return True
 
 
-def handle_status(provider_id: Optional[str] = None) -> None:
+async def handle_status(provider_id: Optional[str] = None) -> None:
     """Show OAuth token status.
 
     Args:
@@ -273,7 +304,7 @@ def handle_status(provider_id: Optional[str] = None) -> None:
             console.print(f"[yellow]No tokens found for provider '{provider_id}'[/yellow]")
             return
 
-        _print_token_details(provider_id, tokens)
+        await _print_token_details(provider_id, tokens, storage)
     else:
         # Show all providers
         all_tokens = storage.get_all_tokens()
@@ -282,12 +313,26 @@ def handle_status(provider_id: Optional[str] = None) -> None:
             return
 
         for pid, tokens in all_tokens.items():
-            _print_token_details(pid, tokens)
+            await _print_token_details(pid, tokens, storage)
             console.print()
 
 
-def _print_token_details(provider_id: str, tokens) -> None:
-    """Print detailed token information."""
+async def _print_token_details(provider_id: str, tokens, storage) -> None:
+    """Print detailed token information with models."""
+    # Auto-refresh token if expired
+    access_token = tokens.access_token
+    if tokens.is_expired():
+        console.print(f"[dim]Refreshing {provider_id} token...[/dim]")
+        try:
+            provider = get_provider(provider_id)
+            result = await provider.refresh_tokens(tokens.refresh_token)
+            if result.success and result.tokens:
+                storage.save(result.tokens)
+                tokens = result.tokens
+                access_token = tokens.access_token
+        except Exception:
+            pass
+
     # Determine status
     if tokens.is_expired(0):
         status = "[red]EXPIRED[/red]"
@@ -304,24 +349,43 @@ def _print_token_details(provider_id: str, tokens) -> None:
     expires = datetime.fromtimestamp(tokens.expires_at / 1000)
 
     # Build detailed info
+    account_line = f"Account: {tokens.email}\n" if tokens.email else ""
     info = (
         f"Status: {status}\n"
-        f"Account: {tokens.email or 'Unknown'}\n"
+        f"{account_line}"
         f"Expires: {expires.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Time left: {time_left_mins} minutes\n"
         f"Access token: {tokens.access_token[:20]}...\n"
         f"Refresh token: {tokens.refresh_token[:20]}..."
     )
 
+    # Fetch models from API if cache is stale or empty
+    models = tokens.models
+    source = "cached"
+
+    if not tokens.is_models_cache_valid() or not models:
+        try:
+            provider = get_provider(provider_id)
+            models, status_info = await provider.list_models(access_token)
+            source = "api" if status_info.get("source") == "api" else "cached"
+
+            # Update cache
+            tokens.models = models
+            tokens.models_fetched_at = int(time.time() * 1000)
+            storage.save(tokens)
+        except Exception:
+            pass
+
     # Add models info
-    if tokens.models:
-        cache_valid = tokens.is_models_cache_valid()
-        cache_status = "valid" if cache_valid else "stale (re-login to refresh)"
-        info += f"\n\nCached models ({len(tokens.models)}): {cache_status}"
+    if models:
+        source_label = "[green]API[/green]" if source == "api" else "[cyan]cached[/cyan]"
+        info += f"\n\n[bold]Models ({len(models)}):[/bold] {source_label}\n"
+        for model in sorted(models):
+            info += f"  • {model}\n"
 
     console.print(
         Panel(
-            info,
+            info.strip(),
             title=f"[bold]{provider_id}[/bold]",
             border_style="blue",
         )
@@ -369,7 +433,7 @@ async def run_auth_command(args) -> int:
         return 0 if success else 1
 
     elif args.auth_command == "list":
-        handle_list()
+        await handle_list()
         return 0
 
     elif args.auth_command == "revoke":
@@ -377,7 +441,7 @@ async def run_auth_command(args) -> int:
         return 0 if success else 1
 
     elif args.auth_command == "status":
-        handle_status(getattr(args, "provider", None))
+        await handle_status(getattr(args, "provider", None))
         return 0
 
     else:

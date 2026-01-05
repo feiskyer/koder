@@ -136,10 +136,7 @@ def main() -> int:
         help="Codex release tag to fetch (default: latest release).",
     )
     default_output = (
-        Path(__file__).resolve().parents[1]
-        / "koder_agent"
-        / "auth"
-        / "codex_prompts.py"
+        Path(__file__).resolve().parents[1] / "koder_agent" / "auth" / "codex_prompts.py"
     )
     parser.add_argument(
         "--output",

@@ -140,18 +140,21 @@ class ChatGPTOAuthProvider(OAuthProvider):
             "stream": True,
         }
 
-    async def list_models(self, access_token: str) -> list[str]:
+    async def list_models(self, access_token: str, verbose: bool = False) -> tuple[list[str], dict]:
         """List available OpenAI models.
 
         Note: Falls back to known models if API call fails.
 
         Args:
             access_token: Valid ChatGPT OAuth access token
+            verbose: If True, return detailed status info
 
         Returns:
-            List of model names with chatgpt/ prefix
+            Tuple of (model list, status dict with 'source' and optional 'error')
         """
         models = []
+        status = {"source": "api", "error": None}
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -167,11 +170,15 @@ class ChatGPTOAuthProvider(OAuthProvider):
                                 prefix in model_id for prefix in ["gpt-", "o1", "o3", "chatgpt"]
                             ):
                                 models.append(f"{self.provider_id}/{model_id}")
-        except Exception:
-            pass
+                    else:
+                        error_text = await response.text()
+                        status["error"] = f"API returned {response.status}: {error_text[:200]}"
+        except Exception as e:
+            status["error"] = f"API request failed: {str(e)}"
 
         # Fallback to known models if API call fails or returns empty
         if not models:
+            status["source"] = "fallback"
             models = [
                 # GPT-5.2 Codex models
                 f"{self.provider_id}/gpt-5.2-codex",
@@ -189,4 +196,4 @@ class ChatGPTOAuthProvider(OAuthProvider):
                 f"{self.provider_id}/gpt-4o-mini",
             ]
 
-        return models
+        return models, status

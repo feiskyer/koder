@@ -220,7 +220,7 @@ class ClaudeOAuthProvider(OAuthProvider):
             "anthropic-beta": ",".join(ANTHROPIC_BETA_HEADERS),
         }
 
-    async def list_models(self, access_token: str) -> list[str]:
+    async def list_models(self, access_token: str, verbose: bool = False) -> tuple[list[str], dict]:
         """List available Claude models.
 
         Note: Anthropic doesn't provide a public models listing API.
@@ -228,14 +228,20 @@ class ClaudeOAuthProvider(OAuthProvider):
 
         Args:
             access_token: Valid Claude OAuth access token
+            verbose: If True, return detailed status info
 
         Returns:
-            List of model names with claude/ prefix
+            Tuple of (model list, status dict with 'source' info)
         """
         # Anthropic doesn't have a models listing API
         # Return commonly available models for Claude Max subscription
         # Model names must match actual Anthropic API model identifiers
-        return [
+        status = {
+            "source": "hardcoded",
+            "error": None,
+            "reason": "Anthropic has no public models API",
+        }
+        models = [
             # Claude 4.5 models (latest versions)
             f"{self.provider_id}/claude-sonnet-4-5-20250929",
             f"{self.provider_id}/claude-opus-4-5-20251101",
@@ -252,3 +258,4 @@ class ClaudeOAuthProvider(OAuthProvider):
             f"{self.provider_id}/claude-3-5-sonnet-20241022",
             f"{self.provider_id}/claude-3-opus-20240229",
         ]
+        return models, status

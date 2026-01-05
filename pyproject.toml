@@ -1,6 +1,6 @@
 [project]
 name = "koder"
-version = "0.4.9"
+version = "0.4.10"
 description = "An intuitive AI coding assistant and interactive CLI tool that boosts developer productivity with intelligent automation and context-aware support."
 authors = [{ name = "Pengfei Ni" }]
 readme = "README.md"
@@ -94,3 +94,18 @@ filterwarnings = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["koder_agent"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".claude/",
+    ".github/",
+    ".uv-cache/",
+    "scripts/",
+    "tests/",
+    "docs/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "CONTRIBUTING.md",
+    "uv.lock",
+]

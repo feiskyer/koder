@@ -24,6 +24,13 @@ from koder_agent.auth.constants import (
     GOOGLE_USERINFO_URL,
 )
 
+# Antigravity internal API endpoints
+CLOUD_CODE_BASE_URL = "https://cloudcode-pa.googleapis.com"
+LOAD_CODE_ASSIST_URL = f"{CLOUD_CODE_BASE_URL}/v1internal:loadCodeAssist"
+FETCH_MODELS_URL = f"{CLOUD_CODE_BASE_URL}/v1internal:fetchAvailableModels"
+ANTIGRAVITY_USER_AGENT = "antigravity/1.11.3 Darwin/arm64"
+DEFAULT_PROJECT_ID = "bamboo-precept-lgxtn"
+
 
 class AntigravityOAuthProvider(OAuthProvider):
     """Antigravity OAuth provider for Gemini 3 + Claude access.
@@ -185,35 +192,106 @@ class AntigravityOAuthProvider(OAuthProvider):
         """
         return ANTIGRAVITY_API_BASE
 
-    async def list_models(self, access_token: str) -> list[str]:
-        """List available Antigravity models.
+    async def _fetch_project_id(self, access_token: str) -> tuple[Optional[str], Optional[str]]:
+        """Fetch project ID and subscription tier from loadCodeAssist API."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    LOAD_CODE_ASSIST_URL,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": ANTIGRAVITY_USER_AGENT,
+                    },
+                    json={"metadata": {"ideType": "ANTIGRAVITY"}},
+                ) as response:
+                    if response.ok:
+                        data = await response.json()
+                        project_id = data.get("cloudaicompanionProject")
+                        paid_tier = data.get("paidTier", {})
+                        current_tier = data.get("currentTier", {})
+                        tier_id = paid_tier.get("id") or current_tier.get("id")
+                        return project_id, tier_id
+        except Exception:
+            pass
+        return None, None
 
-        Note: Antigravity provides access to Gemini 3 + Claude models
-        through Google OAuth. Model availability depends on quota.
+    async def _fetch_available_models(
+        self, access_token: str, project_id: str
+    ) -> tuple[list[str], dict]:
+        """Fetch available models from fetchAvailableModels API."""
+        models = []
+        status = {"source": "api", "error": None, "project_id": project_id}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    FETCH_MODELS_URL,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": ANTIGRAVITY_USER_AGENT,
+                    },
+                    json={"project": project_id},
+                ) as response:
+                    if response.ok:
+                        data = await response.json()
+                        models_data = data.get("models", {})
+
+                        for model_name, model_info in models_data.items():
+                            # Skip internal models
+                            if model_info.get("isInternal"):
+                                continue
+                            # Only include models with quota info
+                            if model_info.get("quotaInfo"):
+                                models.append(f"{self.provider_id}/{model_name}")
+
+                        status["model_count"] = len(models_data)
+                        status["filtered_count"] = len(models)
+                    else:
+                        error_text = await response.text()
+                        status["error"] = f"API returned {response.status}: {error_text[:200]}"
+                        status["source"] = "fallback"
+        except Exception as e:
+            status["error"] = f"API request failed: {str(e)}"
+            status["source"] = "fallback"
+
+        return models, status
+
+    async def list_models(self, access_token: str, verbose: bool = False) -> tuple[list[str], dict]:
+        """List available Antigravity models from live API.
 
         Args:
             access_token: Valid Antigravity OAuth access token
+            verbose: If True, return detailed status info
 
         Returns:
-            List of model names with antigravity/ prefix
+            Tuple of (model list, status dict with 'source' info)
         """
-        # Antigravity models based on the reference implementation
-        return [
-            # Gemini 3 models (Antigravity quota)
-            f"{self.provider_id}/antigravity-gemini-3-flash",
-            f"{self.provider_id}/antigravity-gemini-3-pro-low",
-            f"{self.provider_id}/antigravity-gemini-3-pro-high",
-            # Claude models (Antigravity quota)
-            f"{self.provider_id}/antigravity-claude-sonnet-4-5",
-            f"{self.provider_id}/antigravity-claude-sonnet-4-5-thinking-low",
-            f"{self.provider_id}/antigravity-claude-sonnet-4-5-thinking-medium",
-            f"{self.provider_id}/antigravity-claude-sonnet-4-5-thinking-high",
-            f"{self.provider_id}/antigravity-claude-opus-4-5-thinking-low",
-            f"{self.provider_id}/antigravity-claude-opus-4-5-thinking-medium",
-            f"{self.provider_id}/antigravity-claude-opus-4-5-thinking-high",
-            # Gemini CLI quota fallback models
-            f"{self.provider_id}/gemini-2.5-flash",
-            f"{self.provider_id}/gemini-2.5-pro",
-            f"{self.provider_id}/gemini-3-flash-preview",
-            f"{self.provider_id}/gemini-3-pro-preview",
-        ]
+        # Fetch project ID first
+        project_id, tier_id = await self._fetch_project_id(access_token)
+        project_id = project_id or DEFAULT_PROJECT_ID
+
+        # Fetch models from API
+        models, status = await self._fetch_available_models(access_token, project_id)
+
+        if tier_id:
+            status["subscription_tier"] = tier_id
+
+        # Fallback to hardcoded list if API fails
+        if not models:
+            status["source"] = "fallback"
+            if not status.get("error"):
+                status["error"] = "API returned no models"
+            models = [
+                f"{self.provider_id}/gemini-3-flash",
+                f"{self.provider_id}/gemini-3-pro-low",
+                f"{self.provider_id}/gemini-3-pro-high",
+                f"{self.provider_id}/claude-sonnet-4-5",
+                f"{self.provider_id}/claude-sonnet-4-5-thinking",
+                f"{self.provider_id}/claude-opus-4-5-thinking",
+                f"{self.provider_id}/gemini-2.5-flash",
+                f"{self.provider_id}/gemini-2.5-pro",
+            ]
+
+        return models, status

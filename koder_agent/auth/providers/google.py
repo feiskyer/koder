@@ -136,7 +136,7 @@ class GoogleOAuthProvider(OAuthProvider):
         except Exception:
             return False
 
-    async def list_models(self, access_token: str) -> list[str]:
+    async def list_models(self, access_token: str, verbose: bool = False) -> tuple[list[str], dict]:
         """List available Gemini models.
 
         Note: The OAuth scope may not include model listing permission.
@@ -144,11 +144,14 @@ class GoogleOAuthProvider(OAuthProvider):
 
         Args:
             access_token: Valid Google OAuth access token
+            verbose: If True, return detailed status info
 
         Returns:
-            List of model names with google/ prefix
+            Tuple of (model list, status dict with 'source' and optional 'error')
         """
         models = []
+        status = {"source": "api", "error": None}
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -165,11 +168,15 @@ class GoogleOAuthProvider(OAuthProvider):
                                 # Filter for generation models (exclude embedding, etc.)
                                 if "generateContent" in model.get("supportedGenerationMethods", []):
                                     models.append(f"{self.provider_id}/{model_id}")
-        except Exception:
-            pass
+                    else:
+                        error_text = await response.text()
+                        status["error"] = f"API returned {response.status}: {error_text[:200]}"
+        except Exception as e:
+            status["error"] = f"API request failed: {str(e)}"
 
         # Fallback to known models if API call fails or returns empty
         if not models:
+            status["source"] = "fallback"
             models = [
                 # Gemini 3 models (preview)
                 f"{self.provider_id}/gemini-3-pro-preview",
@@ -184,4 +191,4 @@ class GoogleOAuthProvider(OAuthProvider):
                 f"{self.provider_id}/gemini-1.5-flash",
             ]
 
-        return models
+        return models, status

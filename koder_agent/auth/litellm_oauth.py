@@ -19,10 +19,10 @@ from litellm import CustomLLM
 from litellm.types.utils import GenericStreamingChunk, ModelResponse, Usage
 
 from koder_agent.auth.client_integration import get_oauth_token
+from koder_agent.auth.codex_prompts import CODEX_PROMPTS
 from koder_agent.auth.constants import (
     ANTHROPIC_BETA_HEADERS,
 )
-from koder_agent.auth.codex_prompts import CODEX_PROMPTS
 
 logger = logging.getLogger(__name__)
 

@@ -167,9 +167,7 @@ def _cleanup_thought_signature_cache_unlocked() -> None:
 
     # Clean main cache - remove expired entries
     expired_keys = [
-        key
-        for key, (_, ts) in _thought_signature_cache.items()
-        if now - ts >= _CACHE_TTL_SECONDS
+        key for key, (_, ts) in _thought_signature_cache.items() if now - ts >= _CACHE_TTL_SECONDS
     ]
     for key in expired_keys:
         del _thought_signature_cache[key]
@@ -192,9 +190,7 @@ def _cleanup_thought_signature_cache_unlocked() -> None:
     # Enforce size limit on main cache (LRU-style: remove oldest)
     if len(_thought_signature_cache) > _MAX_CACHE_SIZE:
         # Sort by timestamp and remove oldest entries
-        sorted_entries = sorted(
-            _thought_signature_cache.items(), key=lambda x: x[1][1]
-        )
+        sorted_entries = sorted(_thought_signature_cache.items(), key=lambda x: x[1][1])
         entries_to_remove = len(_thought_signature_cache) - _MAX_CACHE_SIZE
         for key, _ in sorted_entries[:entries_to_remove]:
             del _thought_signature_cache[key]
