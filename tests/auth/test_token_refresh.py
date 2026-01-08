@@ -269,31 +269,40 @@ class TestGetProviderAuthInfo:
 
 
 class TestMapProviderToOAuth:
-    """Tests for provider name mapping."""
+    """Tests for map_provider_to_oauth function."""
 
-    def test_google_mapping(self):
-        """Test Google provider mappings."""
+    def test_oauth_providers_map_to_themselves(self):
+        """OAuth providers should map to themselves."""
         assert map_provider_to_oauth("google") == "google"
-        assert map_provider_to_oauth("gemini") == "google"
-        assert map_provider_to_oauth("GOOGLE") == "google"
-
-    def test_anthropic_mapping(self):
-        """Test Anthropic provider mappings (maps to 'claude' OAuth provider)."""
-        assert map_provider_to_oauth("anthropic") == "claude"
         assert map_provider_to_oauth("claude") == "claude"
-        assert map_provider_to_oauth("ANTHROPIC") == "claude"
-
-    def test_openai_mapping(self):
-        """Test OpenAI provider mappings (maps to 'chatgpt' OAuth provider)."""
-        assert map_provider_to_oauth("openai") == "chatgpt"
         assert map_provider_to_oauth("chatgpt") == "chatgpt"
-        assert map_provider_to_oauth("OPENAI") == "chatgpt"
-
-    def test_antigravity_mapping(self):
-        """Test Antigravity provider mapping."""
         assert map_provider_to_oauth("antigravity") == "antigravity"
 
-    def test_unknown_provider(self):
-        """Test unknown provider returns None."""
-        assert map_provider_to_oauth("unknown") is None
+    def test_api_providers_return_none(self):
+        """API-based providers should NOT map to OAuth."""
+        assert map_provider_to_oauth("anthropic") is None
+        assert map_provider_to_oauth("openai") is None
+        assert map_provider_to_oauth("gemini") is None
         assert map_provider_to_oauth("azure") is None
+        assert map_provider_to_oauth("unknown") is None
+
+    def test_case_insensitive(self):
+        """Provider names should be case insensitive."""
+        assert map_provider_to_oauth("GOOGLE") == "google"
+        assert map_provider_to_oauth("Claude") == "claude"
+        assert map_provider_to_oauth("ChatGPT") == "chatgpt"
+        assert map_provider_to_oauth("ANTHROPIC") is None
+        assert map_provider_to_oauth("OpenAI") is None
+
+    def test_whitespace_handling(self):
+        """Leading/trailing whitespace should be stripped."""
+        assert map_provider_to_oauth("  google  ") == "google"
+        assert map_provider_to_oauth(" claude") == "claude"
+        assert map_provider_to_oauth("chatgpt ") == "chatgpt"
+        assert map_provider_to_oauth("  anthropic  ") is None
+
+    def test_invalid_inputs(self):
+        """None and empty string should return None."""
+        assert map_provider_to_oauth(None) is None
+        assert map_provider_to_oauth("") is None
+        assert map_provider_to_oauth("   ") is None

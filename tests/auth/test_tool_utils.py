@@ -8,7 +8,7 @@ from koder_agent.auth.tool_utils import (
     assign_tool_call_ids,
     build_tool_calls_response_message,
     # Schema cleaning
-    clean_json_schema_for_antigravity,
+    clean_json_schema,
     convert_tool_calls_to_gemini_parts,
     # Tool message conversion
     convert_tool_message_to_gemini_part,
@@ -25,7 +25,7 @@ from koder_agent.auth.tool_utils import (
 
 
 class TestCleanJsonSchemaForAntigravity:
-    """Tests for clean_json_schema_for_antigravity."""
+    """Tests for clean_json_schema."""
 
     def test_removes_defs_and_refs(self):
         """Should remove $defs and convert $ref to description hints."""
@@ -34,7 +34,7 @@ class TestCleanJsonSchemaForAntigravity:
             "$defs": {"MyType": {"type": "string", "description": "A custom type"}},
             "properties": {"field": {"$ref": "#/$defs/MyType"}},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
 
         # $defs should be removed
         assert "$defs" not in result
@@ -45,7 +45,7 @@ class TestCleanJsonSchemaForAntigravity:
     def test_converts_const_to_enum(self):
         """Should convert const values to enum arrays."""
         schema = {"type": "object", "properties": {"status": {"const": "active"}}}
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
 
         assert "const" not in result["properties"]["status"]
         assert result["properties"]["status"].get("enum") == ["active"]
@@ -56,7 +56,7 @@ class TestCleanJsonSchemaForAntigravity:
             "type": "object",
             "properties": {"color": {"type": "string", "enum": ["red", "green", "blue"]}},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
 
         description = result["properties"]["color"].get("description", "")
         assert "Allowed: red, green, blue" in description
@@ -67,7 +67,7 @@ class TestCleanJsonSchemaForAntigravity:
             "type": "object",
             "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 100}},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
 
         prop = result["properties"]["name"]
         # Constraints should be in description, not as keywords
@@ -81,7 +81,7 @@ class TestCleanJsonSchemaForAntigravity:
             "type": "object",
             "properties": {},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
 
         assert "$schema" not in result
 
@@ -92,7 +92,7 @@ class TestCleanJsonSchemaForAntigravity:
             "properties": {"name": {"type": "string"}},
             "required": ["name", "nonexistent"],
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
 
         # Only "name" should remain in required
         assert "name" in result.get("required", [])
@@ -100,8 +100,8 @@ class TestCleanJsonSchemaForAntigravity:
 
     def test_handles_empty_schema(self):
         """Should handle empty or None schema."""
-        assert clean_json_schema_for_antigravity(None) == {"type": "object", "properties": {}}
-        assert clean_json_schema_for_antigravity({}) == {"type": "object", "properties": {}}
+        assert clean_json_schema(None) == {"type": "object", "properties": {}}
+        assert clean_json_schema({}) == {"type": "object", "properties": {}}
 
 
 class TestEnsureToolHasProperties:

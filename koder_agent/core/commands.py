@@ -71,16 +71,16 @@ class ClearCommand(SlashCommand):
 
         new_sid = default_session_local_ms()
 
-        # Clear screen
         try:
             import sys as _sys
 
-            _sys.stdout.write("\033[2J\033[H")
-            _sys.stdout.flush()
+            if _sys.stdout.isatty():
+                _sys.stdout.write("\033[2J\033[H")
+                _sys.stdout.flush()
         except Exception:
             pass
 
-        return f"session_switch:{new_sid}"  # Special return value for CLI to handle
+        return f"session_switch:{new_sid}"
 
 
 class StatusCommand(SlashCommand):

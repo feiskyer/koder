@@ -704,7 +704,7 @@ class ClaudeOAuthLLM(CustomLLM):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Build Anthropic API request body."""
-        from .tool_utils import clean_json_schema_for_antigravity, ensure_tool_has_properties
+        from .tool_utils import clean_json_schema, ensure_tool_has_properties
 
         # Extract system messages and build anthropic messages
         system_parts = []
@@ -853,7 +853,7 @@ class ClaudeOAuthLLM(CustomLLM):
                 else:
                     continue
                 # Clean schema for Claude
-                cleaned_params = clean_json_schema_for_antigravity(params)
+                cleaned_params = clean_json_schema(params)
                 cleaned_params = ensure_tool_has_properties(cleaned_params)
                 anthropic_tools.append(
                     {

@@ -36,14 +36,14 @@ pip install koder
 ## Quick Start
 
 ```bash
-# 1. Set your API key
-export OPENAI_API_KEY="your-api-key"
+# 1. Set your API key (works with any provider)
+export KODER_API_KEY="your-api-key"
 
 # 2. Run Koder
 koder
 ```
 
-That's it! Koder auto-detects your provider from the API key.
+That's it! `KODER_API_KEY` works with any provider - no need to remember provider-specific variable names.
 
 ### Basic Usage
 
@@ -66,13 +66,27 @@ KODER_MODEL="claude-opus-4-20250514" koder "your prompt"
 Koder can be configured via (in priority order):
 
 1. **CLI arguments** - Highest priority
-2. **Environment variables** - `KODER_MODEL`, `KODER_REASONING_EFFORT`
+2. **Environment variables** - Universal `KODER_*` vars override everything
 3. **Config file** - `~/.koder/config.yaml`
+
+### Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `KODER_API_KEY` | Universal API key (works with any provider) | `sk-...` |
+| `KODER_MODEL` | Model to use | `gpt-4o`, `claude-opus-4-20250514` |
+| `KODER_BASE_URL` | Custom API endpoint | `http://localhost:8080/v1` |
+| `KODER_REASONING_EFFORT` | For reasoning models | `low`, `medium`, `high` |
+
+`KODER_API_KEY` and `KODER_BASE_URL` take priority over provider-specific variables (like `OPENAI_API_KEY`) and config file settings.
 
 ### Providers
 
+Use `KODER_API_KEY` for any provider, or provider-specific variables:
+
 | Provider | Environment Variable | Model Example |
 |----------|---------------------|---------------|
+| Any | `KODER_API_KEY` | Works with all providers |
 | OpenAI | `OPENAI_API_KEY` | `gpt-4o`, `gpt-4.1` |
 | Anthropic | `ANTHROPIC_API_KEY` | `claude-opus-4-20250514` |
 | Google | `GOOGLE_API_KEY` | `gemini/gemini-2.5-pro` |

@@ -188,6 +188,7 @@ class AgentScheduler:
         # Track cancellation state with token for immediate response
         cancel_token = CancellationToken()
         cancelled = False
+        execution_error = None  # Track errors for handling after Live context exits
 
         async def handle_escape():
             """Callback when ESC key is pressed."""
@@ -203,11 +204,14 @@ class AgentScheduler:
             esc_hint_shown = True
 
         def clear_esc_hint():
-            """Clear the ESC hint line using ANSI escape sequences."""
-            if esc_hint_shown:
-                # Move cursor up one line and clear it
-                sys.stdout.write("\033[A\033[2K")
-                sys.stdout.flush()
+            nonlocal esc_hint_shown
+            if esc_hint_shown and sys.stdout.isatty():
+                try:
+                    sys.stdout.write("\033[A\033[2K")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                esc_hint_shown = False
 
         # Use Rich Live for proper formatting during streaming
         with Live(
@@ -218,20 +222,15 @@ class AgentScheduler:
             vertical_overflow="crop",
         ) as live:
             try:
-                # Wrap event loop with ESC listener
                 async with escape_listener(on_escape=handle_escape, enabled=esc_enabled):
-                    # Process streaming events with cancellation support
-                    # iter_with_cancellation allows immediate break when ESC is pressed
                     stream_iter = result.stream_events()
                     async for event in iter_with_cancellation(stream_iter, cancel_token):
-                        # Check if cancelled (redundant but explicit)
                         if cancelled:
                             break
 
                         try:
                             should_update = False
 
-                            # Handle raw response events (token-by-token streaming)
                             if isinstance(event, RawResponsesStreamEvent):
                                 if isinstance(event.data, ResponseTextDeltaEvent):
                                     delta_text = event.data.delta
@@ -242,7 +241,6 @@ class AgentScheduler:
                                             output_index, delta_text
                                         )
 
-                            # Handle run item events (tool calls, outputs, etc.)
                             elif isinstance(event, RunItemStreamEvent):
                                 if event.name == "tool_called":
                                     if (
@@ -267,7 +265,6 @@ class AgentScheduler:
                                 elif event.name == "message_output_created":
                                     pass
                                 elif event.name == "handoff_requested":
-                                    # Handle agent handoff as a special tool call
                                     should_update = display_manager.handle_tool_called(
                                         type(
                                             "HandoffItem",
@@ -286,7 +283,6 @@ class AgentScheduler:
                                         )()
                                     )
                                 elif event.name == "handoff_occured":
-                                    # Handle as tool output
                                     should_update = display_manager.handle_tool_output(
                                         type(
                                             "HandoffOutput",
@@ -295,43 +291,36 @@ class AgentScheduler:
                                         )()
                                     )
                                 elif event.name == "reasoning_item_created":
-                                    # Don't show reasoning steps in display
                                     pass
 
-                            # Handle agent updates (handoffs, etc.)
                             elif isinstance(event, AgentUpdatedStreamEvent):
-                                # This is handled by handoff events above
                                 pass
 
-                            # Update Rich Live display
                             if should_update:
                                 current_content = display_manager.get_display_content()
-                                # Handle both string and renderable objects
                                 if isinstance(current_content, str):
                                     if current_content.strip():
                                         live.update(current_content)
-                                elif current_content:  # For renderables like Group
+                                elif current_content:
                                     live.update(current_content)
 
                         except Exception as e:
-                            # Log event processing errors but continue streaming
                             console.print(f"[dim red]Event processing error: {e}[/dim red]")
-                            continue
 
             except Exception as e:
-                # Handle execution errors in streaming mode
-                error_msg = f"Execution error: {str(e)}"
-                console.print(f"[red]{error_msg}[/red]")
-                # Clear the display manager and return early
-                display_manager.finalize_text_sections()
-                clear_esc_hint()  # Clear ESC hint on error path too
-                return f"{error_msg}\n\nPlease provide new instructions."
+                execution_error = e
 
         # After Rich Live context ends, perform intelligent cleanup
         display_manager.finalize_text_sections()
 
-        # Clear the ESC hint line
+        # Clear the ESC hint line (now outside Live context)
         clear_esc_hint()
+
+        # Handle execution error after Live context has properly closed
+        if execution_error is not None:
+            error_msg = f"Execution error: {str(execution_error)}"
+            console.print(f"[red]{error_msg}[/red]")
+            return f"{error_msg}\n\nPlease provide new instructions."
 
         # Handle cancellation case
         if cancelled:
@@ -367,7 +356,7 @@ class AgentScheduler:
 
         if has_content:
             # Strategy 1: For advanced terminals, clear the scroll buffer region
-            if supports_advanced_clearing:
+            if supports_advanced_clearing and sys.stdout.isatty():
                 try:
                     # Clear recent lines from scrollback (terminal-specific)
                     if terminal_type == "iTerm.app":

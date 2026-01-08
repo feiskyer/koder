@@ -16,7 +16,7 @@ from koder_agent.auth.tool_utils import (
     assign_tool_call_ids,
     build_tool_calls_response_message,
     # Schema cleaning
-    clean_json_schema_for_antigravity,
+    clean_json_schema,
     convert_tool_calls_to_gemini_parts,
     convert_tool_message_to_gemini_part,
     convert_tools_to_claude_format,
@@ -34,21 +34,21 @@ from koder_agent.auth.tool_utils import (
 
 
 class TestCleanJsonSchemaForAntigravity:
-    """Tests for clean_json_schema_for_antigravity function."""
+    """Tests for clean_json_schema function."""
 
     def test_empty_schema(self):
         """Empty/invalid schemas should return basic object schema."""
-        result = clean_json_schema_for_antigravity(None)
+        result = clean_json_schema(None)
         assert result["type"] == "object"
         assert "properties" in result
 
-        result = clean_json_schema_for_antigravity({})
+        result = clean_json_schema({})
         assert result["type"] == "object"
 
     def test_removes_ref(self):
         """$ref should be converted to description hint."""
         schema = {"type": "object", "properties": {"user": {"$ref": "#/$defs/User"}}}
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
         # $ref should be removed and converted to description
         assert "$ref" not in json.dumps(result)
         assert "See: User" in json.dumps(result)
@@ -56,7 +56,7 @@ class TestCleanJsonSchemaForAntigravity:
     def test_converts_const_to_enum(self):
         """const should be converted to enum."""
         schema = {"type": "object", "properties": {"action": {"const": "delete"}}}
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
         action_prop = result["properties"]["action"]
         assert "enum" in action_prop
         assert action_prop["enum"] == ["delete"]
@@ -68,7 +68,7 @@ class TestCleanJsonSchemaForAntigravity:
             "type": "object",
             "properties": {"color": {"type": "string", "enum": ["red", "green", "blue"]}},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
         desc = result["properties"]["color"].get("description", "")
         assert "Allowed: red, green, blue" in desc
 
@@ -78,7 +78,7 @@ class TestCleanJsonSchemaForAntigravity:
             "type": "object",
             "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 100}},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
         desc = result["properties"]["name"].get("description", "")
         assert "minLength: 1" in desc
         assert "maxLength: 100" in desc
@@ -95,7 +95,7 @@ class TestCleanJsonSchemaForAntigravity:
             "additionalProperties": False,
             "properties": {"value": {"type": "string"}},
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
         assert "$schema" not in result
         assert "$id" not in result
         assert "additionalProperties" not in result
@@ -108,7 +108,7 @@ class TestCleanJsonSchemaForAntigravity:
                 {"properties": {"age": {"type": "integer"}}, "required": ["age"]},
             ]
         }
-        result = clean_json_schema_for_antigravity(schema)
+        result = clean_json_schema(schema)
         assert "allOf" not in result
         assert "name" in result.get("properties", {})
         assert "age" in result.get("properties", {})

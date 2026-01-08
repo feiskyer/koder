@@ -246,8 +246,9 @@ UNSUPPORTED_KEYWORDS = [
 
 
 # =============================================================================
-# JSON SCHEMA CLEANING FOR ANTIGRAVITY/CLAUDE API
-# Ported from CLIProxyAPI's CleanJSONSchemaForAntigravity (gemini_schema.go)
+# JSON SCHEMA CLEANING FOR LLM TOOL CALLS
+# Cleans JSON schemas for providers that don't support advanced features
+# like $ref/$defs (GitHub Copilot, Antigravity, etc.)
 # =============================================================================
 
 
@@ -487,8 +488,12 @@ def _fix_required_fields(schema: Any) -> Any:
     return result
 
 
-def clean_json_schema_for_antigravity(schema: Any) -> Dict[str, Any]:
-    """Clean JSON schema for Claude/Antigravity VALIDATED mode.
+def clean_json_schema(schema: Any) -> Dict[str, Any]:
+    """Clean JSON schema for LLM providers that don't support advanced features.
+
+    Some providers (GitHub Copilot, Antigravity, etc.) don't support $ref/$defs
+    or other advanced JSON Schema features. This function cleans the schema
+    by converting unsupported features to description hints.
 
     Applies the following transformations:
     1a. Convert $ref to description hints
@@ -497,14 +502,14 @@ def clean_json_schema_for_antigravity(schema: Any) -> Dict[str, Any]:
     1d. Add additionalProperties hints
     1e. Move unsupported constraints to description
     2a. Merge allOf schemas
-    3. Remove unsupported keywords
+    3. Remove unsupported keywords ($ref, $defs, additionalProperties, etc.)
     4. Fix required fields referencing non-existent properties
 
     Args:
         schema: JSON schema to clean
 
     Returns:
-        Cleaned schema suitable for Claude/Antigravity VALIDATED mode
+        Cleaned schema compatible with all LLM providers
     """
     if not schema or not isinstance(schema, dict):
         return {"type": "object", "properties": {}}
@@ -610,7 +615,7 @@ def convert_tools_to_gemini_format(tools: List[Dict[str, Any]]) -> List[Dict[str
             }
             if "parameters" in func:
                 # Clean schema for Gemini compatibility
-                cleaned_params = clean_json_schema_for_antigravity(func["parameters"])
+                cleaned_params = clean_json_schema(func["parameters"])
                 declaration["parameters"] = cleaned_params
             function_declarations.append(declaration)
 
@@ -623,7 +628,7 @@ def convert_tools_to_gemini_format(tools: List[Dict[str, Any]]) -> List[Dict[str
             params = tool.get("parameters") or tool.get("input_schema") or tool.get("inputSchema")
             if params:
                 # Clean schema for Gemini compatibility
-                cleaned_params = clean_json_schema_for_antigravity(params)
+                cleaned_params = clean_json_schema(params)
                 declaration["parameters"] = cleaned_params
             function_declarations.append(declaration)
 
@@ -633,9 +638,7 @@ def convert_tools_to_gemini_format(tools: List[Dict[str, Any]]) -> List[Dict[str
             for decl in tool["functionDeclarations"]:
                 cleaned_decl = dict(decl)
                 if "parameters" in cleaned_decl:
-                    cleaned_decl["parameters"] = clean_json_schema_for_antigravity(
-                        cleaned_decl["parameters"]
-                    )
+                    cleaned_decl["parameters"] = clean_json_schema(cleaned_decl["parameters"])
                 function_declarations.append(cleaned_decl)
 
     if not function_declarations:
@@ -682,7 +685,7 @@ def convert_tools_to_claude_format(
             for decl in tool["functionDeclarations"]:
                 cleaned = dict(decl)
                 if "parameters" in cleaned:
-                    cleaned["parameters"] = clean_json_schema_for_antigravity(cleaned["parameters"])
+                    cleaned["parameters"] = clean_json_schema(cleaned["parameters"])
                     cleaned["parameters"] = ensure_tool_has_properties(cleaned["parameters"])
                 function_declarations.append(cleaned)
             continue
@@ -703,7 +706,7 @@ def convert_tools_to_claude_format(
         )
 
         # Clean schema
-        cleaned_params = clean_json_schema_for_antigravity(params)
+        cleaned_params = clean_json_schema(params)
         cleaned_params = ensure_tool_has_properties(cleaned_params)
 
         # Optionally inject parameter signatures into description (tool hardening)

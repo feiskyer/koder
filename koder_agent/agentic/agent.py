@@ -19,6 +19,7 @@ from openai._models import construct_type
 from openai.types.shared import Reasoning
 from rich.console import Console
 
+from ..auth.tool_utils import clean_json_schema
 from ..config import get_config
 from ..mcp import load_mcp_servers
 from ..tools.skill import SkillLoader
@@ -41,6 +42,36 @@ class RetryingLitellmModel(LitellmModel):
         getattr(_EXC, "Timeout", Exception),
         getattr(_EXC, "InternalServerError", Exception),
     )
+
+    def _is_github_copilot(self) -> bool:
+        """Check if the current model is using GitHub Copilot."""
+        return "github_copilot" in str(self.model).lower()
+
+    def _clean_tools_for_github_copilot(self, tools: list) -> list:
+        """Clean tool schemas for GitHub Copilot compatibility.
+
+        GitHub Copilot doesn't support $ref/$defs in JSON schemas.
+        """
+        if not tools or not self._is_github_copilot():
+            return tools
+
+        for tool in tools:
+            if not hasattr(tool, "params_json_schema"):
+                continue
+
+            try:
+                tool.params_json_schema = clean_json_schema(tool.params_json_schema)
+                if hasattr(tool, "strict_json_schema"):
+                    tool.strict_json_schema = False
+
+            except Exception as exc:
+                logger.debug(
+                    "Failed to clean tool schema for %s: %s",
+                    getattr(tool, "name", "unknown"),
+                    exc,
+                )
+
+        return tools
 
     def _should_use_responses_api(self) -> bool:
         """
@@ -158,12 +189,15 @@ class RetryingLitellmModel(LitellmModel):
         conversation_id: str | None = None,  # unused for LiteLLM responses
         prompt: Any | None = None,
     ) -> ModelResponse:
+        # Clean tools for GitHub Copilot compatibility
+        cleaned_tools = self._clean_tools_for_github_copilot(tools)
+
         if not self._should_use_responses_api():
             return await super().get_response(
                 system_instructions,
                 input,
                 model_settings,
-                tools,
+                cleaned_tools,
                 output_schema,
                 handoffs,
                 tracing,
@@ -182,7 +216,7 @@ class RetryingLitellmModel(LitellmModel):
                 system_instructions,
                 input,
                 model_settings,
-                tools,
+                cleaned_tools,
                 output_schema,
                 handoffs,
                 previous_response_id=previous_response_id,
@@ -239,12 +273,15 @@ class RetryingLitellmModel(LitellmModel):
         conversation_id: str | None = None,  # unused for LiteLLM responses
         prompt: Any | None = None,
     ):
+        # Clean tools for GitHub Copilot compatibility
+        cleaned_tools = self._clean_tools_for_github_copilot(tools)
+
         if not self._should_use_responses_api():
             async for chunk in super().stream_response(
                 system_instructions,
                 input,
                 model_settings,
-                tools,
+                cleaned_tools,
                 output_schema,
                 handoffs,
                 tracing,
@@ -265,7 +302,7 @@ class RetryingLitellmModel(LitellmModel):
                 system_instructions,
                 input,
                 model_settings,
-                tools,
+                cleaned_tools,
                 output_schema,
                 handoffs,
                 previous_response_id=previous_response_id,

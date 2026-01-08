@@ -190,11 +190,11 @@ def _resolve_model_settings():
 
 
 def _get_provider_api_key(config, config_manager, provider: str):
-    """Get the API key for the effective provider.
+    """Get API key with priority: KODER_API_KEY > OAuth > ENV > Config."""
+    koder_api_key = os.environ.get("KODER_API_KEY")
+    if koder_api_key:
+        return koder_api_key
 
-    Priority: OAuth tokens > Config > Environment variables
-    """
-    # Check for OAuth tokens first
     try:
         from ..auth.client_integration import get_oauth_api_key, map_provider_to_oauth
 
@@ -204,9 +204,8 @@ def _get_provider_api_key(config, config_manager, provider: str):
             if oauth_key:
                 return oauth_key
     except ImportError:
-        pass  # Auth module not available
+        pass
 
-    # Fall back to config/env vars
     env_var_name = _get_provider_env_var_name(provider)
     config_value = config.model.api_key if config.model.provider.lower() == provider else None
     return config_manager.get_effective_value(config_value, env_var_name)
@@ -373,15 +372,18 @@ def get_model_name():
 
 
 def get_api_key():
-    """Get the API key for the current provider with priority: ENV > Config."""
+    """Get API key with priority: KODER_API_KEY > OAuth > ENV > Config."""
     config, config_manager, provider, _, _ = _resolve_model_settings()
     return _get_provider_api_key(config, config_manager, provider)
 
 
 def get_base_url():
-    """Get the base URL for the current provider with priority: ENV > Config."""
+    """Get base URL with priority: KODER_BASE_URL > ENV > Config."""
+    koder_base_url = os.environ.get("KODER_BASE_URL")
+    if koder_base_url:
+        return koder_base_url
+
     config, config_manager, provider, _, _ = _resolve_model_settings()
-    # Get the provider-specific base_url env var, or fall back to a generic pattern
     base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
         "base_url", f"{provider.upper()}_BASE_URL"
     )
@@ -430,15 +432,19 @@ def get_litellm_model_kwargs() -> dict:
     if model.startswith("litellm/"):
         model = model[len("litellm/") :]
 
-    # Get API key
     api_key = _get_provider_api_key(config, config_manager, provider)
 
-    # Get base URL with priority: ENV > Config
-    base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
-        "base_url", f"{provider.upper()}_BASE_URL"
-    )
-    base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
-    base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
+    koder_base_url = os.environ.get("KODER_BASE_URL")
+    if koder_base_url:
+        base_url = koder_base_url
+    else:
+        base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
+            "base_url", f"{provider.upper()}_BASE_URL"
+        )
+        base_url_config = (
+            config.model.base_url if config.model.provider.lower() == provider else None
+        )
+        base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
 
     kwargs = {
         "model": model,
@@ -632,12 +638,16 @@ def setup_openai_client():
         config, config_manager, provider, raw_model, model_from_env
     )
 
-    # Get base URL with priority: ENV > Config
-    base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get("base_url", "OPENAI_BASE_URL")
-    base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
-    base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
+    koder_base_url = os.environ.get("KODER_BASE_URL")
+    if koder_base_url:
+        base_url = koder_base_url
+    else:
+        base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get("base_url", "OPENAI_BASE_URL")
+        base_url_config = (
+            config.model.base_url if config.model.provider.lower() == provider else None
+        )
+        base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
 
-    # Use OpenAI native integration for openai/custom providers with API key
     if use_native:
         client = AsyncOpenAI(
             api_key=api_key,

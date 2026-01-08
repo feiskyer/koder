@@ -216,27 +216,17 @@ def get_provider_auth_info(provider: str) -> Tuple[Optional[str], Optional[Dict[
 def map_provider_to_oauth(model_provider: str) -> Optional[str]:
     """Map a model provider name to OAuth provider name.
 
+    Only OAuth providers (google, claude, chatgpt, antigravity) return themselves.
+    API-based providers (anthropic, openai, gemini, azure, etc.) return None.
+
     Args:
-        model_provider: Provider name from model config (e.g., "google", "anthropic")
+        model_provider: Provider name from model config
 
     Returns:
-        OAuth provider name or None if no mapping exists
-
-    Note:
-        OAuth providers use different names than API key providers:
-        - google (OAuth) vs gemini (API key)
-        - claude (OAuth) vs anthropic (API key)
-        - chatgpt (OAuth) vs openai (API key)
+        OAuth provider name or None if not an OAuth provider
     """
-    # Map model providers to OAuth provider names
-    provider_map = {
-        "google": "google",
-        "gemini": "google",
-        "anthropic": "claude",
-        "claude": "claude",
-        "openai": "chatgpt",
-        "chatgpt": "chatgpt",
-        "antigravity": "antigravity",
-    }
-
-    return provider_map.get(model_provider.lower())
+    if not model_provider:
+        return None
+    oauth_providers = {"google", "claude", "chatgpt", "antigravity"}
+    provider = model_provider.strip().lower()
+    return provider if provider in oauth_providers else None

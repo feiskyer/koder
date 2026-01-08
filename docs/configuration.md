@@ -43,15 +43,23 @@ mcp_servers: []
 
 ## Environment Variables
 
-### Core Variables
+### Universal Variables
+
+These `KODER_*` variables work with any provider and override provider-specific settings:
 
 | Variable | Purpose | Example |
 |----------|---------|---------|
-| `KODER_MODEL` | Model selection (highest priority) | `gpt-4o`, `claude-opus-4-20250514` |
-| `KODER_REASONING_EFFORT` | Reasoning effort for reasoning models | `medium`, `high`, `low`, `null` |
+| `KODER_API_KEY` | Universal API key (works with all providers) | `sk-...`, `your-api-key` |
+| `KODER_BASE_URL` | Custom API endpoint | `http://localhost:8080/v1` |
+| `KODER_MODEL` | Model selection | `gpt-4o`, `claude-opus-4-20250514` |
+| `KODER_REASONING_EFFORT` | Reasoning effort for reasoning models | `medium`, `high`, `low` |
 | `EDITOR` | Editor for `koder config edit` | `vim`, `code` |
 
-### Provider API Keys
+**Priority:** `KODER_API_KEY` and `KODER_BASE_URL` override provider-specific variables (like `OPENAI_API_KEY`) and config file settings.
+
+### Provider-Specific API Keys
+
+Use these if you need different keys for different providers:
 
 | Provider | API Key Variable | Additional Variables |
 |----------|------------------|---------------------|
@@ -70,21 +78,43 @@ mcp_servers: []
 
 ## Provider Setup
 
+### Quick Start (Any Provider)
+
+The simplest way to configure Koder - use universal `KODER_*` variables:
+
+```bash
+# Works with any provider
+export KODER_API_KEY="your-api-key"
+export KODER_MODEL="gpt-4o"  # or "claude-opus-4-20250514", etc.
+
+# Optional: custom endpoint
+export KODER_BASE_URL="https://your-endpoint.com/v1"
+
+koder
+```
+
 ### OpenAI
 
 ```bash
+# Using universal variable (recommended)
+export KODER_API_KEY=your-api-key
+koder
+
+# Or provider-specific variable
 export OPENAI_API_KEY=your-api-key
 export KODER_MODEL="gpt-4o"  # Optional, default: gpt-4.1
-
-# Optional: Custom endpoint
-export OPENAI_BASE_URL=https://your-endpoint.com/v1
-
 koder
 ```
 
 ### Anthropic
 
 ```bash
+# Using universal variable (recommended)
+export KODER_API_KEY=your-api-key
+export KODER_MODEL="claude-opus-4-20250514"
+koder
+
+# Or provider-specific variable
 export ANTHROPIC_API_KEY=your-api-key
 export KODER_MODEL="claude-opus-4-20250514"
 koder
@@ -307,7 +337,15 @@ skills:
 
 ## Example Configurations
 
-### Minimal (OpenAI)
+### Minimal (Any Provider)
+
+```bash
+# Just set your API key and go!
+export KODER_API_KEY="your-api-key"
+koder
+```
+
+Or with config file:
 
 ```yaml
 # ~/.koder/config.yaml
@@ -317,7 +355,7 @@ model:
 ```
 
 ```bash
-export OPENAI_API_KEY="sk-..."
+export KODER_API_KEY="sk-..."
 koder
 ```
 
