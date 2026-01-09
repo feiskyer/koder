@@ -1720,7 +1720,7 @@ wheels = [
 
 [[package]]
 name = "koder"
-version = "0.4.11"
+version = "0.4.12"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1773,7 +1773,7 @@ requires-dist = [
     { name = "fastapi-sso", specifier = ">=0.19.0" },
     { name = "google-cloud-aiplatform", specifier = ">=1.132.0" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.28.1" },
-    { name = "litellm", specifier = ">=1.80.11" },
+    { name = "litellm", specifier = "==1.80.11" },
     { name = "openai", specifier = ">=2.14.0" },
     { name = "openai-agents", extras = ["litellm"], specifier = ">=0.6.4" },
     { name = "orjson", specifier = ">=3.11.5" },
