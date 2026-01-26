@@ -23,7 +23,12 @@ from ..auth.tool_utils import clean_json_schema
 from ..config import get_config
 from ..mcp import load_mcp_servers
 from ..tools.skill import SkillLoader
-from ..utils.client import get_litellm_model_kwargs, get_model_name, is_native_openai_provider
+from ..utils.client import (
+    LITELLM_RETRYABLE_ERRORS,
+    get_litellm_model_kwargs,
+    get_model_name,
+    is_native_openai_provider,
+)
 from ..utils.model_info import get_maximum_output_tokens, should_use_reasoning_param
 from ..utils.prompts import KODER_SYSTEM_PROMPT
 
@@ -33,15 +38,6 @@ logger = logging.getLogger(__name__)
 
 class RetryingLitellmModel(LitellmModel):
     """LitellmModel with backoff retry logic."""
-
-    _EXC = getattr(litellm, "exceptions", litellm)
-    _EXC_TUPLE = (
-        getattr(_EXC, "ServiceUnavailableError", Exception),
-        getattr(_EXC, "RateLimitError", Exception),
-        getattr(_EXC, "APIConnectionError", Exception),
-        getattr(_EXC, "Timeout", Exception),
-        getattr(_EXC, "InternalServerError", Exception),
-    )
 
     def _is_github_copilot(self) -> bool:
         """Check if the current model is using GitHub Copilot."""
@@ -172,7 +168,7 @@ class RetryingLitellmModel(LitellmModel):
 
     @backoff.on_exception(
         backoff.expo,
-        _EXC_TUPLE,
+        LITELLM_RETRYABLE_ERRORS,
         max_tries=3,
         jitter=backoff.full_jitter,
     )
@@ -256,7 +252,7 @@ class RetryingLitellmModel(LitellmModel):
 
     @backoff.on_exception(
         backoff.expo,
-        _EXC_TUPLE,
+        LITELLM_RETRYABLE_ERRORS,
         max_tries=5,
         jitter=backoff.full_jitter,
     )

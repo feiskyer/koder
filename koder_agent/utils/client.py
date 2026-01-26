@@ -24,7 +24,7 @@ _oauth_providers_registered = False
 
 # LiteLLM changed exception namespace in some versions; unify access.
 _LITELLM_EXC = getattr(litellm, "exceptions", litellm)
-_LITELLM_ERRORS = (
+LITELLM_RETRYABLE_ERRORS = (
     getattr(_LITELLM_EXC, "ServiceUnavailableError", Exception),
     getattr(_LITELLM_EXC, "RateLimitError", Exception),
     getattr(_LITELLM_EXC, "APIConnectionError", Exception),
@@ -377,18 +377,32 @@ def get_api_key():
     return _get_provider_api_key(config, config_manager, provider)
 
 
-def get_base_url():
-    """Get base URL with priority: KODER_BASE_URL > ENV > Config."""
+def _resolve_base_url(config, config_manager, provider: str) -> Optional[str]:
+    """Resolve base URL with priority: KODER_BASE_URL > ENV > Config.
+
+    Args:
+        config: Configuration object
+        config_manager: Configuration manager
+        provider: Provider name
+
+    Returns:
+        Base URL or None
+    """
     koder_base_url = os.environ.get("KODER_BASE_URL")
     if koder_base_url:
         return koder_base_url
 
-    config, config_manager, provider, _, _ = _resolve_model_settings()
     base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
         "base_url", f"{provider.upper()}_BASE_URL"
     )
     base_url_config = config.model.base_url if config.model.provider.lower() == provider else None
     return config_manager.get_effective_value(base_url_config, base_url_env_var)
+
+
+def get_base_url():
+    """Get base URL with priority: KODER_BASE_URL > ENV > Config."""
+    config, config_manager, provider, _, _ = _resolve_model_settings()
+    return _resolve_base_url(config, config_manager, provider)
 
 
 def _get_oauth_extra_headers(provider: str) -> Optional[dict]:
@@ -433,18 +447,7 @@ def get_litellm_model_kwargs() -> dict:
         model = model[len("litellm/") :]
 
     api_key = _get_provider_api_key(config, config_manager, provider)
-
-    koder_base_url = os.environ.get("KODER_BASE_URL")
-    if koder_base_url:
-        base_url = koder_base_url
-    else:
-        base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get(
-            "base_url", f"{provider.upper()}_BASE_URL"
-        )
-        base_url_config = (
-            config.model.base_url if config.model.provider.lower() == provider else None
-        )
-        base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
+    base_url = _resolve_base_url(config, config_manager, provider)
 
     kwargs = {
         "model": model,
@@ -475,7 +478,7 @@ def is_native_openai_provider() -> bool:
 
 @backoff.on_exception(
     backoff.expo,
-    _LITELLM_ERRORS,
+    LITELLM_RETRYABLE_ERRORS,
     max_tries=3,
     jitter=backoff.full_jitter,
 )
@@ -637,16 +640,7 @@ def setup_openai_client():
     model, use_native, api_key = _compute_effective_model(
         config, config_manager, provider, raw_model, model_from_env
     )
-
-    koder_base_url = os.environ.get("KODER_BASE_URL")
-    if koder_base_url:
-        base_url = koder_base_url
-    else:
-        base_url_env_var = PROVIDER_ENV_VARS.get(provider, {}).get("base_url", "OPENAI_BASE_URL")
-        base_url_config = (
-            config.model.base_url if config.model.provider.lower() == provider else None
-        )
-        base_url = config_manager.get_effective_value(base_url_config, base_url_env_var)
+    base_url = _resolve_base_url(config, config_manager, provider)
 
     if use_native:
         client = AsyncOpenAI(

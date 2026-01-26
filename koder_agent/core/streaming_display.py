@@ -429,113 +429,6 @@ class StreamingDisplayManager:
 
         return renderables
 
-    def _format_tool_inputs(self, inputs: Dict[str, Any]) -> str:
-        """Format tool inputs for display."""
-        if not inputs:
-            return ""
-
-        # Handle common input patterns
-        formatted_parts = []
-
-        for key, value in inputs.items():
-            if key in ["file_path", "path", "filename"]:
-                # Show just filename for paths
-                if isinstance(value, str) and "/" in value:
-                    filename = value.split("/")[-1]
-                    formatted_parts.append(f"{key}={filename}")
-                else:
-                    formatted_parts.append(f"{key}={value}")
-            elif key in ["pattern", "query", "command"]:
-                # Show pattern/query/command values
-                if isinstance(value, str) and len(value) <= 30:
-                    formatted_parts.append(f"{key}={repr(value)}")
-                elif isinstance(value, str):
-                    formatted_parts.append(f"{key}={repr(value[:27])}...")
-                else:
-                    formatted_parts.append(f"{key}={value}")
-            elif len(formatted_parts) < 2:  # Limit to first 2 key params
-                if isinstance(value, str) and len(value) <= 20:
-                    formatted_parts.append(f"{key}={repr(value)}")
-                elif isinstance(value, (int, float, bool)):
-                    formatted_parts.append(f"{key}={value}")
-
-        return ", ".join(formatted_parts[:2])  # Max 2 params
-
-    def _format_tool_inputs_full(self, inputs: Dict[str, Any]) -> str:
-        """Format tool inputs for display with full content."""
-        if not inputs:
-            return ""
-
-        # Show all inputs with full content
-        formatted_parts = []
-
-        for key, value in inputs.items():
-            if isinstance(value, str):
-                # Show full string content
-                formatted_parts.append(f"{key}={repr(value)}")
-            elif isinstance(value, (int, float, bool)):
-                formatted_parts.append(f"{key}={value}")
-            elif isinstance(value, (list, dict)):
-                # Show JSON representation
-                try:
-                    json_str = json.dumps(value, ensure_ascii=False)
-                    formatted_parts.append(f"{key}={json_str}")
-                except Exception:
-                    formatted_parts.append(f"{key}={str(value)}")
-            else:
-                formatted_parts.append(f"{key}={str(value)}")
-
-        return ", ".join(formatted_parts)
-
-    def _format_tool_output_limited(self, output: str) -> str:
-        """Format tool output for display with 500 character limit."""
-        if not output:
-            return ""
-
-        # Clean and limit output to 500 characters
-        clean_output = output.strip()
-
-        if len(clean_output) <= 500:
-            return clean_output
-        else:
-            return clean_output[:500] + "..."
-
-    def _format_tool_output(self, output: str) -> str:
-        """Format tool output for display."""
-        if not output:
-            return ""
-
-        # Clean and truncate output
-        clean_output = output.strip()
-
-        # Handle different output types
-        if clean_output.startswith("{") or clean_output.startswith("["):
-            try:
-                # Try to parse as JSON for better formatting
-                data = json.loads(clean_output)
-                if isinstance(data, dict) and len(data) == 1:
-                    key, value = next(iter(data.items()))
-                    return f"{key}: {str(value)[:50]}..."
-                elif isinstance(data, list) and len(data) > 0:
-                    return f"[{len(data)} items]"
-                else:
-                    return "JSON data"
-            except Exception:
-                pass
-
-        # Handle file operations
-        if "File created" in clean_output or "File written" in clean_output:
-            return "File created/updated"
-        elif "files found" in clean_output.lower():
-            return clean_output[:60] + ("..." if len(clean_output) > 60 else "")
-        elif "\n" in clean_output:
-            # Multi-line output - show first line
-            first_line = clean_output.split("\n")[0].strip()
-            return (first_line[:50] + "...") if len(first_line) > 50 else first_line
-        else:
-            # Single line - truncate if needed
-            return (clean_output[:60] + "...") if len(clean_output) > 60 else clean_output
-
     def finalize_text_sections(self):
         """Finalize any pending text sections."""
         if self.current_text_section and not self.current_text_section.complete:
@@ -571,40 +464,6 @@ class StreamingDisplayManager:
         temp_output.close()
 
         return result.rstrip()  # Remove trailing whitespace
-
-    def _format_tool_inputs_simple(self, inputs: Dict[str, Any]) -> str:
-        """Format tool inputs for simplified display."""
-        if not inputs:
-            return ""
-
-        # Show only the most important parameter
-        key_params = ["file_path", "path", "pattern", "query", "command", "url"]
-
-        for key in key_params:
-            if key in inputs:
-                value = inputs[key]
-                if isinstance(value, str):
-                    if key in ["file_path", "path"] and "/" in value:
-                        # Show just filename for paths
-                        return value.split("/")[-1]
-                    elif len(value) <= 50:
-                        return value
-                    else:
-                        return f"{value[:47]}..."
-                else:
-                    return str(value)
-
-        # Fallback to first parameter
-        if inputs:
-            key, value = next(iter(inputs.items()))
-            if isinstance(value, str) and len(value) <= 50:
-                return value
-            elif isinstance(value, str):
-                return f"{value[:47]}..."
-            else:
-                return str(value)
-
-        return ""
 
     def _generate_smart_summary(self, tool_name: str, output: str) -> str:
         """Generate smart summary for tool output."""
@@ -730,20 +589,14 @@ class StreamingDisplayManager:
 
         # Handle write_file tool
         elif tool_name == "write_file":
-            if "Created" in clean_output:
-                # Extract just the first line (e.g., "Created /path/file.txt (123 bytes)")
-                return clean_output.split("\n")[0]
-            elif "Updated" in clean_output:
-                return clean_output.split("\n")[0]
-            else:
-                return clean_output.split("\n")[0][:60]
+            # Return first line (e.g., "Created /path/file.txt (123 bytes)")
+            first_line = clean_output.split("\n")[0]
+            return first_line if len(first_line) <= 60 else first_line[:60]
 
         # Handle append_file tool
         elif tool_name == "append_file":
-            if "Appended" in clean_output:
-                return clean_output.split("\n")[0]
-            else:
-                return clean_output.split("\n")[0][:60]
+            first_line = clean_output.split("\n")[0]
+            return first_line if len(first_line) <= 60 else first_line[:60]
 
         # Handle todo_write - show full todo list with emoji
         elif tool_name == "todo_write":

@@ -33,16 +33,10 @@ def glob_search(pattern: str, path: Optional[str] = None) -> str:
         if not base_path.is_dir():
             return f"Path is not a directory: {base_path}"
 
-        # Find matches
-        matches = []
-
         # Use rglob for recursive search if pattern contains **
         if "**" in pattern:
             # For patterns like **/*, remove the leading **/
-            if pattern.startswith("**/"):
-                actual_pattern = pattern[3:]  # Remove "**/"
-            else:
-                actual_pattern = pattern
+            actual_pattern = pattern[3:] if pattern.startswith("**/") else pattern
             all_matches = base_path.rglob(actual_pattern)
         else:
             all_matches = base_path.glob(pattern)
