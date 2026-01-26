@@ -1,0 +1,2739 @@
+manifest:
+  version: "0.1.2"
+  schema: https://a2as.org/cert/schema
+  subject:
+    name: feiskyer/koder
+    source: https://github.com/feiskyer/koder
+    branch: main
+    commit: "be2dce7b"
+    scope: [koder_agent/agentic/__init__.py, koder_agent/agentic/agent.py, koder_agent/auth/cli_handler.py, koder_agent/auth/litellm_oauth.py,
+      koder_agent/auth/providers/chatgpt.py, koder_agent/auth/providers/google.py, koder_agent/auth/tool_utils.py, koder_agent/config/cli_handler.py,
+      koder_agent/config/models.py, koder_agent/core/commands.py, koder_agent/core/scheduler.py, koder_agent/core/session.py,
+      koder_agent/core/status_line.py, koder_agent/core/streaming_display.py, koder_agent/core/usage_tracker.py, koder_agent/mcp/server_manager.py,
+      koder_agent/tools/__init__.py, koder_agent/tools/engine.py, koder_agent/tools/file.py, koder_agent/tools/search.py,
+      koder_agent/tools/shell.py, koder_agent/tools/skill.py, koder_agent/tools/skill_context.py, koder_agent/tools/task.py,
+      koder_agent/tools/todo.py, koder_agent/tools/web.py, koder_agent/utils/__init__.py, koder_agent/utils/client.py, koder_agent/utils/model_info.py,
+      scripts/list_oauth_models.py]
+  issued:
+    by: A2AS.org
+    at: '2026-01-26T16:12:48Z'
+  signatures:
+    digest: sha256:fGXpFF_gDylB34hVgvlovpz-awMvaC3OIz1Yapgv46w
+    key: ed25519:B4aHipwC2Ef-SiDNaPvihMuHsmpWPnlexAKSZnHRKik
+    sig: ed25519:LsCCok7J_TPODnychbD8HIh9B_6zJ-EQhm4sJ22RIDyQ9U7nei3nYYwCJrVp0oNrZvmYWvP8uI5Sts8oGGrbDA
+
+agents:
+  delegated_agent:
+    type: instance
+    models: [get_model_name]
+    tools: [tools]
+    mcp: [mcp_servers]
+    params:
+      function: run_single_task
+      name: Delegated Agent - {task.description}...
+      model_settings: model_settings
+      instructions: ['You are a task agent handling this task: {task.description}', You have access to tools to help complete
+          this task effectively., Be concise and focused on the specific task at hand., Return your findings or results directly
+          without unnecessary explanation.]
+  dev_agent:
+    type: instance
+    models: [model]
+    tools: [tools]
+    mcp: [mcp_servers]
+    params:
+      function: create_dev_agent
+      name: Koder
+      model_settings: model_settings
+      instructions: [system_prompt]
+
+models:
+  get_model_name:
+    type: function
+    agents: [delegated_agent]
+  model:
+    type: variable
+    agents: [dev_agent]
+
+tools:
+  append_file:
+    type: decorator
+    params:
+      description: Append content to a file.
+  edit_file:
+    type: decorator
+    params:
+      description: |-
+        Apply a unified diff patch to a file.
+
+        The diff parameter should contain a unified diff format patch. This is useful
+        for making targeted changes to specific lines in a file. The diff format uses:
+        - Lines starting with '-' are removed
+        - Lines starting with '+' are added
+        - Lines starting with ' ' (space) are context (unchanged)
+        - @@ -start,count +start,count @@ marks each hunk
+
+        Example diff:
+            @@ -1,3 +1,3 @@
+             line1
+            -old line2
+            +new line2
+             line3
+
+        You must read the file first before editing.
+
+        Args:
+            path: Path to the file to edit.
+            diff: Unified diff to apply.
+  get_skill:
+    type: decorator
+    params:
+      description: |-
+        Get the full content for a named skill.
+
+        Use this tool to load detailed skill guidance when you need to perform
+        a task that matches an available skill. The skill's full content will
+        be returned as a formatted prompt.
+
+        Note: If the skill declares allowed_tools, those tools will be added to
+        the current allowed set (union semantics). Loading a skill without
+        allowed_tools will clear all restrictions.
+
+        Args:
+            skill_name: The name of the skill to load
+
+        Returns:
+            The formatted skill prompt, or an error with available skills
+  git_command:
+    type: decorator
+    params:
+      description: Execute a git command.
+  glob_search:
+    type: decorator
+    params:
+      description: Search for files matching a glob pattern.
+  grep_search:
+    type: decorator
+    params:
+      description: Search for pattern in file contents.
+  list_directory:
+    type: decorator
+    params:
+      description: List contents of a directory.
+  read_file:
+    type: decorator
+    params:
+      description: |-
+        Read file contents from the filesystem.
+
+        Output always includes line numbers in format 'LINE_NUMBER|LINE_CONTENT' (1-indexed).
+        Supports reading partial content by specifying line offset and limit for large files.
+        You can call this tool multiple times in parallel to read different files simultaneously.
+  run_shell:
+    type: decorator
+    params:
+      description: |-
+        Execute a shell command with security checks.
+
+        Args:
+            command: The shell command to execute
+            timeout: Timeout in seconds (default: 120, max: 600). Only for foreground.
+            run_in_background: Set true for long-running commands. Use shell_output to monitor.
+
+        Returns:
+            Command output, or shell_id if run_in_background=True
+  shell_kill:
+    type: decorator
+    params:
+      description: |-
+        Terminate a background shell process.
+
+        Args:
+            shell_id: The ID of the background shell to terminate
+
+        Returns:
+            Termination status and any remaining output
+  shell_output:
+    type: decorator
+    params:
+      description: |-
+        Retrieve output from a background shell process.
+
+        Args:
+            shell_id: The ID returned when starting a background command
+            filter_str: Optional regex to filter output lines
+
+        Returns:
+            New output since last check, process status, and available shell IDs
+  task_delegate:
+    type: decorator
+    params:
+      description: |-
+        Delegate one or more tasks to specialized agents and return the aggregated results.
+        If multiple tasks are provided, they will be run in parallel.
+  todo_read:
+    type: decorator
+    params:
+      description: Read all todos from the list.
+  todo_write:
+    type: decorator
+    params:
+      description: Write/update the todo list.
+  tools:
+    type: variable
+    agents: [dev_agent, delegated_agent]
+    params:
+      dynamic: "True"
+  web_fetch:
+    type: decorator
+    params:
+      description: Fetch content from a URL and process with a prompt.
+  web_search:
+    type: decorator
+    params:
+      description: |-
+        Search the web using DuckDuckGo.
+
+        Args:
+            query: The search query (1-400 characters)
+            max_results: Maximum number of results to return (1-10, default 3)
+
+        Returns:
+            Formatted search results or error message
+  write_file:
+    type: decorator
+    params:
+      description: |-
+        Write content to a file.
+
+        Will overwrite existing files completely. For existing files, you should read the file
+        first using read_file. Prefer editing existing files over creating new ones unless
+        explicitly needed.
+
+mcp:
+  mcp_servers:
+    type: process
+    agents: [dev_agent, delegated_agent]
+    params:
+      dynamic: "True"
+
+imports:
+  _sys: sys
+  _to_dump_compatible: agents.util._json._to_dump_compatible
+  ABC: abc.ABC
+  abstractmethod: abc.abstractmethod
+  add_skill_restrictions: skill_context.add_skill_restrictions
+  Agent: agents.Agent
+  AgentScheduler: scheduler.AgentScheduler
+  AgentUpdatedStreamEvent: agents.AgentUpdatedStreamEvent
+  aiohttp: aiohttp
+  aiosqlite: aiosqlite
+  annotations: __future__.annotations
+  ANTHROPIC_AUTH_URL_CONSOLE: koder_agent.auth.constants.ANTHROPIC_AUTH_URL_CONSOLE
+  ANTHROPIC_AUTH_URL_MAX: koder_agent.auth.constants.ANTHROPIC_AUTH_URL_MAX
+  ANTHROPIC_BETA_HEADERS: koder_agent.auth.constants.ANTHROPIC_BETA_HEADERS
+  ANTHROPIC_CLIENT_ID: koder_agent.auth.constants.ANTHROPIC_CLIENT_ID
+  ANTHROPIC_CREATE_API_KEY_URL: koder_agent.auth.constants.ANTHROPIC_CREATE_API_KEY_URL
+  ANTHROPIC_REDIRECT_URI: koder_agent.auth.constants.ANTHROPIC_REDIRECT_URI
+  ANTHROPIC_SCOPES: koder_agent.auth.constants.ANTHROPIC_SCOPES
+  ANTHROPIC_TOKEN_URL: koder_agent.auth.constants.ANTHROPIC_TOKEN_URL
+  ANTIGRAVITY_API_BASE: koder_agent.auth.constants.ANTIGRAVITY_API_BASE
+  ANTIGRAVITY_AUTH_URL: koder_agent.auth.constants.ANTIGRAVITY_AUTH_URL
+  ANTIGRAVITY_CALLBACK_PATH: koder_agent.auth.constants.ANTIGRAVITY_CALLBACK_PATH
+  ANTIGRAVITY_CALLBACK_PORT: koder_agent.auth.constants.ANTIGRAVITY_CALLBACK_PORT
+  ANTIGRAVITY_CLIENT_ID: koder_agent.auth.constants.ANTIGRAVITY_CLIENT_ID
+  ANTIGRAVITY_CLIENT_SECRET: koder_agent.auth.constants.ANTIGRAVITY_CLIENT_SECRET
+  ANTIGRAVITY_REDIRECT_URI: koder_agent.auth.constants.ANTIGRAVITY_REDIRECT_URI
+  ANTIGRAVITY_SCOPES: koder_agent.auth.constants.ANTIGRAVITY_SCOPES
+  ANTIGRAVITY_TOKEN_URL: koder_agent.auth.constants.ANTIGRAVITY_TOKEN_URL
+  AntigravityOAuthProvider: koder_agent.auth.providers.antigravity.AntigravityOAuthProvider
+  Any: typing.Any
+  append_file: file.append_file
+  Application: prompt_toolkit.application.Application
+  apply_tool_pairing_fixes: tool_utils.apply_tool_pairing_fixes
+  ApprovalHooks: approval_hooks.ApprovalHooks
+  argparse: argparse
+  asyncio: asyncio
+  AsyncIterator: typing.AsyncIterator
+  AsyncMessageQueue: queue.AsyncMessageQueue
+  AsyncOpenAI: openai.AsyncOpenAI
+  BackgroundShellManager: tools.BackgroundShellManager
+  backoff: backoff
+  base64: base64
+  BaseModel: pydantic.BaseModel
+  BeautifulSoup: bs4.BeautifulSoup
+  BeforeInput: prompt_toolkit.layout.processors.BeforeInput
+  Buffer: prompt_toolkit.buffer.Buffer
+  BufferControl: prompt_toolkit.layout.controls.BufferControl
+  cache_thought_signature: tool_utils.cache_thought_signature
+  CallbackResult: koder_agent.auth.callback_server.CallbackResult
+  CancellationToken: core.keyboard_listener.CancellationToken
+  ChatGPTOAuthProvider: koder_agent.auth.providers.chatgpt.ChatGPTOAuthProvider
+  ClassVar: typing.ClassVar
+  ClaudeOAuthProvider: koder_agent.auth.providers.claude.ClaudeOAuthProvider
+  clean_json_schema: tool_utils.clean_json_schema
+  clear_restrictions: skill_context.clear_restrictions
+  CLIConfig: models.CLIConfig
+  CODEX_PROMPTS: koder_agent.auth.codex_prompts.CODEX_PROMPTS
+  CompleteEvent: prompt_toolkit.completion.CompleteEvent
+  Completer: prompt_toolkit.completion.Completer
+  Completion: prompt_toolkit.completion.Completion
+  CompletionsMenu: prompt_toolkit.layout.menus.CompletionsMenu
+  ConfigManager: manager.ConfigManager
+  confirm: prompt_toolkit.shortcuts.confirm
+  Console: rich.console.Console
+  construct_type: openai._models.construct_type
+  ContextVar: contextvars.ContextVar
+  convert_tool_calls_to_gemini_parts: tool_utils.convert_tool_calls_to_gemini_parts
+  convert_tool_message_to_gemini_part: tool_utils.convert_tool_message_to_gemini_part
+  convert_tools_to_claude_format: tool_utils.convert_tools_to_claude_format
+  convert_tools_to_codex_format: koder_agent.auth.tool_utils.convert_tools_to_codex_format
+  convert_tools_to_gemini_format: tool_utils.convert_tools_to_gemini_format
+  create_dev_agent: agent.create_dev_agent
+  create_static_tool_filter: agents.mcp.create_static_tool_filter
+  CustomLLM: litellm.CustomLLM
+  dataclass: dataclasses.dataclass
+  datetime: datetime.datetime
+  DDGS: ddgs.DDGS
+  DDGSException: ddgs.exceptions.DDGSException
+  default_session_local_ms: sessions.default_session_local_ms
+  defaultdict: collections.defaultdict
+  deque: collections.deque
+  Deque: typing.Deque
+  detect_terminal_theme: utils.terminal_theme.detect_terminal_theme
+  Dict: typing.Dict
+  difflib: difflib
+  Dimension: prompt_toolkit.layout.dimension.Dimension
+  Document: prompt_toolkit.document.Document
+  edit_file: file.edit_file
+  EnhancedSQLiteSession: session.EnhancedSQLiteSession
+  ensure_tool_has_properties: tool_utils.ensure_tool_has_properties
+  Enum: enum.Enum
+  escape_listener: core.keyboard_listener.escape_listener
+  extract_tool_calls_from_codex_response: koder_agent.auth.tool_utils.extract_tool_calls_from_codex_response
+  extract_tool_calls_from_gemini_response: tool_utils.extract_tool_calls_from_gemini_response
+  Field: pydantic.Field
+  field: dataclasses.field
+  field_validator: pydantic.field_validator
+  FileEditModel: file.FileEditModel
+  FileReadModel: file.FileReadModel
+  FileWriteModel: file.FileWriteModel
+  floor: math.floor
+  fnmatch: fnmatch
+  FormattedText: prompt_toolkit.formatted_text.FormattedText
+  FormattedTextControl: prompt_toolkit.layout.FormattedTextControl
+  Frame: prompt_toolkit.widgets.Frame
+  function_tool: agents.function_tool
+  FunctionTool: agents.FunctionTool
+  futures: concurrent.futures
+  generation_span: agents.tracing.generation_span
+  GenericStreamingChunk: litellm.types.utils.GenericStreamingChunk
+  get_active_restrictions: tools.skill_context.get_active_restrictions
+  get_adaptive_console: utils.terminal_theme.get_adaptive_console
+  get_adaptive_prompt_style: utils.terminal_theme.get_adaptive_prompt_style
+  get_all_tools: get_all_tools
+  get_app: prompt_toolkit.application.get_app
+  get_config: manager.get_config
+  get_config_manager: config.get_config_manager
+  get_context_window_size: utils.model_info.get_context_window_size
+  get_display_hooks: hooks.get_display_hooks
+  get_litellm_model_kwargs: utils.client.get_litellm_model_kwargs
+  get_maximum_output_tokens: utils.model_info.get_maximum_output_tokens
+  get_model_name: client.get_model_name
+  get_model_name_variants_for_lookup: utils.model_info.get_model_name_variants_for_lookup
+  get_oauth_api_key: auth.client_integration.get_oauth_api_key
+  get_oauth_headers: auth.client_integration.get_oauth_headers
+  get_oauth_model_prefix: auth.litellm_oauth.get_oauth_model_prefix
+  get_oauth_token: koder_agent.auth.client_integration.get_oauth_token
+  get_provider: koder_agent.auth.providers.get_provider
+  get_provider_api_env_var: utils.client.get_provider_api_env_var
+  get_skill: skill.get_skill
+  get_summarization_threshold: utils.model_info.get_summarization_threshold
+  get_token_storage: koder_agent.auth.token_storage.get_token_storage
+  git_command: shell.git_command
+  GitModel: shell.GitModel
+  glob_search: search.glob_search
+  GlobModel: search.GlobModel
+  GOOGLE_AUTH_URL: koder_agent.auth.constants.GOOGLE_AUTH_URL
+  GOOGLE_CALLBACK_PATH: koder_agent.auth.constants.GOOGLE_CALLBACK_PATH
+  GOOGLE_CALLBACK_PORT: koder_agent.auth.constants.GOOGLE_CALLBACK_PORT
+  GOOGLE_CLIENT_ID: koder_agent.auth.constants.GOOGLE_CLIENT_ID
+  GOOGLE_CLIENT_SECRET: koder_agent.auth.constants.GOOGLE_CLIENT_SECRET
+  GOOGLE_MODELS_URL: koder_agent.auth.constants.GOOGLE_MODELS_URL
+  GOOGLE_REDIRECT_URI: koder_agent.auth.constants.GOOGLE_REDIRECT_URI
+  GOOGLE_SCOPES: koder_agent.auth.constants.GOOGLE_SCOPES
+  GOOGLE_TOKEN_URL: koder_agent.auth.constants.GOOGLE_TOKEN_URL
+  GOOGLE_USERINFO_URL: koder_agent.auth.constants.GOOGLE_USERINFO_URL
+  GoogleOAuthProvider: koder_agent.auth.providers.google.GoogleOAuthProvider
+  grep_search: search.grep_search
+  GrepModel: search.GrepModel
+  Group: rich.console.Group
+  handle_config_command: config.cli_handler.handle_config_command
+  handle_mcp_command: mcp.cli_handler.handle_mcp_command
+  has_active_restrictions: skill_context.has_active_restrictions
+  has_oauth_credentials: auth.client_integration.has_oauth_credentials
+  has_oauth_token: auth.client_integration.has_oauth_token
+  hashlib: hashlib
+  HSplit: prompt_toolkit.layout.containers.HSplit
+  InteractivePrompt: core.interactive.InteractivePrompt
+  is_native_openai_provider: client.is_native_openai_provider
+  is_oauth_provider: auth.litellm_oauth.is_oauth_provider
+  ItemHelpers: agents.items.ItemHelpers
+  iter_with_cancellation: core.keyboard_listener.iter_with_cancellation
+  Iterator: typing.Iterator
+  json: json
+  KeyBindings: prompt_toolkit.key_binding.KeyBindings
+  KODER_SYSTEM_PROMPT: prompts.KODER_SYSTEM_PROMPT
+  KoderConfig: models.KoderConfig
+  Layout: prompt_toolkit.layout.Layout
+  List: typing.List
+  list_directory: file.list_directory
+  list_providers: koder_agent.auth.providers.list_providers
+  litellm: litellm
+  LitellmModel: agents.extensions.models.litellm_model.LitellmModel
+  Literal: typing.Literal
+  Live: rich.live.Live
+  llm_completion: utils.client.llm_completion
+  load_mcp_servers: mcp.load_mcp_servers
+  logging: logging
+  LSModel: file.LSModel
+  map_provider_to_oauth: auth.client_integration.map_provider_to_oauth
+  MCPServer: agents.mcp.MCPServer
+  MCPServerConfig: server_config.MCPServerConfig
+  MCPServerConfigYaml: config.MCPServerConfigYaml
+  MCPServerFactory: server_factory.MCPServerFactory
+  MCPServerManager: mcp.server_manager.MCPServerManager
+  MCPServerSse: agents.mcp.MCPServerSse
+  MCPServerSseParams: agents.mcp.MCPServerSseParams
+  MCPServerStdio: agents.mcp.MCPServerStdio
+  MCPServerStdioParams: agents.mcp.MCPServerStdioParams
+  MCPServerStreamableHttp: agents.mcp.MCPServerStreamableHttp
+  MCPServerStreamableHttpParams: agents.mcp.MCPServerStreamableHttpParams
+  MCPServerType: server_config.MCPServerType
+  migrate_legacy_sessions: core.session.migrate_legacy_sessions
+  ModelConfig: models.ModelConfig
+  ModelResponse: litellm.types.utils.ModelResponse
+  ModelSettings: agents.ModelSettings
+  OAuthProvider: koder_agent.auth.base.OAuthProvider
+  OAuthResult: koder_agent.auth.base.OAuthResult
+  OAuthTokens: koder_agent.auth.base.OAuthTokens
+  omit: openai.omit
+  OPENAI_AUTH_URL: koder_agent.auth.constants.OPENAI_AUTH_URL
+  OPENAI_CALLBACK_PATH: koder_agent.auth.constants.OPENAI_CALLBACK_PATH
+  OPENAI_CALLBACK_PORT: koder_agent.auth.constants.OPENAI_CALLBACK_PORT
+  OPENAI_CLIENT_ID: koder_agent.auth.constants.OPENAI_CLIENT_ID
+  OPENAI_MODELS_URL: koder_agent.auth.constants.OPENAI_MODELS_URL
+  OPENAI_REDIRECT_URI: koder_agent.auth.constants.OPENAI_REDIRECT_URI
+  OPENAI_SCOPES: koder_agent.auth.constants.OPENAI_SCOPES
+  OPENAI_TOKEN_URL: koder_agent.auth.constants.OPENAI_TOKEN_URL
+  Optional: typing.Optional
+  os: os
+  Panel: rich.panel.Panel
+  parse_session_dt: sessions.parse_session_dt
+  Path: pathlib.Path
+  picker_arrows: sessions.picker_arrows
+  picker_arrows_with_titles: sessions.picker_arrows_with_titles
+  platform: platform
+  RawResponsesStreamEvent: agents.RawResponsesStreamEvent
+  re: re
+  read_file: file.read_file
+  Reasoning: openai.types.shared.Reasoning
+  register_oauth_providers: auth.litellm_oauth.register_oauth_providers
+  requests: requests
+  reset_config_manager: manager.reset_config_manager
+  ResponseFunctionToolCall: openai.types.responses.ResponseFunctionToolCall
+  ResponsesConverter: agents.models.openai_responses.Converter
+  ResponseTextDeltaEvent: openai.types.responses.response_text_delta_event.ResponseTextDeltaEvent
+  run_auth_command: auth.cli_handler.run_auth_command
+  run_oauth_flow: koder_agent.auth.callback_server.run_oauth_flow
+  run_shell: shell.run_shell
+  RunConfig: agents.RunConfig
+  RunContextWrapper: agents.RunContextWrapper
+  RunHooks: agents.RunHooks
+  RunItemStreamEvent: agents.RunItemStreamEvent
+  Runner: agents.Runner
+  SearchModel: web.SearchModel
+  secrets: secrets
+  SecurityGuard: core.security.SecurityGuard
+  set_default_openai_client: agents.set_default_openai_client
+  set_tracing_disabled: agents.set_tracing_disabled
+  setup_openai_client: client.setup_openai_client
+  shell_kill: shell.shell_kill
+  shell_output: shell.shell_output
+  ShellKillModel: shell.ShellKillModel
+  ShellModel: shell.ShellModel
+  ShellOutputModel: shell.ShellOutputModel
+  shlex: shlex
+  should_use_reasoning_param: utils.model_info.should_use_reasoning_param
+  show_config_status: config.cli_handler.show_config_status
+  Skill: skill.Skill
+  skill_restriction_guardrail: agentic.skill_guardrail.skill_restriction_guardrail
+  SkillLoader: skill.SkillLoader
+  SkillModel: skill.SkillModel
+  SkillRestrictions: skill_context.SkillRestrictions
+  slash_handler: core.commands.slash_handler
+  sort_sessions_desc: sessions.sort_sessions_desc
+  SQLiteSession: agents.SQLiteSession
+  stat: stat
+  StatusLine: status_line.StatusLine
+  StreamingDisplayManager: core.streaming_display.StreamingDisplayManager
+  StringIO: io.StringIO
+  subprocess: subprocess
+  SUPPORTED_PROVIDERS: koder_agent.auth.constants.SUPPORTED_PROVIDERS
+  Syntax: rich.syntax.Syntax
+  sys: sys
+  Table: rich.table.Table
+  task_delegate: task.task_delegate
+  TaskDelegateModel: task.TaskDelegateModel
+  TaskModel: task.TaskModel
+  Text: rich.text.Text
+  threading: threading
+  tiktoken: tiktoken
+  time: time
+  todo_read: todo.todo_read
+  todo_write: todo.todo_write
+  TodoModel: todo.TodoModel
+  TodoWriteModel: todo.TodoWriteModel
+  TOKEN_EXPIRY_BUFFER_MS: koder_agent.auth.constants.TOKEN_EXPIRY_BUFFER_MS
+  Tool: agents.Tool
+  ToolCallItem: agents.ToolCallItem
+  ToolCallOutputItem: agents.ToolCallOutputItem
+  ToolDisplayHooks: hooks.ToolDisplayHooks
+  ToolEngine: engine.ToolEngine
+  ToolGuardrailFunctionOutput: agents.ToolGuardrailFunctionOutput
+  ToolInputGuardrail: agents.ToolInputGuardrail
+  ToolInputGuardrailData: agents.ToolInputGuardrailData
+  TResponseInputItem: agents.items.TResponseInputItem
+  TResponseStreamEvent: agents.items.TResponseStreamEvent
+  Tuple: typing.Tuple
+  Type: typing.Type
+  TYPE_CHECKING: typing.TYPE_CHECKING
+  Union: typing.Union
+  urlencode: urllib.parse.urlencode
+  urlparse: urllib.parse.urlparse
+  Usage: litellm.types.utils.Usage
+  UsageTracker: core.usage_tracker.UsageTracker
+  uuid: uuid
+  ValidationError: pydantic.ValidationError
+  web: aiohttp.web
+  web_fetch: web.web_fetch
+  web_search: web.web_search
+  webbrowser: webbrowser
+  WebFetchModel: web.WebFetchModel
+  whatthepatch: whatthepatch
+  Window: prompt_toolkit.layout.Window
+  write_file: file.write_file
+  yaml: yaml
+
+functions:
+  __aenter__:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [self]
+  __aexit__:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [self, exc_type, exc_val, exc_tb]
+  __init__:
+    type: sync
+    module: koder_agent.auth.providers.antigravity
+    args: [self]
+  __new__:
+    type: sync
+    module: koder_agent.tools.todo
+    args: [cls]
+  _add_additional_properties_hints:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _add_enum_hints:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _append_description_hint:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema, hint]
+    params:
+      returns: Dict
+  _build_auth_params:
+    type: sync
+    module: koder_agent.auth.providers.antigravity
+    args: [self]
+    params:
+      returns: Dict
+  _build_request_body:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model, messages, project_id]
+    params:
+      returns: Dict
+  _build_token_request:
+    type: sync
+    module: koder_agent.auth.base
+    args: [self, code, verifier]
+    params:
+      returns: Dict
+  _cancel_monitor:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [cls, shell_id]
+    params:
+      returns: None
+  _capture_usage:
+    type: async
+    module: koder_agent.core.scheduler
+    args: [self, result]
+    params:
+      returns: None
+  _clean_tools_for_github_copilot:
+    type: sync
+    module: koder_agent.agentic.agent
+    args: [self, tools]
+    params:
+      returns: list
+  _cleanup_thought_signature_cache_unlocked:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    params:
+      returns: None
+  _coerce_input_item:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, item]
+    params:
+      returns: Optional[Dict]
+  _compute_effective_model:
+    type: sync
+    module: koder_agent.utils.client
+    args: [config, config_manager, provider, raw_model, model_from_env]
+  _convert_const_to_enum:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _convert_content_to_input:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, content, role]
+    params:
+      returns: List[Dict]
+  _convert_messages_to_input:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, messages]
+    params:
+      returns: List[Dict]
+  _convert_refs_to_hints:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _create_http_server:
+    type: sync
+    module: koder_agent.mcp.server_factory
+    args: [config, tool_filter]
+    params:
+      returns: MCPServerStreamableHttp
+  _create_sse_server:
+    type: sync
+    module: koder_agent.mcp.server_factory
+    args: [config, tool_filter]
+    params:
+      returns: MCPServerSse
+  _create_stdio_server:
+    type: sync
+    module: koder_agent.mcp.server_factory
+    args: [config, tool_filter]
+    params:
+      returns: MCPServerStdio
+  _create_summary:
+    type: async
+    module: koder_agent.core.session
+    args: [self, messages, round_num]
+    params:
+      returns: str
+  _detect_read_file_error:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, output]
+    params:
+      returns: Optional[str]
+  _ensure_agent_initialized:
+    type: async
+    module: koder_agent.core.scheduler
+    args: [self]
+  _ensure_current_text_section:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self]
+  _ensure_directory:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self]
+    params:
+      returns: None
+  _ensure_discovered:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self]
+    params:
+      returns: None
+  _ensure_legacy_migration:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self]
+    params:
+      returns: None
+  _ensure_metadata_table:
+    type: async
+    module: koder_agent.core.session
+    args: [self]
+    params:
+      returns: None
+  _ensure_oauth_providers_registered:
+    type: sync
+    module: koder_agent.utils.client
+    params:
+      returns: None
+  _ensure_project_context:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, access_token]
+    params:
+      returns: str
+  _estimate_tokens:
+    type: sync
+    module: koder_agent.core.session
+    args: [self, messages]
+    params:
+      returns: int
+  _extract_account_id_from_jwt:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, token]
+    params:
+      returns: Optional[str]
+  _extract_diff_content:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, tool_name, output]
+    params:
+      returns: List
+  _extract_email_from_jwt:
+    type: sync
+    module: koder_agent.auth.providers.chatgpt
+    args: [self, token]
+    params:
+      returns: Optional[str]
+  _extract_responses_text:
+    type: sync
+    module: koder_agent.utils.client
+    args: [response]
+    params:
+      returns: str
+  _fetch_available_models:
+    type: async
+    module: koder_agent.auth.providers.antigravity
+    args: [self, access_token, project_id]
+    params:
+      returns: tuple
+  _fetch_project_id:
+    type: async
+    module: koder_agent.auth.providers.antigravity
+    args: [self, access_token]
+    params:
+      returns: tuple
+  _fetch_responses_api:
+    type: async
+    module: koder_agent.agentic.agent
+    args: [self, system_instructions, input, model_settings, tools, output_schema, handoffs]
+  _filter_output:
+    type: sync
+    module: koder_agent.core.scheduler
+    args: [self, text]
+    params:
+      returns: str
+  _fix_required_fields:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _format_markdown_content:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, content]
+  _format_todo_list:
+    type: sync
+    module: koder_agent.tools.todo
+    args: [todos]
+    params:
+      returns: str
+  _format_tokens:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self, n]
+    params:
+      returns: str
+  _format_tool_inputs:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, inputs]
+    params:
+      returns: str
+  _format_tool_inputs_for_display:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, tool_name, inputs]
+    params:
+      returns: str
+  _format_tool_inputs_full:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, inputs]
+    params:
+      returns: str
+  _format_tool_inputs_simple:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, inputs]
+    params:
+      returns: str
+  _format_tool_output:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, output]
+    params:
+      returns: str
+  _format_tool_output_limited:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, output]
+    params:
+      returns: str
+  _generate_diff_output:
+    type: sync
+    module: koder_agent.tools.file
+    args: [old_content, new_content, file_path, is_new_file]
+    params:
+      returns: str
+  _generate_smart_summary:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, tool_name, output]
+    params:
+      returns: str
+  _generate_title_background:
+    type: async
+    module: koder_agent.core.scheduler
+    args: [self, user_input]
+    params:
+      returns: None
+  _get_access_token:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self]
+    params:
+      returns: Optional[str]
+  _get_codex_instructions:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, normalized_model]
+    params:
+      returns: str
+  _get_completions:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [self, app]
+  _get_context_style:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self, percentage]
+    params:
+      returns: str
+  _get_display_input:
+    type: sync
+    module: koder_agent.core.scheduler
+    args: [self, user_input]
+    params:
+      returns: str
+  _get_line_count:
+    type: sync
+    module: koder_agent.core.scheduler
+    args: [self, content]
+    params:
+      returns: int
+  _get_merged_skills:
+    type: sync
+    module: koder_agent.tools.skill
+    params:
+      returns: dict
+  _get_model_family:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, normalized_model]
+    params:
+      returns: str
+  _get_oauth_extra_headers:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider]
+    params:
+      returns: Optional[dict]
+  _get_oauth_model_prefix:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider]
+    params:
+      returns: Optional[str]
+  _get_provider_api_key:
+    type: sync
+    module: koder_agent.utils.client
+    args: [config, config_manager, provider]
+  _get_provider_env_var_name:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider]
+    params:
+      returns: str
+  _get_skills_metadata:
+    type: sync
+    module: koder_agent.agentic.agent
+    args: [config]
+    params:
+      returns: str
+  _get_token_path:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self, provider]
+    params:
+      returns: Path
+  _handle_callback:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [self, request]
+    params:
+      returns: web.Response
+  _handle_manual_code_flow:
+    type: async
+    module: koder_agent.auth.cli_handler
+    args: [auth_url, timeout]
+    params:
+      returns: CallbackResult
+  _handle_streaming:
+    type: async
+    module: koder_agent.core.scheduler
+    args: [self, user_input]
+    params:
+      returns: str
+  _handle_streaming_response:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, response, model]
+    params:
+      returns: ModelResponse
+  _has_content:
+    type: sync
+    module: koder_agent.core.scheduler
+    args: [self, content]
+    params:
+      returns: bool
+  _is_claude_thinking_model:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model]
+    params:
+      returns: bool
+  _is_error_output:
+    type: sync
+    module: koder_agent.agentic.hooks
+    args: [output]
+    params:
+      returns: bool
+  _is_git_error:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, output]
+    params:
+      returns: bool
+  _is_github_copilot:
+    type: sync
+    module: koder_agent.agentic.agent
+    args: [self]
+    params:
+      returns: bool
+  _is_openai_native_model:
+    type: sync
+    module: koder_agent.utils.client
+    args: [raw_model]
+    params:
+      returns: bool
+  _is_shell_error:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, output]
+    params:
+      returns: bool
+  _iter_sse_lines:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, content]
+    params:
+      returns: AsyncIterator[str]
+  _legacy_db_path:
+    type: sync
+    module: koder_agent.mcp.server_manager
+    params:
+      returns: Path
+  _load_managed_project:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, access_token, fallback_project_id]
+    params:
+      returns: Optional[str]
+  _map_oauth_to_litellm_provider:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider]
+    params:
+      returns: str
+  _matches_git_command:
+    type: sync
+    module: koder_agent.tools.skill_context
+    args: [self, pattern, tool_args]
+    params:
+      returns: bool
+  _matches_pattern:
+    type: sync
+    module: koder_agent.tools.skill_context
+    args: [self, pattern, tool_name, tool_args]
+    params:
+      returns: bool
+  _matches_shell_command:
+    type: sync
+    module: koder_agent.tools.skill_context
+    args: [self, pattern, tool_args]
+    params:
+      returns: bool
+  _mcp_config_to_yaml:
+    type: sync
+    module: koder_agent.mcp.server_manager
+    args: [self, config]
+    params:
+      returns: MCPServerConfigYaml
+  _merge_all_of:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _move_constraints_to_description:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _normalize_function_name:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [name]
+    params:
+      returns: str
+  _normalize_model:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model]
+    params:
+      returns: str
+  _normalize_model_name:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider, raw_model, model_from_env]
+    params:
+      returns: str
+  _output_filter:
+    type: sync
+    module: koder_agent.tools.engine
+    args: [self, txt]
+    params:
+      returns: str
+  _parse_codex_response:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, response_lines, model]
+    params:
+      returns: ModelResponse
+  _parse_response:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, response_data]
+    params:
+      returns: ModelResponse
+  _print_token_details:
+    type: async
+    module: koder_agent.auth.cli_handler
+    args: [provider_id, tokens, storage]
+    params:
+      returns: None
+  _process_token_response:
+    type: async
+    module: koder_agent.auth.providers.antigravity
+    args: [self, token_data]
+    params:
+      returns: OAuthResult
+  _prompt_select_session:
+    type: async
+    module: koder_agent.cli
+    params:
+      returns: Optional[str]
+  _remove:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [cls, shell_id]
+    params:
+      returns: None
+  _remove_unsupported_keywords:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Any
+  _resolve_model_settings:
+    type: sync
+    module: koder_agent.utils.client
+  _resolve_model_with_tier:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model]
+    params:
+      returns: tuple
+  _resolve_paths:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self, content, skill_dir]
+    params:
+      returns: str
+  _sanitize_input_items:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, items]
+    params:
+      returns: List[Dict]
+  _setup_provider_env_vars:
+    type: sync
+    module: koder_agent.utils.client
+    args: [config, provider]
+  _should_use_oauth_provider:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider]
+    params:
+      returns: bool
+  _should_use_responses_api:
+    type: sync
+    module: koder_agent.agentic.agent
+    args: [self]
+    params:
+      returns: bool
+  _show_command_selection:
+    type: async
+    module: koder_agent.core.commands
+    args: [self, _scheduler]
+    params:
+      returns: str
+  _split_model_identifier:
+    type: sync
+    module: koder_agent.utils.client
+    args: [model]
+    params:
+      returns: tuple
+  _strip_matching_provider:
+    type: sync
+    module: koder_agent.utils.client
+    args: [raw_model, provider]
+    params:
+      returns: str
+  _summarize_messages:
+    type: async
+    module: koder_agent.core.session
+    args: [self, messages, current_tokens]
+    params:
+      returns: List[Dict]
+  _sync_refresh_token:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider, tokens]
+    params:
+      returns: Optional[OAuthTokens]
+  _truncate:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self, s, max_len, from_start]
+    params:
+      returns: str
+  _truncate_agent_name:
+    type: sync
+    module: koder_agent.agentic.hooks
+    args: [name, max_len]
+    params:
+      returns: str
+  _validate_skill_description:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [description, skill_path]
+    params:
+      returns: list[str]
+  _validate_skill_name:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [name, skill_path]
+    params:
+      returns: list[str]
+  _validate_tool_name:
+    type: sync
+    module: koder_agent.tools.engine
+    args: [self, name]
+    params:
+      returns: bool
+  _yaml_to_mcp_config:
+    type: sync
+    module: koder_agent.mcp.server_manager
+    args: [self, yaml_config]
+    params:
+      returns: MCPServerConfig
+  accept_input:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  acompletion:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model, messages]
+    params:
+      returns: ModelResponse
+  add:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [cls, shell]
+    params:
+      returns: None
+  add_items:
+    type: async
+    module: koder_agent.core.session
+    args: [self, items]
+    params:
+      returns: None
+  add_output:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [self, line]
+  add_server:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self, config]
+    params:
+      returns: None
+  add_skill:
+    type: sync
+    module: koder_agent.tools.skill_context
+    args: [self, skill_name, tools]
+    params:
+      returns: None
+  add_skill_restrictions:
+    type: sync
+    module: koder_agent.tools.skill_context
+    args: [skill]
+    params:
+      returns: None
+  append_file:
+    type: tool
+    module: koder_agent.tools.file
+    args: [path, content]
+    params:
+      returns: str
+  apply_diff:
+    type: sync
+    module: koder_agent.tools.file
+    args: [content, diff_text]
+    params:
+      returns: Tuple
+  apply_tool_pairing_fixes:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [payload, is_claude]
+    params:
+      returns: Dict
+  assign_tool_call_ids:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [contents]
+    params:
+      returns: Tuple
+  astreaming:
+    type: async
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model, messages]
+    params:
+      returns: AsyncIterator[GenericStreamingChunk]
+  async_refresh_token:
+    type: async
+    module: koder_agent.auth.client_integration
+    args: [provider, tokens]
+    params:
+      returns: Optional[OAuthTokens]
+  build_tool_calls_response_message:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [tool_calls]
+    params:
+      returns: Dict
+  cache_thought_signature:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [call_id, function_name, thought_signature]
+    params:
+      returns: None
+  calculate_cost:
+    type: sync
+    module: koder_agent.core.usage_tracker
+    args: [self, input_tokens, output_tokens]
+    params:
+      returns: float
+  call:
+    type: async
+    module: koder_agent.tools.engine
+    args: [self, name]
+    params:
+      returns: str
+  cancel_input:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  check_file_size:
+    type: sync
+    module: koder_agent.core.security
+    args: [path, max_size_mb]
+    params:
+      returns: Optional[str]
+  clean_json_schema:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Dict
+  cleanup:
+    type: async
+    module: koder_agent.core.scheduler
+    args: [self]
+  clear:
+    type: async
+    module: koder_agent.utils.queue
+    args: [self]
+    params:
+      returns: None
+  clear_esc_hint:
+    type: sync
+    module: koder_agent.core.scheduler
+  clear_input:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  clear_restrictions:
+    type: sync
+    module: koder_agent.tools.skill_context
+    params:
+      returns: None
+  clear_thought_signature_cache:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    params:
+      returns: None
+  complete:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  complete_previous:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  completion:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model, messages]
+    params:
+      returns: ModelResponse
+  confirm_action:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [self, message]
+    params:
+      returns: bool
+  convert_tool_calls_to_gemini_parts:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [tool_calls]
+    params:
+      returns: List[Dict]
+  convert_tool_message_to_gemini_part:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [msg]
+    params:
+      returns: Dict
+  convert_tools_to_claude_format:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [tools, inject_signatures]
+    params:
+      returns: List[Dict]
+  convert_tools_to_codex_format:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [tools]
+    params:
+      returns: List[Dict]
+  convert_tools_to_gemini_format:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [tools]
+    params:
+      returns: List[Dict]
+  create_api_key:
+    type: async
+    module: koder_agent.auth.providers.claude
+    args: [self, access_token]
+    params:
+      returns: Optional[str]
+  create_auth_subparsers:
+    type: sync
+    module: koder_agent.cli
+    args: [subparsers]
+  create_config_subparsers:
+    type: sync
+    module: koder_agent.cli
+    args: [subparsers]
+  create_dev_agent:
+    type: async
+    module: koder_agent.agentic.agent
+    args: [tools]
+    params:
+      returns: Agent
+  create_mcp_subparsers:
+    type: sync
+    module: koder_agent.cli
+    args: [subparsers]
+  create_server:
+    type: sync
+    module: koder_agent.mcp.server_factory
+    args: [config]
+    params:
+      returns: MCPServer
+  create_servers_from_configs:
+    type: async
+    module: koder_agent.mcp.server_factory
+    args: [configs]
+    params:
+      returns: List[MCPServer]
+  create_window:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self]
+    params:
+      returns: Window
+  decorator:
+    type: sync
+    module: koder_agent.tools.engine
+    args: [fn]
+  default_session_local_ms:
+    type: sync
+    module: koder_agent.utils.sessions
+    params:
+      returns: str
+  delete:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self, provider]
+    params:
+      returns: bool
+  discover_skills:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self]
+    params:
+      returns: list[Skill]
+  edit_file:
+    type: tool
+    module: koder_agent.tools.file
+    args: [path, diff]
+    params:
+      returns: str
+  empty:
+    type: sync
+    module: koder_agent.utils.queue
+    args: [self]
+    params:
+      returns: bool
+  encode:
+    type: sync
+    module: koder_agent.core.session
+    args: [self, text]
+    params:
+      returns: list[int]
+  ensure_tool_has_properties:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [schema]
+    params:
+      returns: Dict
+  exchange_code:
+    type: async
+    module: koder_agent.auth.base
+    args: [self, code, verifier]
+    params:
+      returns: OAuthResult
+  execute:
+    type: async
+    module: koder_agent.core.commands
+    args: [self, scheduler]
+    params:
+      returns: str
+  extract_tool_calls_from_codex_response:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [data]
+    params:
+      returns: Optional[List[Dict]]
+  extract_tool_calls_from_gemini_response:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [data]
+    params:
+      returns: Optional[List[Dict]]
+  finalize_text_sections:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self]
+  fix_tool_response_grouping:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [contents]
+    params:
+      returns: List[Dict]
+  from_db_dict:
+    type: sync
+    module: koder_agent.mcp.server_config
+    args: [cls, data]
+    params:
+      returns: MCPServerConfig
+  from_dict:
+    type: sync
+    module: koder_agent.auth.base
+    args: [cls, data]
+    params:
+      returns: OAuthTokens
+  full:
+    type: sync
+    module: koder_agent.utils.queue
+    args: [self]
+    params:
+      returns: bool
+  generate_pkce:
+    type: sync
+    module: koder_agent.auth.base
+    params:
+      returns: PKCEPair
+  generate_state:
+    type: sync
+    module: koder_agent.auth.base
+    params:
+      returns: str
+  generate_title:
+    type: async
+    module: koder_agent.core.session
+    args: [self, user_message]
+    params:
+      returns: str
+  get:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [cls, shell_id]
+    params:
+      returns: Optional[BackgroundShell]
+  get_active_restrictions:
+    type: sync
+    module: koder_agent.tools.skill_context
+    params:
+      returns: Optional[SkillRestrictions]
+  get_all_tokens:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self]
+    params:
+      returns: Dict
+  get_all_tools:
+    type: sync
+    module: koder_agent.tools
+    params:
+      returns: List[Tool]
+  get_api_base_url:
+    type: sync
+    module: koder_agent.auth.providers.antigravity
+    args: [self, model]
+    params:
+      returns: str
+  get_api_config:
+    type: sync
+    module: koder_agent.auth.providers.chatgpt
+    args: [self]
+    params:
+      returns: Dict
+  get_api_key:
+    type: sync
+    module: koder_agent.utils.client
+  get_auth_headers:
+    type: sync
+    module: koder_agent.auth.base
+    args: [self, access_token]
+    params:
+      returns: Dict
+  get_authorization_url:
+    type: sync
+    module: koder_agent.auth.base
+    args: [self]
+    params:
+      returns: Tuple
+  get_available_ids:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [cls]
+    params:
+      returns: List[str]
+  get_base_url:
+    type: sync
+    module: koder_agent.utils.client
+  get_cached_thought_signature:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [call_id, function_name]
+    params:
+      returns: Optional[str]
+  get_command_list:
+    type: sync
+    module: koder_agent.core.commands
+    args: [self]
+    params:
+      returns: List[Tuple]
+  get_completions:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [self, document, complete_event]
+  get_config:
+    type: sync
+    module: koder_agent.config.manager
+    params:
+      returns: KoderConfig
+  get_config_manager:
+    type: sync
+    module: koder_agent.config.manager
+    params:
+      returns: ConfigManager
+  get_context_window_size:
+    type: sync
+    module: koder_agent.utils.model_info
+    args: [model, max_context_size]
+    params:
+      returns: int
+  get_display_content:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self]
+    params:
+      returns: Union
+  get_display_hooks:
+    type: sync
+    module: koder_agent.agentic.hooks
+    args: [streaming_mode]
+    params:
+      returns: RunHooks
+  get_display_name:
+    type: async
+    module: koder_agent.core.session
+    args: [self]
+    params:
+      returns: str
+  get_effective_value:
+    type: sync
+    module: koder_agent.config.manager
+    args: [self, config_value, env_var_name, cli_value]
+    params:
+      returns: Any
+  get_final_display:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self]
+    params:
+      returns: str
+  get_final_text:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self]
+    params:
+      returns: str
+  get_formatted_text:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self]
+    params:
+      returns: FormattedText
+  get_input:
+    type: async
+    module: koder_agent.core.interactive
+    args: [self]
+    params:
+      returns: str
+  get_litellm_model_kwargs:
+    type: sync
+    module: koder_agent.utils.client
+    params:
+      returns: dict
+  get_maximum_output_tokens:
+    type: sync
+    module: koder_agent.utils.model_info
+    args: [model]
+    params:
+      returns: int
+  get_model_costs:
+    type: sync
+    module: koder_agent.core.usage_tracker
+    args: [self]
+    params:
+      returns: tuple
+  get_model_mapping:
+    type: sync
+    module: koder_agent.auth.providers.antigravity
+    args: [self]
+    params:
+      returns: Dict
+  get_model_name:
+    type: sync
+    module: koder_agent.utils.client
+  get_model_name_variants_for_lookup:
+    type: sync
+    module: koder_agent.utils.model_info
+    args: [model]
+    params:
+      returns: list[str]
+  get_new_output:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [self, filter_pattern]
+    params:
+      returns: List[str]
+  get_nowait:
+    type: async
+    module: koder_agent.utils.queue
+    args: [self]
+    params:
+      returns: Optional[Any]
+  get_oauth_api_key:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider]
+    params:
+      returns: Optional[str]
+  get_oauth_headers:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider]
+    params:
+      returns: Dict
+  get_oauth_model_prefix:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [provider]
+    params:
+      returns: Optional[str]
+  get_oauth_token:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider]
+    params:
+      returns: Optional[OAuthTokens]
+  get_provider:
+    type: sync
+    module: koder_agent.auth.providers
+    args: [provider_id]
+  get_provider_api_env_var:
+    type: sync
+    module: koder_agent.utils.client
+    args: [provider]
+    params:
+      returns: str
+  get_provider_auth_info:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider]
+    params:
+      returns: Tuple
+  get_response:
+    type: async
+    module: koder_agent.agentic.agent
+    args: [self, system_instructions, input, model_settings, tools, output_schema, handoffs, tracing, previous_response_id,
+      conversation_id, prompt]
+    params:
+      returns: ModelResponse
+  get_server:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self, name]
+    params:
+      returns: Optional[MCPServerConfig]
+  get_servers_by_type:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self, transport_type]
+    params:
+      returns: List[MCPServerConfig]
+  get_skill:
+    type: tool
+    module: koder_agent.tools.skill
+    args: [skill_name]
+    params:
+      returns: str
+  get_skills_metadata_prompt:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self]
+    params:
+      returns: str
+  get_source_label:
+    type: sync
+    module: scripts.list_oauth_models
+    args: [status]
+    params:
+      returns: str
+  get_summarization_threshold:
+    type: sync
+    module: koder_agent.utils.model_info
+    args: [model, threshold_ratio]
+    params:
+      returns: int
+  get_title:
+    type: async
+    module: koder_agent.core.session
+    args: [self]
+    params:
+      returns: Optional[str]
+  get_token_storage:
+    type: sync
+    module: koder_agent.auth.token_storage
+    params:
+      returns: TokenStorage
+  get_user_info:
+    type: async
+    module: koder_agent.auth.providers.antigravity
+    args: [self, access_token]
+    params:
+      returns: Optional[Dict]
+  git_command:
+    type: tool
+    module: koder_agent.tools.shell
+    args: [command]
+    params:
+      returns: str
+  glob_search:
+    type: tool
+    module: koder_agent.tools.search
+    args: [pattern, path]
+    params:
+      returns: str
+  grep_search:
+    type: tool
+    module: koder_agent.tools.search
+    args: [pattern, path, include]
+    params:
+      returns: str
+  handle:
+    type: async
+    module: koder_agent.core.scheduler
+    args: [self, user_input]
+    params:
+      returns: str
+  handle_backspace:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  handle_config_command:
+    type: async
+    module: koder_agent.config.cli_handler
+    args: [args]
+    params:
+      returns: int
+  handle_delete:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  handle_edit_command:
+    type: async
+    module: koder_agent.config.cli_handler
+    params:
+      returns: int
+  handle_escape:
+    type: async
+    module: koder_agent.core.scheduler
+  handle_init_command:
+    type: async
+    module: koder_agent.config.cli_handler
+    params:
+      returns: int
+  handle_list:
+    type: async
+    module: koder_agent.auth.cli_handler
+    params:
+      returns: None
+  handle_login:
+    type: async
+    module: koder_agent.auth.cli_handler
+    args: [provider_id, timeout]
+    params:
+      returns: bool
+  handle_path_command:
+    type: async
+    module: koder_agent.config.cli_handler
+    params:
+      returns: int
+  handle_revoke:
+    type: async
+    module: koder_agent.auth.cli_handler
+    args: [provider_id]
+    params:
+      returns: bool
+  handle_set_command:
+    type: async
+    module: koder_agent.config.cli_handler
+    args: [args]
+    params:
+      returns: int
+  handle_show_command:
+    type: async
+    module: koder_agent.config.cli_handler
+    params:
+      returns: int
+  handle_slash_input:
+    type: async
+    module: koder_agent.core.commands
+    args: [self, user_input, scheduler]
+    params:
+      returns: Optional[str]
+  handle_status:
+    type: async
+    module: koder_agent.auth.cli_handler
+    args: [provider_id]
+    params:
+      returns: None
+  handle_text_delta:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, output_index, delta_text]
+    params:
+      returns: bool
+  handle_tool_called:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, tool_call_item, call_id]
+    params:
+      returns: bool
+  handle_tool_output:
+    type: sync
+    module: koder_agent.core.streaming_display
+    args: [self, tool_output_item, call_id]
+    params:
+      returns: bool
+  has_active_restrictions:
+    type: sync
+    module: koder_agent.tools.skill_context
+    params:
+      returns: bool
+  has_oauth_credentials:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider]
+    params:
+      returns: bool
+  has_oauth_token:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [provider]
+    params:
+      returns: bool
+  has_valid_token:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self, provider, buffer_ms]
+    params:
+      returns: bool
+  insert_newline:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [event]
+  is_expired:
+    type: sync
+    module: koder_agent.auth.base
+    args: [self, buffer_ms]
+    params:
+      returns: bool
+  is_models_cache_valid:
+    type: sync
+    module: koder_agent.auth.base
+    args: [self]
+    params:
+      returns: bool
+  is_native_openai_provider:
+    type: sync
+    module: koder_agent.utils.client
+    params:
+      returns: bool
+  is_oauth_provider:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [provider]
+    params:
+      returns: bool
+  is_slash_command:
+    type: sync
+    module: koder_agent.core.commands
+    args: [self, user_input]
+    params:
+      returns: bool
+  is_tool_allowed:
+    type: sync
+    module: koder_agent.tools.skill_context
+    args: [self, tool_name, tool_args]
+    params:
+      returns: bool
+  list_directory:
+    type: tool
+    module: koder_agent.tools.file
+    args: [path, ignore]
+    params:
+      returns: str
+  list_models:
+    type: async
+    module: koder_agent.auth.providers.antigravity
+    args: [self, access_token, verbose]
+    params:
+      returns: tuple
+  list_models_for_provider:
+    type: async
+    module: scripts.list_oauth_models
+    args: [provider_id, storage, force_refresh]
+    params:
+      returns: tuple
+  list_providers:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self]
+    params:
+      returns: List[str]
+  list_servers:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self]
+    params:
+      returns: List[MCPServerConfig]
+  list_sessions_with_titles:
+    type: async
+    module: koder_agent.core.session
+    args: [db_path]
+    params:
+      returns: list[tuple]
+  list_skills:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self]
+    params:
+      returns: list[str]
+  llm_completion:
+    type: async
+    module: koder_agent.utils.client
+    args: [messages, model]
+    params:
+      returns: str
+  load:
+    type: sync
+    module: koder_agent.config.manager
+    args: [self]
+    params:
+      returns: KoderConfig
+  load_context:
+    type: async
+    module: koder_agent.cli
+    params:
+      returns: str
+  load_mcp_servers:
+    type: async
+    module: koder_agent.mcp
+    params:
+      returns: List[MCPServer]
+  load_skill:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self, skill_path]
+    params:
+      returns: Optional[Skill]
+  main:
+    type: async
+    module: koder_agent.cli
+  map_provider_to_oauth:
+    type: sync
+    module: koder_agent.auth.client_integration
+    args: [model_provider]
+    params:
+      returns: Optional[str]
+  match_tool_response_ids:
+    type: sync
+    module: koder_agent.auth.tool_utils
+    args: [contents, pending_by_name]
+    params:
+      returns: List[Dict]
+  migrate_legacy_sessions:
+    type: async
+    module: koder_agent.core.session
+    args: [db_path]
+    params:
+      returns: None
+  model:
+    type: sync
+    module: koder_agent.core.usage_tracker
+    args: [self]
+    params:
+      returns: str
+  monitor:
+    type: async
+    module: koder_agent.tools.shell
+  on_agent_end:
+    type: async
+    module: koder_agent.agentic.approval_hooks
+    args: [self, context, agent, output]
+    params:
+      returns: None
+  on_agent_start:
+    type: async
+    module: koder_agent.agentic.hooks
+    args: [self, context, agent]
+    params:
+      returns: None
+  on_handoff:
+    type: async
+    module: koder_agent.agentic.approval_hooks
+    args: [self, context, from_agent, to_agent]
+    params:
+      returns: None
+  on_tool_end:
+    type: async
+    module: koder_agent.agentic.hooks
+    args: [self, context, agent, tool, result]
+    params:
+      returns: None
+  on_tool_start:
+    type: async
+    module: koder_agent.agentic.hooks
+    args: [self, context, agent, tool]
+    params:
+      returns: None
+  parse_session_dt:
+    type: sync
+    module: koder_agent.utils.sessions
+    args: [sid]
+    params:
+      returns: Tuple
+  picker_arrows:
+    type: sync
+    module: koder_agent.utils.sessions
+    args: [sessions]
+    params:
+      returns: Optional[str]
+  picker_arrows_with_titles:
+    type: sync
+    module: koder_agent.utils.sessions
+    args: [sessions]
+    params:
+      returns: Optional[str]
+  preferred_height:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [self, width, max_available_height]
+  print_status_error:
+    type: sync
+    module: scripts.list_oauth_models
+    args: [status]
+    params:
+      returns: None
+  put:
+    type: async
+    module: koder_agent.utils.queue
+    args: [self, item]
+    params:
+      returns: None
+  qsize:
+    type: sync
+    module: koder_agent.utils.queue
+    args: [self]
+    params:
+      returns: int
+  read_file:
+    type: tool
+    module: koder_agent.tools.file
+    args: [path, offset, limit]
+    params:
+      returns: str
+  record_usage:
+    type: sync
+    module: koder_agent.core.usage_tracker
+    args: [self, input_tokens, output_tokens, context_tokens]
+    params:
+      returns: None
+  refresh_token_if_needed:
+    type: async
+    module: scripts.list_oauth_models
+    args: [provider_id, tokens, storage]
+    params:
+      returns: str
+  refresh_tokens:
+    type: async
+    module: koder_agent.auth.base
+    args: [self, refresh_token]
+    params:
+      returns: OAuthResult
+  register:
+    type: sync
+    module: koder_agent.tools.engine
+    args: [self, schema]
+  register_oauth_providers:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    params:
+      returns: None
+  reload:
+    type: sync
+    module: koder_agent.config.manager
+    args: [self]
+    params:
+      returns: KoderConfig
+  remove_server:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self, name]
+    params:
+      returns: bool
+  replace_link:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [m]
+    params:
+      returns: str
+  reset:
+    type: sync
+    module: koder_agent.core.usage_tracker
+    args: [self]
+    params:
+      returns: None
+  reset_config_manager:
+    type: sync
+    module: koder_agent.config.manager
+    params:
+      returns: None
+  revoke_token:
+    type: async
+    module: koder_agent.auth.providers.antigravity
+    args: [self, token]
+    params:
+      returns: bool
+  run:
+    type: sync
+    module: koder_agent.cli
+  run_auth_command:
+    type: async
+    module: koder_agent.auth.cli_handler
+    args: [args]
+    params:
+      returns: int
+  run_oauth_flow:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [auth_url, port, callback_path, timeout, open_browser]
+    params:
+      returns: CallbackResult
+  run_shell:
+    type: tool
+    module: koder_agent.tools.shell
+    args: [command, timeout, run_in_background]
+    params:
+      returns: str
+  run_single_task:
+    type: async
+    module: koder_agent.tools.task
+    args: [task]
+    params:
+      returns: tuple
+  sanitize_path:
+    type: sync
+    module: koder_agent.core.security
+    args: [path]
+    params:
+      returns: str
+  save:
+    type: sync
+    module: koder_agent.config.manager
+    args: [self, config]
+    params:
+      returns: None
+  server_exists:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self, name]
+    params:
+      returns: bool
+  set_title:
+    type: async
+    module: koder_agent.core.session
+    args: [self, title]
+    params:
+      returns: None
+  setup_openai_client:
+    type: sync
+    module: koder_agent.utils.client
+  shell_kill:
+    type: tool
+    module: koder_agent.tools.shell
+    args: [shell_id]
+    params:
+      returns: str
+  shell_output:
+    type: tool
+    module: koder_agent.tools.shell
+    args: [shell_id, filter_str]
+    params:
+      returns: str
+  should_use_reasoning_param:
+    type: sync
+    module: koder_agent.utils.model_info
+    params:
+      returns: bool
+  show_auth_help:
+    type: sync
+    module: koder_agent.auth.cli_handler
+    params:
+      returns: None
+  show_command_help:
+    type: sync
+    module: koder_agent.core.interactive
+    args: [self]
+    params:
+      returns: None
+  show_config_status:
+    type: async
+    module: koder_agent.config.cli_handler
+    params:
+      returns: str
+  skill_tool_restriction_guardrail:
+    type: sync
+    module: koder_agent.agentic.skill_guardrail
+    args: [data]
+    params:
+      returns: ToolGuardrailFunctionOutput
+  sort_sessions_desc:
+    type: sync
+    module: koder_agent.utils.sessions
+    args: [sids]
+    params:
+      returns: List[str]
+  start:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [self]
+    params:
+      returns: None
+  start_monitor:
+    type: async
+    module: koder_agent.tools.shell
+    args: [cls, shell_id]
+    params:
+      returns: None
+  stop:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [self]
+    params:
+      returns: None
+  stream_response:
+    type: async
+    module: koder_agent.agentic.agent
+    args: [self, system_instructions, input, model_settings, tools, output_schema, handoffs, tracing, previous_response_id,
+      conversation_id, prompt]
+  streaming:
+    type: sync
+    module: koder_agent.auth.litellm_oauth
+    args: [self, model, messages]
+    params:
+      returns: Iterator[GenericStreamingChunk]
+  task_delegate:
+    type: tool
+    module: koder_agent.tools.task
+    args: [tasks]
+    params:
+      returns: str
+  terminate:
+    type: async
+    module: koder_agent.tools.shell
+    args: [cls, shell_id]
+    params:
+      returns: BackgroundShell
+  to_db_dict:
+    type: sync
+    module: koder_agent.mcp.server_config
+    args: [self]
+    params:
+      returns: Dict
+  to_dict:
+    type: sync
+    module: koder_agent.auth.base
+    args: [self]
+    params:
+      returns: Dict
+  to_prompt:
+    type: sync
+    module: koder_agent.tools.skill
+    args: [self]
+    params:
+      returns: str
+  to_server_config:
+    type: sync
+    module: koder_agent.mcp.server_config
+    args: [self]
+    params:
+      returns: MCPServerConfig
+  todo_read:
+    type: tool
+    module: koder_agent.tools.todo
+    params:
+      returns: str
+  todo_write:
+    type: tool
+    module: koder_agent.tools.todo
+    args: [todos]
+    params:
+      returns: str
+  todos:
+    type: sync
+    module: koder_agent.tools.todo
+    args: [self, value]
+  truncate_text_by_tokens:
+    type: sync
+    module: koder_agent.tools.file
+    args: [text, max_tokens]
+    params:
+      returns: str
+  update_access_token:
+    type: sync
+    module: koder_agent.auth.token_storage
+    args: [self, provider, access_token, expires_at, refresh_token]
+    params:
+      returns: bool
+  update_display_name:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self, display_name]
+    params:
+      returns: None
+  update_server:
+    type: async
+    module: koder_agent.mcp.server_manager
+    args: [self, config]
+    params:
+      returns: bool
+  update_session:
+    type: sync
+    module: koder_agent.core.status_line
+    args: [self, session_id]
+    params:
+      returns: None
+  update_status:
+    type: sync
+    module: koder_agent.tools.shell
+    args: [self, is_alive, exit_code]
+  validate_command:
+    type: sync
+    module: koder_agent.core.security
+    args: [command]
+    params:
+      returns: Optional[str]
+  validate_config:
+    type: sync
+    module: koder_agent.mcp.server_factory
+    args: [config]
+    params:
+      returns: Optional[str]
+  validate_remote_url:
+    type: sync
+    module: koder_agent.mcp.server_config
+    args: [cls, v, info]
+    params:
+      returns: Optional[str]
+  validate_stdio_command:
+    type: sync
+    module: koder_agent.mcp.server_config
+    args: [cls, v, info]
+    params:
+      returns: Optional[str]
+  wait_for_callback:
+    type: async
+    module: koder_agent.auth.callback_server
+    args: [self, timeout]
+    params:
+      returns: CallbackResult
+  web_fetch:
+    type: tool
+    module: koder_agent.tools.web
+    args: [url, prompt]
+    params:
+      returns: str
+  web_search:
+    type: tool
+    module: koder_agent.tools.web
+    args: [query, max_results]
+    params:
+      returns: str
+  write_file:
+    type: tool
+    module: koder_agent.tools.file
+    args: [path, content]
+    params:
+      returns: str
+
+variables:
+  ANTHROPIC_CREATE_API_KEY_URL:
+    type: env
+  ANTHROPIC_TOKEN_URL:
+    type: env
+  ANTIGRAVITY_CLIENT_SECRET:
+    type: env
+  ANTIGRAVITY_TOKEN_URL:
+    type: env
+  api_key_env_var:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.config.cli_handler]
+  AZURE_API_BASE:
+    type: env
+    params:
+      caller: [os.environ.get, os.environ]
+      path: [koder_agent.utils.client]
+  AZURE_API_VERSION:
+    type: env
+    params:
+      caller: [os.environ.get, os.environ]
+      path: [koder_agent.utils.client]
+  EDITOR:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.config.cli_handler]
+  env_var_name:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.utils.client, koder_agent.config.manager]
+  GOOGLE_APPLICATION_CREDENTIALS:
+    type: env
+    params:
+      caller: [os.environ.get, os.environ]
+      path: [koder_agent.utils.client]
+  GOOGLE_CLIENT_SECRET:
+    type: env
+  GOOGLE_TOKEN_URL:
+    type: env
+  KODER_API_KEY:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.utils.client]
+  KODER_BASE_URL:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.utils.client]
+  KODER_MODEL:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.utils.client, koder_agent.config.cli_handler]
+  OPENAI_TOKEN_URL:
+    type: env
+  TERM_PROGRAM:
+    type: env
+    params:
+      caller: [os.environ.get]
+      path: [koder_agent.core.scheduler]
+  VERTEXAI_LOCATION:
+    type: env
+    params:
+      caller: [os.environ.get, os.environ]
+      path: [koder_agent.utils.client]
+
+files:
+  ./:
+    type: pattern
+    actions: [read]
+    params:
+      patterns: ['*.json', '*']
+      caller: [list_providers, grep_search]
+  .json:
+    type: literal
+    actions: [read]
+    params:
+      caller: [_get_token_path]
+      path: [self.base_dir]
+  .koder:
+    type: literal
+    actions: [read]
+    params:
+      caller: [_get_merged_skills, __init__, os.path.join, _legacy_db_path]
+      path: [Path.home]
+  .koder/skills:
+    type: literal
+    actions: [read]
+    params:
+      caller: [_get_merged_skills]
+  actual_pattern/:
+    type: variable
+    actions: [read]
+    params:
+      links: [actual_pattern]
+      caller: [glob_search]
+  AGENTS.md:
+    type: literal
+    actions: [read]
+    params:
+      caller: [execute, load_context]
+      path: [Path]
+  auth_url:
+    type: variable
+    actions: [read]
+    params:
+      caller: [webbrowser.open]
+  base_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  base_path:
+    type: variable
+    actions: [read]
+    params:
+      caller: [base_path.rglob, base_path.glob]
+  config.skills.project_skills_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  config.skills.user_skills_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  config.yaml:
+    type: literal
+    actions: [read]
+    params:
+      path: [Path.home]
+  current_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  file_path:
+    type: variable
+    actions: [read]
+    params:
+      caller: [file_path.read_text]
+  koder.db:
+    type: literal
+    actions: [read]
+    params:
+      caller: [os.path.join, _legacy_db_path]
+      path: [koder_dir]
+  koder_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [os.makedirs]
+  koder_md_path:
+    type: variable
+    actions: [read]
+    params:
+      caller: [koder_md_path.read_text]
+  path:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  path_obj:
+    type: literal
+    actions: [read]
+    params:
+      caller: [Path(path)]
+  pattern/:
+    type: variable
+    actions: [read]
+    params:
+      links: [pattern]
+      caller: [glob_search]
+  project_dir:
+    type: literal
+    actions: [read]
+    params:
+      caller: [Path(config.skills.project_skills_dir)]
+  skill_path:
+    type: variable
+    actions: [read]
+    params:
+      caller: [skill_path.read_text]
+  skills_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path]
+  token_path:
+    type: variable
+    actions: [write, read, delete]
+    params:
+      caller: [open, json.load, token_path.unlink, yaml.safe_load]
+      alias: [f]
+  user_dir:
+    type: variable
+    actions: [read]
+    params:
+      caller: [Path.expanduser()]
+
+processes:
+  nano:
+    type: shell
+    actions: [exec]
+    args: [[str(config_manager.config_path)]]
+    params:
+      caller: [subprocess.run]
+      shell: ["False"]
+  powershell.exe:
+    type: shell
+    actions: [exec]
+    params:
+      caller: [asyncio.create_subprocess_exec]
+      shell: ["False", "False", "False"]
