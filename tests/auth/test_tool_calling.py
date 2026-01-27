@@ -125,11 +125,12 @@ class TestEnsureToolHasProperties:
         assert EMPTY_SCHEMA_PLACEHOLDER_NAME in result.get("required", [])
 
     def test_schema_with_properties_unchanged(self):
-        """Schema with properties should be unchanged (except type)."""
+        """Schema with properties should be unchanged (except type uses uppercase for Gemini)."""
         schema = {"properties": {"name": {"type": "string"}}, "required": ["name"]}
         result = ensure_tool_has_properties(schema)
         assert "name" in result["properties"]
-        assert result["type"] == "object"
+        # Default is uppercase_types=True for Gemini/Antigravity compatibility
+        assert result["type"] == "OBJECT"
         # Should not have placeholder
         assert EMPTY_SCHEMA_PLACEHOLDER_NAME not in result["properties"]
 

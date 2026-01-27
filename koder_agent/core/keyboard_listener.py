@@ -75,6 +75,13 @@ class KeyboardListener:
             return False
         return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
 
+    def _read_available(self) -> str:
+        """Read all currently available characters from stdin."""
+        chars = []
+        while self._key_available():
+            chars.append(sys.stdin.read(1))
+        return "".join(chars)
+
     async def listen(
         self,
         on_escape: Callable[[], Awaitable[None]],
@@ -95,8 +102,11 @@ class KeyboardListener:
             self._setup_terminal()
             while self._listening:
                 if self._key_available():
-                    char = sys.stdin.read(1)
-                    if ord(char) == self.ESC_KEY:
+                    # Read all available characters at once
+                    sequence = self._read_available()
+                    # Only trigger on standalone ESC (not escape sequences like arrows)
+                    # Arrow keys: ESC[A, ESC[B, etc. Function keys: ESC[15~, etc.
+                    if sequence == chr(self.ESC_KEY):
                         self._listening = False
                         await on_escape()
                         break

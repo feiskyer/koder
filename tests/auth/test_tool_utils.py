@@ -108,12 +108,13 @@ class TestEnsureToolHasProperties:
     """Tests for ensure_tool_has_properties."""
 
     def test_adds_placeholder_for_empty_properties(self):
-        """Should add placeholder for empty properties."""
+        """Should add placeholder for empty properties (uppercase for Gemini/Antigravity)."""
         schema = {"type": "object", "properties": {}}
         result = ensure_tool_has_properties(schema)
 
         assert "_placeholder" in result["properties"]
-        assert result["properties"]["_placeholder"]["type"] == "boolean"
+        # Default is uppercase_types=True for Gemini/Antigravity compatibility
+        assert result["properties"]["_placeholder"]["type"] == "BOOLEAN"
 
     def test_preserves_existing_properties(self):
         """Should preserve existing properties."""
@@ -481,8 +482,8 @@ class TestThoughtSignatureCache:
         assert get_cached_thought_signature("call_789", "tools:write_file") == "sig_ghi"
         assert get_cached_thought_signature("call_789", "functions:write_file") == "sig_ghi"
 
-    def test_per_function_fallback_within_batch_window(self):
-        """Should use per-function fallback for parallel calls within batch window."""
+    def test_no_per_function_fallback_for_different_call_id(self):
+        """Should NOT use fallback for different call_id (Gemini 3 requires exact match)."""
         from koder_agent.auth.tool_utils import (
             cache_thought_signature,
             get_cached_thought_signature,
@@ -491,12 +492,12 @@ class TestThoughtSignatureCache:
         # Cache signature for a function
         cache_thought_signature("call_001", "read_file", "sig_parallel")
 
-        # Different call_id but same function within batch window
+        # Different call_id - no fallback, signatures must match exact functionCall
         result = get_cached_thought_signature("call_002", "read_file")
-        assert result == "sig_parallel"
+        assert result is None  # No fallback - Gemini 3 requires exact match
 
-    def test_global_fallback_within_batch_window(self):
-        """Should use global fallback for different function within batch window."""
+    def test_no_global_fallback_for_different_function(self):
+        """Should NOT use global fallback for different function (Gemini 3 requires exact match)."""
         from koder_agent.auth.tool_utils import (
             cache_thought_signature,
             get_cached_thought_signature,
@@ -505,9 +506,9 @@ class TestThoughtSignatureCache:
         # Cache signature
         cache_thought_signature("call_100", "read_file", "sig_global")
 
-        # Different call_id AND different function - should use global fallback
+        # Different call_id AND different function - no fallback
         result = get_cached_thought_signature("call_101", "grep_search")
-        assert result == "sig_global"
+        assert result is None  # No fallback - Gemini 3 requires exact match
 
     def test_batch_window_constant_is_reasonable(self):
         """Verify batch window constant is set correctly."""

@@ -104,7 +104,7 @@ Use your existing subscriptions (Claude Max, ChatGPT Plus/Pro, Google Gemini) wi
 koder auth login google      # Google/Gemini CLI (free with Google account)
 koder auth login claude      # Claude Max subscription
 koder auth login chatgpt     # ChatGPT Plus/Pro subscription
-koder auth login antigravity # Antigravity (Gemini 3 + Claude models)
+koder auth login antigravity # Antigravity (Gemini/Claude models)
 
 # Check authentication status
 koder auth list              # List configured providers
@@ -121,7 +121,7 @@ koder auth revoke google     # Remove stored tokens
 | `google` | Google Gemini | Access to Gemini models via Google account |
 | `claude` | Claude Pro/Max | Access to Claude models via subscription |
 | `chatgpt` | ChatGPT Plus/Pro | Access to GPT models via subscription |
-| `antigravity` | Antigravity | Access to Gemini 3 + Claude models |
+| `antigravity` | Antigravity | Access to Gemini/Claude models |
 
 Available models are fetched from each provider's API after login and cached locally (1 day TTL).
 Use `koder auth list` to see all available models for your authenticated providers.
@@ -133,7 +133,8 @@ Use `koder auth list` to see all available models for your authenticated provide
 KODER_MODEL="google/gemini-3-pro-preview" koder "your prompt"                # Google OAuth
 KODER_MODEL="claude/claude-opus-4-5-20250514" koder "your prompt"            # Claude Max
 KODER_MODEL="chatgpt/gpt-5.2" koder "your prompt"                            # ChatGPT OAuth
-KODER_MODEL="antigravity/antigravity-gemini-3-pro-high" koder "your prompt"  # Antigravity
+KODER_MODEL="antigravity/gemini-3-pro-high" koder "your prompt"              # Antigravity (Gemini 3.0)
+KODER_MODEL="antigravity/claude-opus-4-5-thinking" koder "your prompt"       # Antigravity (Claude Opus 4.5)
 ```
 
 OAuth tokens and cached models are stored in `~/.koder/tokens/` and automatically refreshed before expiry.
