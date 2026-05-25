@@ -1,0 +1,41 @@
+spec_version: "0.1.0"
+name: koder
+version: 0.5.3
+description: >
+  Koder is an open-source, terminal-first AI coding assistant that brings together
+  a streaming TUI, persistent local sessions, repository-aware tools, extensible
+  skills, MCP integrations, sandbox-aware permissions, and multi-agent workflows
+  in a single Python runtime. It supports 100+ model providers via LiteLLM and
+  keeps all session state — sessions, memories, tasks, settings — on the developer's
+  local machine.
+author: feiskyer
+license: MIT
+
+model:
+  preferred: openai:gpt-4o
+  fallback:
+    - anthropic:claude-sonnet-4-6
+    - openai:gpt-4o-mini
+  constraints:
+    max_tokens: 8192
+
+skills:
+  - file-tools
+  - search-tools
+  - shell-tools
+  - web-tools
+  - task-tools
+  - mcp-integration
+  - agent-teams
+
+runtime:
+  max_turns: 100
+  timeout: 600
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: destructive
+    kill_switch: true
+  data_governance:
+    pii_handling: redact
