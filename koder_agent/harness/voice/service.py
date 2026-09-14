@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
+import logging
 import os
 import wave
 from dataclasses import dataclass
 from typing import Callable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from openai import AsyncAzureOpenAI, AsyncOpenAI
@@ -25,6 +28,7 @@ DEFAULT_GEMINI_TRANSCRIBE_MODEL = "gemini-2.5-flash"
 TRANSCRIPTION_PROMPT = (
     "Generate a transcript of the spoken audio. Return only the spoken words as plain text."
 )
+logger = logging.getLogger(__name__)
 
 
 class VoiceDictationError(RuntimeError):
@@ -169,20 +173,26 @@ def _resolve_provider_base_url(provider: str, config) -> Optional[str]:
 
 
 def _resolve_azure_endpoint_and_api_version(config) -> tuple[str, str]:
-    base_url = (
-        config.voice.base_url
-        or config.model.base_url
-        or os.environ.get("AZURE_API_BASE")
-        or os.environ.get("OPENAI_API_BASE")
-    )
+    base_url = _resolve_provider_base_url("azure", config)
     if not base_url:
         raise VoiceDictationError(
             "Azure voice transcription requires `voice.base_url` or `AZURE_API_BASE`."
         )
-    azure_endpoint = base_url.split("/openai", 1)[0].rstrip("/")
+    parsed = urlsplit(base_url)
+    path_parts = parsed.path.split("/")
+    if "openai" in path_parts:
+        path_parts = path_parts[: path_parts.index("openai")]
+    azure_endpoint = urlunsplit(
+        (parsed.scheme, parsed.netloc, "/".join(path_parts).rstrip("/"), "", "")
+    )
+    model_api_version = (
+        getattr(config.model, "azure_api_version", None)
+        if (config.model.provider or "").strip().lower() == "azure"
+        else None
+    )
     api_version = (
         config.voice.api_version
-        or getattr(config.model, "azure_api_version", None)
+        or model_api_version
         or os.environ.get("AZURE_API_VERSION")
         or "2025-04-01-preview"
     )
@@ -199,6 +209,9 @@ class SoundDeviceRecorder:
         self._chunks: list[bytes] = []
 
     def start(self) -> None:
+        if self._stream is not None:
+            raise VoiceDictationError("Voice recording is already active.")
+        self._chunks = []
         try:
             import sounddevice as sd
         except ImportError as exc:  # pragma: no cover - depends on runtime environment
@@ -218,26 +231,37 @@ class SoundDeviceRecorder:
             )
             self._stream.start()
         except Exception as exc:  # pragma: no cover - hardware/runtime dependent
+            try:
+                self.cancel()
+            except Exception:
+                logger.warning("Failed to clean up voice capture after startup failure")
             raise VoiceDictationError(f"Voice recording failed to start: {exc}") from exc
+
+    def _close_stream(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+            finally:
+                stream.close()
 
     def stop(self) -> bytes:
         if self._stream is None:
             raise VoiceDictationError("Voice recording is not active.")
-        self._stream.stop()
-        self._stream.close()
-        self._stream = None
-        if not self._chunks:
-            raise VoiceDictationError("No audio was captured.")
-        audio = b"".join(self._chunks)
-        self._chunks = []
+        try:
+            self._close_stream()
+            if not self._chunks:
+                raise VoiceDictationError("No audio was captured.")
+            audio = b"".join(self._chunks)
+        finally:
+            self._chunks = []
         return _encode_wav(audio, sample_rate=self.sample_rate, channels=self.channels)
 
     def cancel(self) -> None:
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-        self._chunks = []
+        try:
+            self._close_stream()
+        finally:
+            self._chunks = []
 
 
 class ProviderVoiceTranscriber:
@@ -317,7 +341,7 @@ class ProviderVoiceTranscriber:
         *,
         on_partial: Optional[Callable[[str], None]] = None,
     ) -> str:
-        api_key, headers, _base_url = resolve_voice_credentials(provider)
+        api_key, headers, base_url = resolve_voice_credentials(provider)
         model = resolve_voice_model(get_config(), provider)
         payload = {
             "contents": [
@@ -335,7 +359,8 @@ class ProviderVoiceTranscriber:
             ],
             "generationConfig": {"temperature": 0},
         }
-        url_base = f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+        api_base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        url_base = f"{api_base}/models/{model}"
         request_headers = {"Content-Type": "application/json", **headers}
         params = {}
         if "Authorization" not in request_headers:
@@ -413,6 +438,8 @@ class VoiceDictationController:
         self._state = "idle"
         self._recorder = None
         self._provider: Optional[str] = None
+        self._generation = 0
+        self._transcription_task: Optional[asyncio.Task] = None
 
     @property
     def is_busy(self) -> bool:
@@ -436,11 +463,16 @@ class VoiceDictationController:
                 f"Voice mode is not available for provider: {provider or 'unknown'}."
             )
         recorder = self.recorder_factory()
-        recorder.start()
+        self._generation += 1
         self._recorder = recorder
         self._provider = provider
-        self._state = "recording"
-        on_status("recording")
+        try:
+            recorder.start()
+            self._state = "recording"
+            on_status("recording")
+        except BaseException:
+            self.cancel()
+            raise
 
     async def stop_recording(
         self,
@@ -450,25 +482,62 @@ class VoiceDictationController:
     ) -> str:
         if self._state != "recording" or self._recorder is None or self._provider is None:
             raise VoiceDictationError("Voice dictation is not recording.")
-        audio_bytes = self._recorder.stop()
-        self._state = "transcribing"
-        on_status("transcribing")
+        generation = self._generation
+        recorder = self._recorder
+        provider = self._provider
+        self._transcription_task = asyncio.current_task()
+
+        def report_partial(text: str) -> None:
+            if generation == self._generation and on_partial is not None:
+                on_partial(text)
+
         try:
+            try:
+                audio_bytes = recorder.stop()
+            finally:
+                # Capture is finished before any provider await. Release it now
+                # so a later cancellation/finalizer cannot touch a new capture.
+                self._cancel_recorder(recorder)
+                self._recorder = None
+            self._state = "transcribing"
+            on_status("transcribing")
+            if generation != self._generation:
+                raise asyncio.CancelledError
             transcript = await self.transcriber.transcribe(
                 audio_bytes=audio_bytes,
-                provider=self._provider,
-                on_partial=on_partial,
+                provider=provider,
+                on_partial=report_partial if on_partial is not None else None,
             )
+            # Cancellation can be suppressed by a provider. Never return that
+            # stale transcript to a caller that will submit it as user input.
+            if generation != self._generation:
+                raise asyncio.CancelledError
             return transcript.strip()
         finally:
-            self._recorder = None
-            self._provider = None
-            self._state = "idle"
-            on_status(None)
+            if generation == self._generation:
+                self._recorder = None
+                self._provider = None
+                self._transcription_task = None
+                self._state = "idle"
+                on_status(None)
+
+    @staticmethod
+    def _cancel_recorder(recorder) -> None:
+        if recorder is not None and hasattr(recorder, "cancel"):
+            try:
+                recorder.cancel()
+            except Exception:
+                logger.warning("Failed to clean up voice capture")
 
     def cancel(self) -> None:
-        if self._recorder is not None and hasattr(self._recorder, "cancel"):
-            self._recorder.cancel()
+        # Revoke ownership before signalling cancellation: a new recording can
+        # start before the old transcription's finally block runs.
+        self._generation += 1
+        task, self._transcription_task = self._transcription_task, None
+        recorder = self._recorder
         self._recorder = None
         self._provider = None
         self._state = "idle"
+        if task is not None and not task.done():
+            task.cancel()
+        self._cancel_recorder(recorder)

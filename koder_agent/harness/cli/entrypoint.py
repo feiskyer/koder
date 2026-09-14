@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 
 from koder_agent.harness.runtime import HarnessRuntime
@@ -27,41 +28,59 @@ SUBCOMMANDS = {
     "completion",
     "upgrade",
 }
-FLAGS_WITH_VALUE = {
-    "--session",
-    "-s",
-    "--output-format",
-    "--json-schema",
-    "--system-prompt",
-    "--system-prompt-file",
-    "--append-system-prompt",
-    "--append-system-prompt-file",
-    "--bare",
-    "--allowedTools",
-    "--input-format",
-    "--name",
-    "-n",
-    "--agents",
-    "--agent",
-    "--teammate-mode",
-    "--channels",
-    "--dangerously-load-development-channels",
-}
-OPTIONAL_VALUE_FLAGS = {"--resume", "-r"}
+
+
+def _option_action(
+    token: str, options: dict[str, argparse.Action]
+) -> tuple[argparse.Action | None, bool]:
+    """Resolve a declared option and whether its value is attached to the token."""
+    option, separator, _value = token.partition("=")
+    if option in options:
+        return options[option], bool(separator)
+    if token.startswith("--"):
+        matches = [action for name, action in options.items() if name.startswith(option)]
+        return (matches[0], bool(separator)) if len(matches) == 1 else (None, False)
+    # argparse accepts both attached values (-sname) and short flag clusters.
+    for index, letter in enumerate(token[1:], start=1):
+        action = options.get(f"-{letter}")
+        if action is None:
+            return None, False
+        if action.nargs != 0:
+            return action, index < len(token) - 1
+    return None, False
 
 
 def detect_first_arg(argv: list[str]) -> str | None:
+    from koder_agent.cli import _build_cli_parser
+
+    # The real parser is the single source of option arity. A second hand-kept
+    # flag list previously treated --bare as valued and missed --image/plugin-dir.
+    options = {
+        option: action
+        for action in _build_cli_parser(None)._actions
+        for option in action.option_strings
+    }
     index = 0
     while index < len(argv):
         token = argv[index]
-        if token in {"-p", "--print"}:
+        if token == "--":
+            # Explicit positional text must not be reinterpreted as a subcommand.
             return None
-        if not token.startswith("-"):
+        if not token.startswith("-") or token == "-":
             return token
-        if token in FLAGS_WITH_VALUE:
+        action, attached = _option_action(token, options)
+        if action is None:
+            index += 1
+            continue
+        if action.dest == "print_prompt":
+            return None
+        if attached:
+            index += 1
+            continue
+        if action.nargs is None:
             index += 2
             continue
-        if token in OPTIONAL_VALUE_FLAGS:
+        if action.nargs == "?":
             if index + 1 < len(argv) and not argv[index + 1].startswith("-"):
                 index += 2
             else:

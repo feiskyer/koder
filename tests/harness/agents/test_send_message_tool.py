@@ -363,6 +363,9 @@ def test_execute_agent_run_exposes_team_context_to_send_message(tmp_path, monkey
             self.session_id = session_id
             self.items = []
 
+        def close(self):
+            pass
+
         async def get_items(self):
             return self.items
 
@@ -437,6 +440,9 @@ def test_execute_agent_run_cleans_up_agent_mcp_servers(tmp_path, monkeypatch):
     class FakeSession:
         def __init__(self, session_id):
             self.session_id = session_id
+
+        def close(self):
+            pass
 
         async def get_items(self):
             return []
@@ -520,6 +526,9 @@ def test_execute_agent_run_partial_initialization_closes_owner_once(
         def __init__(self, session_id):
             if failure_boundary == "session":
                 raise RuntimeError("session failed")
+
+        def close(self):
+            pass
 
         async def get_items(self):
             if failure_boundary == "get_items":
@@ -622,7 +631,8 @@ def test_send_message_to_stopped_agent_indicates_stopped_state(tmp_path, monkeyp
         parsed = json.loads(result)
         assert parsed["status"] == "sent"
         assert parsed.get("agent_stopped") is True
-        assert "resume or re-spawn" in parsed.get("note", "")
+        assert "agent_tool(resume=agent_id)" in parsed.get("note", "")
+        assert parsed["delivery"] == "queued"
 
     asyncio.run(run())
 

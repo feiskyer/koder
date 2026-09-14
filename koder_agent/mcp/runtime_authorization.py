@@ -6,9 +6,11 @@ import asyncio
 import contextvars
 import inspect
 import logging
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Coroutine, Iterator
+from contextlib import contextmanager
 from typing import Any, Awaitable, Callable, Iterable, TypeVar
 
+from .iterators import close_async_iterator, closing_async_iterator
 from .server_config import MCPServerConfig, MCPServerScope
 
 logger = logging.getLogger(__name__)
@@ -97,8 +99,9 @@ async def _iterate_session_attribute(
             f"MCP session method '{_format_session_path(attribute_path)}' does not return "
             "an async iterator"
         )
-    async for item in result:
-        yield item
+    async with closing_async_iterator(result) as iterator:
+        async for item in iterator:
+            yield item
 
 
 class _MCPClientSessionInvocation(Coroutine[Any, Any, Any]):
@@ -163,12 +166,14 @@ class _MCPClientSessionInvocation(Coroutine[Any, Any, Any]):
         return self.__iterate_call()
 
     async def __iterate_call(self) -> AsyncIterator[Any]:
-        async for item in self.__iterate(
+        source = self.__iterate(
             self.__path,
             *self.__args,
             **self.__kwargs,
-        ):
-            yield item
+        )
+        async with closing_async_iterator(source) as iterator:
+            async for item in iterator:
+                yield item
 
 
 class _MCPClientSessionPath:
@@ -276,6 +281,15 @@ class ProjectServerAuthorizationValidator:
         active = _ACTIVE_ADMISSION.get()
         return active is not None and active[0] is self
 
+    @contextmanager
+    def _operation_context(self) -> Iterator[None]:
+        """Grant nested-call admission only while server code is executing."""
+        token = _ACTIVE_ADMISSION.set((self, asyncio.current_task()))
+        try:
+            yield
+        finally:
+            _ACTIVE_ADMISSION.reset(token)
+
     async def _invoke_authorized_session_path(
         self,
         attribute_path: _SessionPath,
@@ -319,26 +333,26 @@ class ProjectServerAuthorizationValidator:
             else None
         )
         if iterate_session is not None:
-            async for item in self._run_authorized_iterator(
+            source = self._run_authorized_iterator(
                 iterate_session,
                 attribute_path,
                 *args,
                 **kwargs,
-            ):
-                yield item
-            return
+            )
+        else:
 
-        async def _iterate_current_session() -> AsyncIterator[Any]:
-            async for item in _iterate_session_attribute(
-                self._koder_raw_session(),
-                attribute_path,
-                *args,
-                **kwargs,
-            ):
-                yield item
+            def _iterate_current_session() -> AsyncIterator[Any]:
+                return _iterate_session_attribute(
+                    self._koder_raw_session(),
+                    attribute_path,
+                    *args,
+                    **kwargs,
+                )
 
-        async for item in self._run_authorized_iterator(_iterate_current_session):
-            yield item
+            source = self._run_authorized_iterator(_iterate_current_session)
+        async with closing_async_iterator(source) as iterator:
+            async for item in iterator:
+                yield item
 
     def _revalidate(self, *, approval_lock_held: bool = False) -> bool:
         if self.config.scope != MCPServerScope.PROJECT:
@@ -431,6 +445,7 @@ class ProjectServerAuthorizationValidator:
         self,
         *,
         wait_for_cleanup: bool = True,
+        wait_for_in_flight: bool = True,
         propagate_cleanup_failure: bool = True,
     ) -> None:
         async with self._state_lock:
@@ -441,6 +456,8 @@ class ProjectServerAuthorizationValidator:
             # still be denied after revocation, while avoiding a cleanup wait
             # that would deadlock if its admitted parent is awaiting the child.
             active_operation = self._has_active_admission_context()
+            if self._in_flight and not wait_for_in_flight:
+                wait_for_cleanup = False
 
         if not wait_for_cleanup or active_operation:
             return
@@ -500,16 +517,7 @@ class ProjectServerAuthorizationValidator:
                     self._notify_state_locked()
 
         if not authorized:
-            try:
-                await self._wait_for_cleanup()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                logger.debug(
-                    "Cleanup failed after denied project MCP admission for '%s'",
-                    self.config.name,
-                    exc_info=True,
-                )
+            await self._revoke(wait_for_in_flight=False, propagate_cleanup_failure=False)
             raise self._authorization_error()
 
     async def disable(self) -> None:
@@ -520,19 +528,30 @@ class ProjectServerAuthorizationValidator:
         """Idempotent lifecycle cleanup using the revocation boundary."""
         await self.disable()
 
-    async def validate(self, *, propagate_cleanup_failure: bool = True) -> bool:
+    async def validate(
+        self,
+        *,
+        propagate_cleanup_failure: bool = True,
+        wait_for_in_flight: bool = True,
+    ) -> bool:
         """Observe current trust and revoke the handle if it is stale."""
         async with self._state_lock:
             disabled = self.disabled
 
         if disabled:
-            await self._revoke(propagate_cleanup_failure=propagate_cleanup_failure)
+            await self._revoke(
+                propagate_cleanup_failure=propagate_cleanup_failure,
+                wait_for_in_flight=wait_for_in_flight,
+            )
             return False
 
         if self._revalidate():
             return True
 
-        await self._revoke(propagate_cleanup_failure=propagate_cleanup_failure)
+        await self._revoke(
+            propagate_cleanup_failure=propagate_cleanup_failure,
+            wait_for_in_flight=wait_for_in_flight,
+        )
         logger.warning(
             "Project MCP server '%s' disabled because approval or execution identity changed",
             self.config.name,
@@ -556,17 +575,19 @@ class ProjectServerAuthorizationValidator:
             result = operation(*args, **kwargs)
             return await result if inspect.isawaitable(result) else result
 
-        if not await self.validate(propagate_cleanup_failure=False):
+        # Rejected work must not wait for other admitted work to drain: the
+        # caller may itself own a paused iterator that it can only close after
+        # this call returns. Explicit validate/cleanup still await the drain.
+        if not await self.validate(propagate_cleanup_failure=False, wait_for_in_flight=False):
             raise self._authorization_error()
         await self._after_preflight_validation()
         await self._admit()
 
-        token = _ACTIVE_ADMISSION.set((self, asyncio.current_task()))
         try:
-            result = operation(*args, **kwargs)
-            return await result if inspect.isawaitable(result) else result
+            with self._operation_context():
+                result = operation(*args, **kwargs)
+                return await result if inspect.isawaitable(result) else result
         finally:
-            _ACTIVE_ADMISSION.reset(token)
             await asyncio.shield(self._finish_operation())
 
     async def _run_authorized_iterator(
@@ -575,34 +596,40 @@ class ProjectServerAuthorizationValidator:
         *args: Any,
         **kwargs: Any,
     ) -> AsyncIterator[Any]:
-        """Admit and track one session-backed async iterator through exhaustion."""
+        """Keep admission for the stream, without granting it to its consumer."""
+        owns_admission = not self._is_active_operation()
+        if owns_admission:
+            if not await self.validate(propagate_cleanup_failure=False, wait_for_in_flight=False):
+                raise self._authorization_error()
+            await self._after_preflight_validation()
+            await self._admit()
 
-        async def _iterate_operation() -> AsyncIterator[Any]:
-            result = operation(*args, **kwargs)
-            if inspect.isawaitable(result):
-                result = await result
-            if not hasattr(result, "__aiter__"):
-                raise TypeError("MCP session operation does not return an async iterator")
-            async for item in result:
-                yield item
-
-        if self._is_active_operation():
-            async for item in _iterate_operation():
-                yield item
-            return
-
-        if not await self.validate(propagate_cleanup_failure=False):
-            raise self._authorization_error()
-        await self._after_preflight_validation()
-        await self._admit()
-
-        token = _ACTIVE_ADMISSION.set((self, asyncio.current_task()))
+        iterator: AsyncIterator[Any] | None = None
         try:
-            async for item in _iterate_operation():
+            with self._operation_context():
+                result = operation(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                if not hasattr(result, "__aiter__"):
+                    raise TypeError("MCP session operation does not return an async iterator")
+                iterator = aiter(result)
+            while True:
+                # Never retain a ContextVar token across yield. Besides
+                # leaking bypass authority, aclose may run in another task.
+                with self._operation_context():
+                    try:
+                        item = await anext(iterator)
+                    except StopAsyncIteration:
+                        return
                 yield item
         finally:
-            _ACTIVE_ADMISSION.reset(token)
-            await asyncio.shield(self._finish_operation())
+            try:
+                if iterator is not None:
+                    with self._operation_context():
+                        await close_async_iterator(iterator)
+            finally:
+                if owns_admission:
+                    await asyncio.shield(self._finish_operation())
 
     def bind_server(self, server: Any) -> None:
         """Bind the guarded identity to a raw server or a stable live handle.

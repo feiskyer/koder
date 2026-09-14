@@ -168,7 +168,8 @@ def interpreter_payload_violation(command: str) -> str | None:
                     f"command runs an inline {base} payload; "
                     "interpreter code cannot be verified by preflight"
                 )
-            # Interpreter found but no inline flag — it runs a script file, safe.
+            # No inline payload was identified. This heuristic does not inspect
+            # script contents or establish that the interpreter invocation is safe.
             break
         if base in _COMMAND_PREFIXES:
             # Look past wrapper commands (env, sudo, etc.) to the next token.
@@ -217,10 +218,9 @@ def protected_write_violation(
         raw = Path(token).expanduser()
         if not raw.is_absolute():
             raw = repo_root / raw
-        # Resolve symlinks via os.path.realpath to defeat TOCTOU attacks where a
-        # symlink initially points to a safe path but targets a protected path at
-        # check time (finding H3). realpath always resolves the full chain even for
-        # non-existent trailing components.
+        # Check the currently resolved symlink target, including nonexistent
+        # trailing components. The filesystem can change after this check;
+        # realpath is not a race-free substitute for backend enforcement.
         candidate = Path(os.path.realpath(str(raw)))
         for protected_root in protected_roots:
             if candidate == protected_root or _is_under(candidate, protected_root):

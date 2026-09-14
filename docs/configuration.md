@@ -25,6 +25,21 @@ Koder uses a YAML config file at `~/.koder/config.yaml` for persistent settings.
 
 The `koder` executable enters through the product runtime entrypoint with config at `~/.koder/config.yaml`.
 
+`koder --help`, `koder --version`, and `koder config ...` are maintenance paths:
+they do not require successful model/permission initialization. In particular,
+`koder config validate` can explain malformed YAML instead of failing while
+trying to initialize the agent from that same file.
+
+CLI and interactive configuration writes share the same persistence path.
+Writes publish a complete UTF-8 snapshot atomically; new files are private, and
+existing file modes and config symlinks are preserved. `ConfigChange` hooks see
+the proposed file. If a hook rejects the change or raises, the previous file is
+restored and the rejected in-memory cache is invalidated. External side effects
+performed by a hook cannot be rolled back. Configuration remains a whole-document,
+replacement interface. Cooperating writers serialize their changes and reject
+stale loaded snapshots; this is not a transaction guarantee against direct
+external writers or process crashes.
+
 ```yaml
 # ~/.koder/config.yaml
 
@@ -129,6 +144,13 @@ Permission rules live under `permissions.allow` / `permissions.deny` as `"tool_n
 
 ## Settings Bundles
 
+`config edit` runs the editor as an argument vector, edits a private temporary
+candidate, and publishes only a successful, valid edit. Paths with spaces are
+passed as one argument. If another writer changed the configuration while the
+editor was open, the stale candidate is rejected without overwriting the winner.
+Ordinary saves and migrations coordinate publication, ConfigChange decisions and
+rollback using the same per-file writer lock.
+
 Koder can export and import a local settings bundle for machine-to-machine setup or backup. Bundles include known Koder config, settings, keybindings, user memories, project memories, and project session notes. Token stores, model caches, transcripts, task records, plugin caches, and arbitrary files are not included.
 
 ```bash
@@ -139,6 +161,40 @@ koder config import ~/koder-settings.json
 ```
 
 Export and import scopes are `all`, `user`, and `project`. Import writes into the current `HOME` and current project, validates checksums, rejects unsafe relative paths, and creates timestamped backups before replacing existing files.
+
+Import validates every selected entry before publishing changes, including its
+role/scope, content type, checksum and target. Duplicate targets and symlinked
+storage boundaries are rejected. A write failure triggers rollback of targets
+already changed; retained backups support recovery if rollback itself fails.
+This is exception recovery, not an all-or-nothing transaction across process
+crashes or concurrent writers.
+
+Import captures the existing hook definitions before writing any destination.
+After publishing the complete candidate bundle, it dispatches `ConfigChange`
+for each changed configuration file using that same pre-import snapshot:
+
+| Imported file | `ConfigChange` source and matcher |
+|---|---|
+| User `config.yaml`, `settings.json`, or `keybindings.json` | `user_settings` |
+| Project `.koder/settings.json` | `project_settings` |
+| Project `.koder/settings.local.json` | `local_settings` |
+
+Newly imported hooks or `disableAllHooks` cannot replace the rules judging that
+import. A synchronous blocking hook or raised exception triggers rollback of the
+whole applied batch while its writer locks are held. A confirmed newer external
+file is preserved and incomplete rollback is reported. New project hook content
+does not inherit the previous content's approval. No-op imports and `--dry-run`
+do not execute hooks; imported memory documents are not `ConfigChange` events.
+
+The snapshot freezes hook definitions, not arbitrary scripts they reference.
+Existing `async`, `once` and exit-code semantics still apply: async hooks cannot
+veto the import, and hook side effects cannot be undone. Lock-free readers can
+observe provisional files before a rollback; import is not a crash-safe,
+serializable multi-file transaction.
+
+Exported bundles are written with private `0600` permissions on supported local
+filesystems. They are not sanitized sharing artifacts: configuration and memory
+can still contain secrets, even though dedicated token stores are excluded.
 
 ## Managed Settings
 
@@ -154,6 +210,103 @@ Managed settings are local files. Koder does not fetch a hosted managed-settings
 See the [Sandbox Guide](sandbox.md) for sandbox backend selection, enable/disable commands, and status fields.
 
 ## Provider Setup
+
+Koder's OAuth model names remain `google/...`, `claude/...`, `chatgpt/...` and
+`antigravity/...`. Agent and auxiliary requests translate these names at the
+request boundary to private SDK routing identifiers. The raw model name is
+restored before the Koder handler runs, and response/stream model fields retain
+the public name. Koder no longer removes GPT/Codex names from LiteLLM's native
+model catalogs to influence dispatch.
+
+OAuth endpoints and credentials belong to the selected Koder handler. An
+unrelated API key, base URL or API client is not forwarded for these requests;
+request options cannot override the selected provider. Private-name collisions
+with SDK-native routes or other registered handlers fail explicitly. These
+identifiers coordinate routing, not authorization against other Python code
+in the same process.
+
+Ordinary Koder setup does not claim public provider aliases in the SDK registry.
+For integrations explicitly calling the legacy `register_oauth_providers()`,
+unrelated custom-provider entries are retained and conflicting public aliases
+raise before mutation; that low-level registration does not override SDK-native
+dispatch rules. Private route registration similarly checks current SDK state
+instead of trusting an old success flag.
+
+Streaming requests own their transports separately. EOF, errors, cancellation
+and explicit close release that request's stream without sharing lifecycle state
+with another request. When SDK tracing is enabled, consume and close the SDK event
+iterator in the same async context; transport cleanup is cancellation-safe.
+These contracts do not substitute for live acceptance against each provider.
+
+### OAuth Refresh and Cancellation
+
+The four OAuth handlers acquire credentials asynchronously. CLI client setup,
+agent model snapshots, auxiliary model resolution, and async auth commands move
+blocking credential I/O to owned worker threads. Cancelling a caller waits for
+its started I/O to finish; it does not leave a token write running after that
+caller exits. Synchronous compatibility APIs remain blocking.
+
+Cooperating refreshes for the same provider and token directory share a separate
+private refresh lock. After acquiring it, each caller rereads the credentials:
+it reuses a newer valid token or stops if the account was removed or replaced
+with an expired snapshot. Network work does not hold the short token mutation
+lock, so local deletion can still proceed. A refresh result is saved only if its
+original token snapshot remains current; it cannot recreate a deleted account
+or overwrite a different login.
+
+Refresh coordination and the provider request share a 30-second deadline.
+Provider cancellation cleanup and local I/O are still joined, so this is not a
+hard upper bound on elapsed time. A caller cancelled while waiting for the
+refresh lock stops before sending a request. If refresh has already started,
+Koder waits for its result and conditional publication before propagating the
+caller cancellation, because the provider may have rotated the refresh token.
+
+These locks coordinate the same local token directory, not old clients or
+direct credential writers. Different token directories do not coordinate a
+shared native credential backend. Exact same-value delete/re-login cycles are
+not distinguishable by snapshot comparison; process termination, failed
+publication, or a response lost after upstream rotation can still require a new
+login. These guarantees do not cover every synchronous metadata path, manual
+stdin input, or actual provider/Keychain acceptance.
+
+### OAuth Records in Keychain
+
+On macOS, Koder accesses the existing file-based Keychain through a short-lived
+native helper. Service, account and credential data travel through a private
+stdin/stdout protocol, not child-process arguments or credential environment
+variables. UTF-8 values retain whitespace, newlines and embedded NULs; generic
+hexadecimal-looking passwords are not decoded as hexadecimal.
+Service/account identifiers must be nonempty and NUL-free. Empty identifiers
+must not silently become unconstrained native lookup or deletion predicates.
+
+Checked reads/deletions recognize only the complete native `errSecItemNotFound`
+status as absence. A process exit code, timeout, malformed response, locked
+keychain or denied access is not proof of absence. Each helper call has a
+five-second timeout. If a mutation's result is lost, its outcome is reported as
+uncertain; TokenStorage does not then overwrite or remove an existing fallback
+file as though it knew the native write had failed.
+
+The helper keeps the file-based store and search-list behavior used by the old
+`security` CLI backend. It updates existing items rather than deleting and
+recreating them, preserving their ACLs. It does not change search lists or grant
+broader access. The helper suppresses interactive prompts for its operation and
+restores its previous interaction setting before exit.
+
+Existing item ACLs may not authorize the Python helper identity. Such access
+failures are reported rather than silently treated as missing credentials.
+Known unavailable/failed writes retain the existing private-file fallback
+policy; an indeterminate mutation is not a known failure. Native ACL/UI
+compatibility is platform-dependent and is not established by synthetic tests.
+
+The file-based compatibility APIs are deprecated by Apple. Switching to the
+data-protection keychain requires a separate storage/signing/migration design;
+this backend does not silently move existing credentials to it. This is not
+isolation from arbitrary native code running as the same user.
+
+OAuth records retain single-line ASCII JSON for legacy readers. Older pretty
+JSON and legacy hex-encoded OAuth records remain readable at the OAuth boundary.
+Reading them does not rewrite them. Empty or malformed records fail strict
+refresh comparison and cannot authorize replacement.
 
 ### Quick Start (Any Provider)
 
@@ -285,6 +438,21 @@ the vendored map with:
 ```bash
 uv run scripts/update_litellm_model_cost_map.py
 ```
+
+Importing `koder_agent` or its basic goal/cancellation utilities does not initialize
+LiteLLM, load the price table, or trigger the SDK's dotenv loader. The existing
+local-cost-map environment flag is retained. Model-facing modules initialize the
+SDK through a shared boundary and install the vendored table before using model
+metadata or pricing. Unknown custom model entries survive that installation.
+Provider initialization can still have its SDK's own effects; this is not a
+promise that importing every high-level model or CLI module is side-effect-free.
+
+The public package version, CLI banner and `/version` share installed distribution
+metadata. Without installed metadata, the resolver can read this checkout's static
+`pyproject.toml`; if neither source is available, it reports `unknown` rather than
+a stale hard-coded release. On supported Python versions, source parsing uses
+standard-library `tomllib`. Version resolution itself does not query a provider
+or fetch release information.
 
 ## MCP Servers
 

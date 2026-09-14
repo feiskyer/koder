@@ -1,24 +1,30 @@
-"""Utilities for Koder Agent."""
+"""Utilities, with public exports loaded only when requested.
 
-from .client import get_model_name, setup_openai_client
-from .prompts import KODER_SYSTEM_PROMPT
-from .queue import AsyncMessageQueue
-from .sessions import (
-    default_session_local_ms,
-    parse_session_dt,
-    picker_arrows,
-    picker_arrows_with_titles,
-    sort_sessions_desc,
-)
+Importing a low-level helper must not initialize provider/client dependencies.
+In particular, cancellation helpers are also used by the client module.
+"""
 
-__all__ = [
-    "AsyncMessageQueue",
-    "KODER_SYSTEM_PROMPT",
-    "default_session_local_ms",
-    "get_model_name",
-    "parse_session_dt",
-    "picker_arrows",
-    "picker_arrows_with_titles",
-    "setup_openai_client",
-    "sort_sessions_desc",
-]
+from importlib import import_module
+
+_EXPORT_MODULES = {
+    "AsyncMessageQueue": ".queue",
+    "KODER_SYSTEM_PROMPT": ".prompts",
+    "default_session_local_ms": ".sessions",
+    "get_model_name": ".client",
+    "parse_session_dt": ".sessions",
+    "picker_arrows": ".sessions",
+    "picker_arrows_with_titles": ".sessions",
+    "setup_openai_client": ".client",
+    "sort_sessions_desc": ".sessions",
+}
+
+__all__ = list(_EXPORT_MODULES)
+
+
+def __getattr__(name: str):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name, __name__), name)
+    globals()[name] = value
+    return value

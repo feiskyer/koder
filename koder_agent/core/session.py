@@ -5,8 +5,8 @@ This module extends the official agents.SQLiteSession to add:
 - Token estimation helpers
 - Separate metadata storage for extensibility
 
-Conversation compaction is intentionally NOT handled here; it is owned by the
-scheduler so there is a single, modern compaction path.
+Conversation summarization is owned by the scheduler. Storage owns append-time
+tool-output truncation and the read evidence invalidated by history mutations.
 """
 
 import asyncio
@@ -17,14 +17,59 @@ import threading
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-import aiosqlite
 import tiktoken
 from agents import SQLiteSession
 from agents.items import TResponseInputItem
 
 from ..utils.client import llm_completion
+from ..utils.sqlite_connections import sqlite_connection
+from .legacy_sessions import migrate_legacy_sessions as migrate_legacy_sessions
+
+if TYPE_CHECKING:
+    from aiosqlite import Connection
+
+    from ..tools.file_state import ReadFileState
+
+
+_METADATA_ADDITIONAL_COLUMNS = ("cwd", "agent", "tag", "color")
+
+
+async def _metadata_columns(conn: "Connection") -> set[str]:
+    cursor = await conn.execute("PRAGMA table_info(session_metadata)")
+    try:
+        return {row[1] for row in await cursor.fetchall()}
+    finally:
+        await cursor.close()
+
+
+async def _ensure_metadata_schema(conn: "Connection") -> None:
+    """Upgrade on a fresh, caller-owned connection; close rolls back failure.
+
+    The fast path is read-only. If migration is needed, acquire the writer
+    transaction *before* rechecking columns, so another opener cannot race
+    between the schema inspection and ALTER TABLE.
+    """
+    if set(_METADATA_ADDITIONAL_COLUMNS).issubset(await _metadata_columns(conn)):
+        return
+    await conn.execute("BEGIN IMMEDIATE")
+    await conn.execute("""CREATE TABLE IF NOT EXISTS session_metadata (
+            session_id TEXT PRIMARY KEY,
+            title TEXT,
+            tag TEXT,
+            color TEXT,
+            agent TEXT,
+            cwd TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+    columns = await _metadata_columns(conn)
+    for name in _METADATA_ADDITIONAL_COLUMNS:
+        if name not in columns:
+            # Identifiers come only from the fixed migration list above.
+            await conn.execute(f"ALTER TABLE session_metadata ADD COLUMN {name} TEXT")
+    await conn.commit()
 
 
 class _ReplacementCancelledError(Exception):
@@ -67,98 +112,6 @@ class _ReplacementCoordinator:
             self._commit_started = True
 
 
-async def migrate_legacy_sessions(db_path: str) -> int:
-    """Migrate legacy sessions from ctx table to new SQLiteSession format.
-
-    This function:
-    1. Checks if the old `ctx` table exists
-    2. Checks if migration has already been performed
-    3. Migrates all sessions and titles to the new format
-    4. Marks migration as complete
-
-    The old `ctx` table is kept for a grace period as backup.
-
-    Args:
-        db_path: Path to the SQLite database
-
-    Returns:
-        Number of legacy sessions migrated during this call.
-    """
-    async with aiosqlite.connect(db_path) as conn:
-        # Check if legacy ctx table exists
-        cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='ctx'"
-        )
-        if not await cursor.fetchone():
-            return 0  # No legacy data to migrate
-
-        # Check if migration already done
-        cursor = await conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='migration_status'"
-        )
-        if await cursor.fetchone():
-            return 0  # Already migrated
-
-        # Create session_metadata table if not exists
-        await conn.execute("""CREATE TABLE IF NOT EXISTS session_metadata (
-                session_id TEXT PRIMARY KEY,
-                title TEXT,
-                tag TEXT,
-                color TEXT,
-                agent TEXT,
-                cwd TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )""")
-
-        # Get all legacy sessions
-        cursor = await conn.execute("SELECT sid, msgs, title FROM ctx")
-        sessions = await cursor.fetchall()
-
-        # First, close this connection to avoid locks
-        await conn.commit()
-
-    # Now migrate each session with separate connections
-    migrated_count = 0
-    for session_id, msgs_json, title in sessions:
-        try:
-            # Parse messages
-            messages = json.loads(msgs_json) if msgs_json else []
-
-            if messages:
-                # Create SQLiteSession instance and add items
-                # This will open its own connection
-                session = SQLiteSession(session_id, db_path)
-                await session.add_items(messages)
-
-            # Migrate title to session_metadata table (separate connection)
-            if title:
-                async with aiosqlite.connect(db_path) as title_conn:
-                    await title_conn.execute(
-                        """INSERT OR REPLACE INTO session_metadata
-                        (session_id, title) VALUES (?, ?)""",
-                        (session_id, title),
-                    )
-                    await title_conn.commit()
-
-            migrated_count += 1
-
-        except Exception:
-            continue
-
-    # Mark migration as complete (separate connection)
-    async with aiosqlite.connect(db_path) as conn:
-        await conn.execute("""CREATE TABLE migration_status (
-                migrated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                migrated_sessions INTEGER
-            )""")
-        await conn.execute(
-            "INSERT INTO migration_status (migrated_sessions) VALUES (?)", (migrated_count,)
-        )
-        await conn.commit()
-    return migrated_count
-
-
 class EnhancedSQLiteSession(SQLiteSession):
     """Extended SQLiteSession with title and metadata management.
 
@@ -167,10 +120,10 @@ class EnhancedSQLiteSession(SQLiteSession):
     2. LLM-based title generation from first user message
     3. Token estimation helpers used by the scheduler
 
-    The session itself is a pure storage layer. Conversation compaction is
-    owned entirely by the scheduler (``AutoCompactManager`` +
-    ``llm_compact_messages``); ``add_items`` no longer performs any
-    summarization.
+    Conversation summarization is owned by the scheduler
+    (``AutoCompactManager`` + ``llm_compact_messages``); ``add_items`` does not
+    summarize. Ephemeral file-read evidence belongs to this actual Session and
+    is invalidated when its stored context changes or the Session closes.
     """
 
     def __init__(
@@ -189,6 +142,11 @@ class EnhancedSQLiteSession(SQLiteSession):
                                    (e.g. the scheduler's legacy suppression
                                    hack). It no longer triggers any behavior.
         """
+        # Read-before-write evidence is ephemeral conversation state, not
+        # process-global state or persisted authorization. Initialize it lazily
+        # so metadata-only Session users do not import the tool registry.
+        self._file_read_state: Optional["ReadFileState"] = None
+
         # Set up database path
         if db_path is None:
             home_dir = os.path.expanduser("~")
@@ -219,30 +177,42 @@ class EnhancedSQLiteSession(SQLiteSession):
 
                 self.encoder = _NaiveEncoder()
 
+    @property
+    def file_read_state(self) -> "ReadFileState":
+        """Return this live Session's read evidence, shared across its turns."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("SQLiteSession is closed")
+            if self._file_read_state is None:
+                from ..tools.file_state import ReadFileState
+
+                self._file_read_state = ReadFileState()
+            return self._file_read_state
+
+    def _invalidate_file_read_state(self) -> None:
+        if self._file_read_state is not None:
+            self._file_read_state.invalidate_all()
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._invalidate_file_read_state()
+
+    async def clear_session(self) -> None:
+        # SDK mutations can finish on their worker after cancellation. Invalidate
+        # before admission rather than leaving stale evidence in that case.
+        self._invalidate_file_read_state()
+        await super().clear_session()
+
+    async def pop_item(self) -> TResponseInputItem | None:
+        self._invalidate_file_read_state()
+        return await super().pop_item()
+
     async def _ensure_metadata_table(self) -> None:
         """Ensure the session_metadata table exists."""
-        async with aiosqlite.connect(self.db_path) as conn:
-            await conn.execute("""CREATE TABLE IF NOT EXISTS session_metadata (
-                    session_id TEXT PRIMARY KEY,
-                    title TEXT,
-                    tag TEXT,
-                    color TEXT,
-                    agent TEXT,
-                    cwd TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )""")
-            cursor = await conn.execute("PRAGMA table_info(session_metadata)")
-            columns = {row[1] for row in await cursor.fetchall()}
-            if "cwd" not in columns:
-                await conn.execute("ALTER TABLE session_metadata ADD COLUMN cwd TEXT")
-            if "agent" not in columns:
-                await conn.execute("ALTER TABLE session_metadata ADD COLUMN agent TEXT")
-            if "tag" not in columns:
-                await conn.execute("ALTER TABLE session_metadata ADD COLUMN tag TEXT")
-            if "color" not in columns:
-                await conn.execute("ALTER TABLE session_metadata ADD COLUMN color TEXT")
-            await conn.commit()
+        async with sqlite_connection(self.db_path) as conn:
+            await _ensure_metadata_schema(conn)
 
     @classmethod
     async def collect_local_stats(cls, db_path: Optional[str] = None) -> dict[str, object]:
@@ -260,7 +230,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         try:
             await session._ensure_metadata_table()
             try:
-                async with aiosqlite.connect(resolved_db_path) as conn:
+                async with sqlite_connection(resolved_db_path) as conn:
                     cursor = await conn.execute("""
                         SELECT session_id, created_at, updated_at
                         FROM session_metadata
@@ -332,7 +302,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         session = cls(session_id=session_id, db_path=resolved_db_path)
         try:
             await session._ensure_metadata_table()
-            async with aiosqlite.connect(resolved_db_path) as conn:
+            async with sqlite_connection(resolved_db_path) as conn:
                 await conn.execute(
                     """INSERT INTO session_metadata (session_id, cwd, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -355,7 +325,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         session = cls(session_id="metadata-probe", db_path=resolved_db_path)
         try:
             await session._ensure_metadata_table()
-            async with aiosqlite.connect(resolved_db_path) as conn:
+            async with sqlite_connection(resolved_db_path) as conn:
                 cursor = await conn.execute(
                     """SELECT session_id
                     FROM session_metadata
@@ -382,7 +352,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         session = cls(session_id=session_id, db_path=resolved_db_path)
         try:
             await session._ensure_metadata_table()
-            async with aiosqlite.connect(resolved_db_path) as conn:
+            async with sqlite_connection(resolved_db_path) as conn:
                 await conn.execute(
                     """INSERT INTO session_metadata (session_id, agent, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -435,8 +405,10 @@ class EnhancedSQLiteSession(SQLiteSession):
             await super().add_items(items)
             return
 
-        items = self._apply_micro_compaction(items)
-        await super().add_items(items)
+        compacted_items = self._apply_micro_compaction(items)
+        if compacted_items != items:
+            self._invalidate_file_read_state()
+        await super().add_items(compacted_items)
 
     async def replace_items(self, items: list[TResponseInputItem]) -> None:
         """Atomically replace this session's ordered conversation items.
@@ -474,6 +446,10 @@ class EnhancedSQLiteSession(SQLiteSession):
 
         if outcome is _ReplacementOutcome.CANCELLED:
             raise asyncio.CancelledError
+
+        # Exact replacement reports success only once commit has won. Clear the
+        # owner's evidence here so compaction, rewind and repair share a boundary.
+        self._invalidate_file_read_state()
 
     def _replace_items_sync(
         self,
@@ -646,7 +622,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         """
         try:
             await self._ensure_metadata_table()
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 cursor = await conn.execute(
                     "SELECT title FROM session_metadata WHERE session_id = ?", (self.session_id,)
                 )
@@ -663,7 +639,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         """
         try:
             await self._ensure_metadata_table()
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 await conn.execute(
                     """INSERT INTO session_metadata (session_id, title, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -680,7 +656,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         """Get the tag for this session."""
         try:
             await self._ensure_metadata_table()
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 cursor = await conn.execute(
                     "SELECT tag FROM session_metadata WHERE session_id = ?",
                     (self.session_id,),
@@ -697,7 +673,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         try:
             await self._ensure_metadata_table()
             normalized = tag.strip() if tag and tag.strip() else None
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 await conn.execute(
                     """INSERT INTO session_metadata (session_id, tag, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -715,7 +691,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         """Get the display color for this session."""
         try:
             await self._ensure_metadata_table()
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 cursor = await conn.execute(
                     "SELECT color FROM session_metadata WHERE session_id = ?",
                     (self.session_id,),
@@ -732,7 +708,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         try:
             await self._ensure_metadata_table()
             normalized = color.strip() if color and color.strip() else None
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 await conn.execute(
                     """INSERT INTO session_metadata (session_id, color, updated_at)
                     VALUES (?, ?, CURRENT_TIMESTAMP)
@@ -750,7 +726,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         """Get the recorded working directory for this session."""
         try:
             await self._ensure_metadata_table()
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 cursor = await conn.execute(
                     "SELECT cwd FROM session_metadata WHERE session_id = ?",
                     (self.session_id,),
@@ -764,7 +740,7 @@ class EnhancedSQLiteSession(SQLiteSession):
         """Get the agent identity recorded for this session."""
         try:
             await self._ensure_metadata_table()
-            async with aiosqlite.connect(self.db_path) as conn:
+            async with sqlite_connection(self.db_path) as conn:
                 cursor = await conn.execute(
                     "SELECT agent FROM session_metadata WHERE session_id = ?",
                     (self.session_id,),
@@ -859,55 +835,34 @@ Examples of good titles:
             db_path = os.path.join(home_dir, ".koder", "koder.db")
 
         try:
-            async with aiosqlite.connect(db_path) as conn:
-                # Ensure metadata table exists
-                await conn.execute("""CREATE TABLE IF NOT EXISTS session_metadata (
-                        session_id TEXT PRIMARY KEY,
-                        title TEXT,
-                        tag TEXT,
-                        color TEXT,
-                        cwd TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )""")
-                cursor = await conn.execute("PRAGMA table_info(session_metadata)")
-                columns = {row[1] for row in await cursor.fetchall()}
-                if "cwd" not in columns:
-                    await conn.execute("ALTER TABLE session_metadata ADD COLUMN cwd TEXT")
-                if "tag" not in columns:
-                    await conn.execute("ALTER TABLE session_metadata ADD COLUMN tag TEXT")
-                if "color" not in columns:
-                    await conn.execute("ALTER TABLE session_metadata ADD COLUMN color TEXT")
+            async with sqlite_connection(db_path) as conn:
+                await _ensure_metadata_schema(conn)
 
-                # Get all sessions from the SQLiteSession table
-                # SQLiteSession stores data in an 'items' table
-                session_ids = set()
-
-                # Check if there's an 'items' table (SQLiteSession's storage table)
+                # Titles/cwd are optional metadata. Discover SDK session records
+                # and stored messages even when title generation never ran.
+                # Keep legacy items-only databases discoverable as well.
+                history_tables = ("agent_sessions", "agent_messages", "items")
                 cursor = await conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name='items'"
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?, ?)",
+                    history_tables,
                 )
-                if await cursor.fetchone():
-                    cursor = await conn.execute("SELECT DISTINCT session_id FROM items")
+                available_tables = {row[0] for row in await cursor.fetchall()}
+                session_ids = set()
+                for table_name in history_tables:
+                    if table_name not in available_tables:
+                        continue
+                    # The identifier comes only from the fixed tuple above.
+                    cursor = await conn.execute(f"SELECT DISTINCT session_id FROM {table_name}")
                     rows = await cursor.fetchall()
                     session_ids.update(row[0] for row in rows)
 
-                # Also get sessions from metadata table
-                cursor = await conn.execute("SELECT session_id FROM session_metadata")
-                rows = await cursor.fetchall()
-                session_ids.update(row[0] for row in rows)
+                # One metadata read retains metadata-only sessions and avoids
+                # issuing a separate title query for every stored session.
+                cursor = await conn.execute("SELECT session_id, title FROM session_metadata")
+                titles = {row[0]: row[1] or None for row in await cursor.fetchall()}
+                session_ids.update(titles)
 
-                # Get titles for all sessions
-                result = []
-                for session_id in session_ids:
-                    cursor = await conn.execute(
-                        "SELECT title FROM session_metadata WHERE session_id = ?", (session_id,)
-                    )
-                    row = await cursor.fetchone()
-                    title = row[0] if row and row[0] else None
-                    result.append((session_id, title))
-
-                return result
+                return [(session_id, titles.get(session_id)) for session_id in sorted(session_ids)]
 
         except Exception as e:
             print(f"[Session] Error listing sessions: {e}")

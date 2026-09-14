@@ -198,6 +198,7 @@ def test_write_redirection_is_blocked(monkeypatch):
 def test_readonly_git_status_still_runs(monkeypatch):
     """A read-only git subcommand still executes under the allowlist."""
     monkeypatch.delenv("KODER_SKILL_INLINE_COMMANDS", raising=False)
+    monkeypatch.chdir(project_root)
     # ``git rev-parse --show-toplevel`` is read-only and works in the repo.
     skill = _make_skill("Repo: !`git rev-parse --is-inside-work-tree`")
 

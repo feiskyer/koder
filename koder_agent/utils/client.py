@@ -7,13 +7,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-import backoff
-import litellm
 from agents import (
     set_default_openai_client,
     set_tracing_disabled,
 )
 from openai import AsyncOpenAI
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 from ..config import get_config, get_config_manager
 from ..core.turn_cancellation import await_with_turn_cancellation
@@ -23,9 +28,12 @@ from ..harness.memory.budget import (
     estimate_model_request_preflight,
     truncate_messages_to_token_budget,
 )
+from ..litellm_cost_map import get_litellm
+from .async_tasks import run_sync_owned
 from .model_deprecation import check_model_deprecation
 from .model_info import get_context_window_size, get_maximum_output_tokens, resolve_model_alias
 
+litellm = get_litellm()
 logger = logging.getLogger(__name__)
 
 
@@ -51,10 +59,6 @@ class LLMCompletionResult:
 # Suppress debug info from litellm
 litellm.suppress_debug_info = True
 litellm.drop_params = True
-
-# Register OAuth providers with LiteLLM
-# This must happen early so custom providers are available for model routing
-_oauth_providers_registered = False
 
 # LiteLLM changed exception namespace in some versions; unify access.
 _LITELLM_EXC = getattr(litellm, "exceptions", litellm)
@@ -146,19 +150,11 @@ _PROVIDER_MANAGED_AUTH_PROVIDERS = frozenset({"ollama", "vertex_ai", "bedrock"})
 
 
 def _ensure_oauth_providers_registered() -> None:
-    """Ensure OAuth providers are registered with LiteLLM.
-
-    This function is idempotent and will only register providers once.
-    """
-    global _oauth_providers_registered
-    if _oauth_providers_registered:
-        return
-
+    """Reconcile actual SDK state; a past success cannot certify a reset registry."""
     try:
         from ..auth.litellm_oauth import register_oauth_providers
 
         register_oauth_providers()
-        _oauth_providers_registered = True
     except ImportError:
         pass  # Auth module not available
 
@@ -418,9 +414,6 @@ def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = 
     if raw_model.startswith("litellm/"):
         return raw_model
 
-    # Ensure OAuth providers are registered before checking
-    _ensure_oauth_providers_registered()
-
     # Only parse provider from model string if it came from environment variable
     if model_from_env:
         explicit_provider, remainder, _ = _split_model_identifier(raw_model)
@@ -449,10 +442,18 @@ def _normalize_model_name(provider: str, raw_model: str, model_from_env: bool = 
 _native_vs_litellm_logged = False
 
 
-def _compute_effective_model(config, provider, raw_model, model_from_env=False):
+def _compute_effective_model(
+    config, provider, raw_model, model_from_env=False, *, resolve_credentials=True
+):
     """Determine the model name and whether to use native OpenAI integration."""
     global _native_vs_litellm_logged
-    api_key = _get_provider_api_key(config, provider)
+    # Non-native model identity does not depend on a credential. Status rendering
+    # and override-name lookup must not trigger a synchronous OAuth refresh.
+    api_key = (
+        _get_provider_api_key(config, provider)
+        if resolve_credentials or provider in ("openai", "custom")
+        else None
+    )
 
     # Determine whether to use native OpenAI client:
     # 1. Primary: known OpenAI model prefix (gpt-, o1-, o3-, o4-, chatgpt-, dall-e-)
@@ -460,7 +461,7 @@ def _compute_effective_model(config, provider, raw_model, model_from_env=False):
     #    (no sub-path like "x-ai/grok-...") and no custom base URL override.
     #    This catches new OpenAI model families whose names don't match known prefixes.
     use_native = False
-    if provider in ("openai", "custom") and api_key is not None:
+    if provider in ("openai", "custom") and api_key:
         if _is_openai_native_model(raw_model):
             use_native = True
         elif provider == "openai":
@@ -512,7 +513,9 @@ def _resolve_completion_settings(
 def get_model_name(model_override: Optional[str] = None):
     """Get the appropriate model name with priority: ENV > Config > Default."""
     config, _, provider, raw_model, model_from_env = _resolve_completion_settings(model_override)
-    model, _, _ = _compute_effective_model(config, provider, raw_model, model_from_env)
+    model, _, _ = _compute_effective_model(
+        config, provider, raw_model, model_from_env, resolve_credentials=False
+    )
     # Check for model deprecation and warn if applicable
     try:
         warning = check_model_deprecation(raw_model)
@@ -526,7 +529,9 @@ def get_model_name(model_override: Optional[str] = None):
 def resolve_model_override_name(raw_model: str) -> str:
     """Resolve a model override into the actual call model name."""
     config, _, provider, raw_model, model_from_env = _resolve_completion_settings(raw_model)
-    model, _, _ = _compute_effective_model(config, provider, raw_model, model_from_env)
+    model, _, _ = _compute_effective_model(
+        config, provider, raw_model, model_from_env, resolve_credentials=False
+    )
     return model
 
 
@@ -755,11 +760,12 @@ def get_configured_context_window(
     return get_context_window_size(model, max_context_size=parsed_override)
 
 
-@backoff.on_exception(
-    backoff.expo,
-    LITELLM_RETRYABLE_ERRORS,
-    max_tries=3,
-    jitter=backoff.full_jitter,
+@retry(
+    retry=retry_if_exception_type(LITELLM_RETRYABLE_ERRORS),
+    stop=stop_after_attempt(3),
+    wait=wait_random_exponential(multiplier=1),
+    before_sleep=before_sleep_log(logger, logging.INFO),
+    reraise=True,
 )
 async def llm_completion(
     messages: list,
@@ -807,16 +813,16 @@ async def llm_completion(
             'overflow_policy="truncate" requires return_metadata=True so truncation is surfaced'
         )
 
-    config, config_manager, provider, raw_model, model_from_env = _resolve_completion_settings(
-        model
+    config, config_manager, provider, raw_model, model_from_env = await run_sync_owned(
+        _resolve_completion_settings, model
     )
 
     # Ensure provider env vars are set (for litellm to pick up)
     _setup_provider_env_vars(config, provider)
 
     # Get model name and API key
-    model, use_native, api_key = _compute_effective_model(
-        config, provider, raw_model, model_from_env
+    model, use_native, api_key = await run_sync_owned(
+        _compute_effective_model, config, provider, raw_model, model_from_env
     )
 
     # When the model is OpenAI-native but llm_completion goes through litellm,
@@ -897,7 +903,7 @@ async def llm_completion(
         kwargs["base_url"] = base_url
 
     model_lower = str(model).lower()
-    is_copilot = "github_copilot/" in model_lower
+    is_copilot = model_lower.startswith("github_copilot/")
     extra_headers = None
     if is_copilot:
         # Reuse the shared static header set and add a fresh per-request id.
@@ -907,6 +913,9 @@ async def llm_completion(
         }
 
     if is_copilot and "codex" in model_lower:
+        # Import lazily: agentic's package initializer imports this client module.
+        from ..agentic.responses_compat import terminal_response_error
+
         if not hasattr(litellm, "aresponses"):
             raise RuntimeError(
                 "GitHub Copilot Codex models require LiteLLM Responses API support. "
@@ -926,12 +935,16 @@ async def llm_completion(
         if extra_headers:
             responses_kwargs["extra_headers"] = extra_headers
         response = await await_with_turn_cancellation(litellm.aresponses(**responses_kwargs))
+        if failure := terminal_response_error(response):
+            raise failure
         text = _extract_responses_text(response)
         return LLMCompletionResult(text=text, truncation=truncation) if return_metadata else text
 
     if extra_headers:
         kwargs["extra_headers"] = extra_headers
-    response = await await_with_turn_cancellation(litellm.acompletion(**kwargs))
+    from ..auth.oauth_routing import acompletion
+
+    response = await await_with_turn_cancellation(acompletion(**kwargs))
     text = response.choices[0].message.content
     return LLMCompletionResult(text=text, truncation=truncation) if return_metadata else text
 
@@ -993,12 +1006,9 @@ def setup_openai_client():
     """Set up the OpenAI client with priority: ENV > Config > Default.
 
     Also configures global LiteLLM retry settings for all providers.
-    Registers OAuth custom providers with LiteLLM if auth module is available.
+    OAuth calls select their Koder-owned handlers at the request boundary.
     """
     set_tracing_disabled(True)
-
-    # Register OAuth providers with LiteLLM
-    _ensure_oauth_providers_registered()
 
     config, config_manager, provider, raw_model, model_from_env = _resolve_model_settings()
 

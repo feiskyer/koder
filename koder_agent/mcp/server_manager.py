@@ -18,6 +18,7 @@ from typing import Generator, List, Optional
 import aiosqlite
 
 from ..config import MCPLocalProjectConfigYaml, MCPServerConfigYaml, get_config_manager
+from ..utils.sqlite_connections import sqlite_connection
 from .server_config import MCPServerConfig, MCPServerScope, MCPServerType
 
 logger = logging.getLogger(__name__)
@@ -264,7 +265,7 @@ class MCPServerManager:
                 return
 
             try:
-                async with aiosqlite.connect(db_path) as conn:
+                async with sqlite_connection(db_path) as conn:
                     cursor = await conn.execute(
                         "SELECT name FROM sqlite_master WHERE type='table' AND name='mcp_servers'"
                     )

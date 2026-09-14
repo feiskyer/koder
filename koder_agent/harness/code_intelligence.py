@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .execution_context import execution_path, get_execution_cwd
+
 MAX_INDEXED_FILE_SIZE = 1_000_000
 MAX_WORKSPACE_FILES = 2_000
 
@@ -180,7 +182,7 @@ def run_code_intelligence(
         target_query, source_file = _resolve_query(path, query, line, character)
         if isinstance(target_query, str) and target_query.startswith("Error:"):
             return target_query
-        root = Path.cwd().resolve()
+        root = get_execution_cwd().resolve()
         symbols = _workspace_symbols(root, query=target_query)
         matches = _rank_definition_matches(symbols, target_query, source_file)
         return _format_symbols(matches, f"Definitions for {target_query}", limit)
@@ -189,7 +191,7 @@ def run_code_intelligence(
         target_query, source_file = _resolve_query(path, query, line, character)
         if isinstance(target_query, str) and target_query.startswith("Error:"):
             return target_query
-        root = Path.cwd().resolve() if source_file is None else _workspace_root(path)
+        root = get_execution_cwd().resolve() if source_file is None else _workspace_root(path)
         references = _find_references(root, target_query, limit=limit)
         return _format_references(references, target_query, limit)
 
@@ -211,7 +213,7 @@ def _clamp_limit(limit: int) -> int:
 
 
 def _resolve_path(path: str | None) -> Path:
-    return (Path(path).expanduser() if path else Path.cwd()).resolve()
+    return (execution_path(path) if path else get_execution_cwd()).resolve()
 
 
 def _require_path(path: str | None) -> Path | str:
@@ -238,12 +240,12 @@ def _workspace_root(path: str | None) -> Path:
         return target.parent
     if target.is_dir():
         return target
-    return Path.cwd().resolve()
+    return get_execution_cwd().resolve()
 
 
 def _display_path(path: Path) -> str:
     try:
-        return str(path.resolve().relative_to(Path.cwd().resolve()))
+        return str(path.resolve().relative_to(get_execution_cwd().resolve()))
     except ValueError:
         return str(path)
 

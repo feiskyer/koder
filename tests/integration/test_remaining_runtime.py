@@ -1,17 +1,38 @@
 """Integration tests for remaining runtime features: memory, orchestrator, onboarding."""
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 
+@asynccontextmanager
+async def _memory_scheduler(session_id: str):
+    """Keep retrieval tests local and close every scheduler-owned resource."""
+    from koder_agent.core.scheduler import AgentScheduler
+
+    # Runner.run is mocked below, but title generation is a separate model
+    # request. Keep its real scheduling/persistence path with synthetic output.
+    with patch(
+        "koder_agent.core.session.llm_completion",
+        new_callable=AsyncMock,
+        return_value="Synthetic session title",
+    ):
+        scheduler = AgentScheduler(session_id=session_id, streaming=False)
+        try:
+            yield scheduler
+        finally:
+            await scheduler.cleanup()
+            assert scheduler._title_generation_task is None
+            assert scheduler.goal_store._conn is None
+            assert scheduler.session._closed
+
+
 @pytest.mark.asyncio
 async def test_memory_retrieval_called_on_first_turn(tmp_path):
     """Test that memory retrieval is called during first turn of a session."""
-    from koder_agent.core.scheduler import AgentScheduler
-
     # Create fake memory directories
     user_memory_dir = tmp_path / ".koder" / "memory"
     user_memory_dir.mkdir(parents=True)
@@ -34,29 +55,27 @@ async def test_memory_retrieval_called_on_first_turn(tmp_path):
 
         mock_retrieve.return_value = RetrievalResult(memories=[], token_count=0)
 
-        scheduler = AgentScheduler(session_id="test-memory", streaming=False)
+        async with _memory_scheduler("test-memory") as scheduler:
+            # Mock Runner.run to avoid actual execution
+            with patch("koder_agent.core.scheduler.Runner.run", new_callable=AsyncMock) as mock_run:
+                mock_result = MagicMock()
+                mock_result.final_output = "Test response"
+                mock_run.return_value = mock_result
 
-        # Mock Runner.run to avoid actual execution
-        with patch("koder_agent.core.scheduler.Runner.run", new_callable=AsyncMock) as mock_run:
-            mock_result = MagicMock()
-            mock_result.final_output = "Test response"
-            mock_run.return_value = mock_result
+                # First turn - should call memory retrieval
+                await scheduler.handle("What is the meaning of life?", render_output=False)
 
-            # First turn - should call memory retrieval
-            await scheduler.handle("What is the meaning of life?", render_output=False)
-
-            # Verify memory retrieval was attempted
-            mock_retrieve.assert_called_once()
-            call_kwargs = mock_retrieve.call_args.kwargs
-            assert "query" in call_kwargs
-            assert "memory_dirs" in call_kwargs
-            assert "max_tokens" in call_kwargs
+                # Verify memory retrieval was attempted
+                mock_retrieve.assert_called_once()
+                call_kwargs = mock_retrieve.call_args.kwargs
+                assert "query" in call_kwargs
+                assert "memory_dirs" in call_kwargs
+                assert "max_tokens" in call_kwargs
 
 
 @pytest.mark.asyncio
 async def test_memory_injection_into_prompt(tmp_path):
     """Test that retrieved memories are injected into the user prompt."""
-    from koder_agent.core.scheduler import AgentScheduler
     from koder_agent.harness.memory.memory_files import ParsedMemoryFile
     from koder_agent.harness.memory.retrieval import RetrievalResult, RetrievedMemory
 
@@ -90,31 +109,28 @@ async def test_memory_injection_into_prompt(tmp_path):
         )
         mock_retrieve.return_value = RetrievalResult(memories=[fake_memory], token_count=10)
 
-        scheduler = AgentScheduler(session_id="test-inject", streaming=False)
+        async with _memory_scheduler("test-inject") as scheduler:
+            # Mock Runner.run to capture the input
+            with patch("koder_agent.core.scheduler.Runner.run", new_callable=AsyncMock) as mock_run:
+                mock_result = MagicMock()
+                mock_result.final_output = "Test response"
+                mock_run.return_value = mock_result
 
-        # Mock Runner.run to capture the input
-        with patch("koder_agent.core.scheduler.Runner.run", new_callable=AsyncMock) as mock_run:
-            mock_result = MagicMock()
-            mock_result.final_output = "Test response"
-            mock_run.return_value = mock_result
+                # First turn - should inject memory
+                await scheduler.handle("Tell me about testing", render_output=False)
 
-            # First turn - should inject memory
-            await scheduler.handle("Tell me about testing", render_output=False)
-
-            # Verify Runner.run was called with modified input containing memory
-            mock_run.assert_called_once()
-            call_args = mock_run.call_args[0]
-            user_input = call_args[1]  # Second positional arg is the user_input
-            assert "[Relevant memories from previous sessions]" in user_input
-            assert "Test Memory" in user_input
-            assert "This is test memory content." in user_input
+                # Verify Runner.run was called with modified input containing memory
+                mock_run.assert_called_once()
+                call_args = mock_run.call_args[0]
+                user_input = call_args[1]  # Second positional arg is the user_input
+                assert "[Relevant memories from previous sessions]" in user_input
+                assert "Test Memory" in user_input
+                assert "This is test memory content." in user_input
 
 
 @pytest.mark.asyncio
 async def test_memory_not_injected_on_subsequent_turns(tmp_path):
     """Test that memory is only injected on the first turn, not subsequent ones."""
-    from koder_agent.core.scheduler import AgentScheduler
-
     # Create fake memory directories
     user_memory_dir = tmp_path / ".koder" / "memory"
     user_memory_dir.mkdir(parents=True)
@@ -136,34 +152,33 @@ async def test_memory_not_injected_on_subsequent_turns(tmp_path):
 
         mock_retrieve.return_value = RetrievalResult(memories=[], token_count=0)
 
-        scheduler = AgentScheduler(session_id="test-subsequent", streaming=False)
+        async with _memory_scheduler("test-subsequent") as scheduler:
+            get_items_calls = 0
 
-        get_items_calls = 0
+            def _session_items():
+                nonlocal get_items_calls
+                get_items_calls += 1
+                if get_items_calls <= 3:
+                    return []
+                return [{"role": "user"}]
 
-        def _session_items():
-            nonlocal get_items_calls
-            get_items_calls += 1
-            if get_items_calls <= 3:
-                return []
-            return [{"role": "user"}]
+            scheduler.session.get_items = AsyncMock(side_effect=_session_items)
 
-        scheduler.session.get_items = AsyncMock(side_effect=_session_items)
+            with patch("koder_agent.core.scheduler.Runner.run", new_callable=AsyncMock) as mock_run:
+                mock_result = MagicMock()
+                mock_result.final_output = "Test response"
+                mock_run.return_value = mock_result
 
-        with patch("koder_agent.core.scheduler.Runner.run", new_callable=AsyncMock) as mock_run:
-            mock_result = MagicMock()
-            mock_result.final_output = "Test response"
-            mock_run.return_value = mock_result
+                # First turn
+                await scheduler.handle("First message", render_output=False)
+                first_call_count = mock_retrieve.call_count
 
-            # First turn
-            await scheduler.handle("First message", render_output=False)
-            first_call_count = mock_retrieve.call_count
+                # Second turn - memory retrieval should not be called again
+                await scheduler.handle("Second message", render_output=False)
+                second_call_count = mock_retrieve.call_count
 
-            # Second turn - memory retrieval should not be called again
-            await scheduler.handle("Second message", render_output=False)
-            second_call_count = mock_retrieve.call_count
-
-            assert first_call_count == 1
-            assert second_call_count == 1  # Should still be 1, not 2
+                assert first_call_count == 1
+                assert second_call_count == 1  # Should still be 1, not 2
 
 
 def test_tool_orchestrator_importable():

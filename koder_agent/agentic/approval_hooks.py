@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agents import Agent, RunContextWrapper, RunHooks, Tool
 
+from koder_agent.harness.execution_context import get_execution_cwd
 from koder_agent.harness.hooks.runtime import dispatch_command_hooks_async
 from koder_agent.tools.permission_context import GUARDED_TOOLS
 
@@ -70,7 +70,7 @@ class ApprovalHooks(RunHooks):
         # Await the off-loop variant so a slow Stop hook cannot freeze the
         # event loop (streaming UI, concurrent subagents, cron).
         result = await dispatch_command_hooks_async(
-            cwd=Path.cwd(),
+            cwd=get_execution_cwd(),
             event_name="Stop",
             match_value=None,
             payload={
@@ -168,7 +168,7 @@ class ApprovalHooks(RunHooks):
         # Await the off-loop variant so a slow PostToolUse hook cannot freeze
         # the event loop (streaming UI, concurrent subagents, cron).
         await dispatch_command_hooks_async(
-            cwd=Path.cwd(),
+            cwd=get_execution_cwd(),
             event_name="PostToolUse",
             match_value=tool.name,
             payload={

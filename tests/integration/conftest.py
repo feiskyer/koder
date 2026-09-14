@@ -22,12 +22,14 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip manual tests unless --manual flag is provided."""
+    """Skip explicitly marked manual tests unless --manual is provided."""
     if config.getoption("--manual"):
         # --manual given: do not skip manual tests
         return
 
     skip_manual = pytest.mark.skip(reason="Manual test - use --manual to run")
     for item in items:
-        if "manual" in item.keywords:
+        # Parametrization IDs also appear in keywords. A command route named
+        # "manual" must not opt a local regression into the live-test policy.
+        if item.get_closest_marker("manual") is not None:
             item.add_marker(skip_manual)

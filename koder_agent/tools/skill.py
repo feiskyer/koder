@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +16,10 @@ import yaml
 from pydantic import BaseModel
 
 from koder_agent.config import get_config
+from koder_agent.harness.execution_context import execution_path, get_execution_cwd
 from koder_agent.harness.memory.budget import estimate_text_tokens
 from koder_agent.harness.paths import harness_home_dir
+from koder_agent.harness.plugins.context import get_plugin_root, normalize_plugin_root
 from koder_agent.harness.skills.bundled import get_bundled_skills
 from koder_agent.harness.skills.discovery import discover_skills_for_paths
 
@@ -212,7 +215,7 @@ class Skill:
                 argv,
                 capture_output=True,
                 text=True,
-                cwd=str(Path.cwd()),
+                cwd=str(get_execution_cwd()),
                 check=False,
                 timeout=30,
             )
@@ -765,13 +768,13 @@ def discover_merged_skills(
     plugin_root: str | Path | None = None,
     additional_dirs: list[str | Path] | None = None,
 ) -> dict[str, Skill]:
-    current_cwd = Path(cwd or Path.cwd()).resolve()
+    current_cwd = (execution_path(cwd) if cwd else get_execution_cwd()).resolve()
     resolved_user_dir = (
         _expand_path(user_dir) if user_dir is not None else (harness_home_dir() / "skills")
     )
     resolved_project_dir = _expand_path(project_dir) if project_dir is not None else None
     resolved_plugin_root = (
-        _expand_path(plugin_root) if plugin_root is not None else (harness_home_dir() / "plugins")
+        normalize_plugin_root(plugin_root) if plugin_root is not None else get_plugin_root()
     )
     resolved_additional_dirs = (
         [Path(path).expanduser().resolve() for path in additional_dirs]
@@ -816,35 +819,34 @@ class SkillModel(BaseModel):
 
 _merged_skills: Optional[dict[str, Skill]] = None
 _merged_skills_key: Optional[tuple] = None
+_merged_skills_lock = threading.RLock()
 
 
-def _dir_max_mtime(path: Path) -> float:
-    """Return the latest mtime of skill files in *path*, or 0.0 if empty/missing.
+def _skill_dir_signature(path: Path) -> tuple[tuple[str, int, int, int, int, int], ...]:
+    """Track every discoverable skill's path, identity and filesystem version.
 
-    Scans using the same patterns as ``SkillLoader.discover_skills``:
-    ``rglob("SKILL.md")`` + ``glob("*.md")``.
+    A directory-wide maximum timestamp misses changes to other files, including
+    removal. Match SkillLoader's discovery patterns without reading instruction
+    bodies or nested reference files on every cache lookup.
     """
-    if not path.exists():
-        return 0.0
-    max_mt = 0.0
-    try:
-        for md_file in path.rglob("SKILL.md"):
-            try:
-                mt = md_file.stat().st_mtime
-                if mt > max_mt:
-                    max_mt = mt
-            except OSError:
-                pass
-        for md_file in path.glob("*.md"):
-            try:
-                mt = md_file.stat().st_mtime
-                if mt > max_mt:
-                    max_mt = mt
-            except OSError:
-                pass
-    except OSError:
-        pass
-    return max_mt
+    entries = []
+    candidates = set(path.rglob("SKILL.md")) | set(path.glob("*.md"))
+    for skill_file in sorted(candidates):
+        try:
+            version = skill_file.stat()
+        except FileNotFoundError:
+            continue  # A removed file must disappear from the signature.
+        entries.append(
+            (
+                skill_file.relative_to(path).as_posix(),
+                version.st_dev,
+                version.st_ino,
+                version.st_size,
+                version.st_mtime_ns,
+                version.st_ctime_ns,
+            )
+        )
+    return tuple(entries)
 
 
 def _compute_merged_skills_cache_key(
@@ -857,23 +859,22 @@ def _compute_merged_skills_cache_key(
 ) -> tuple:
     """Build the cache key for ``_get_merged_skills``.
 
-    The key folds ``_dir_max_mtime`` over the FULL set of skill directories --
+    The key records every skill file in the FULL set of skill directories --
     computed the same way ``discover_merged_skills`` does, including walked-up
-    parents, nested monorepo packages, and dynamically discovered dirs from
-    ``_project_skill_dirs`` -- so editing a SKILL.md in any of them invalidates
-    the cache without a process restart. A key built from only the configured
-    user/project/plugin/additional roots would serve stale content for those.
+    parents, nested monorepo packages, and dynamically discovered directories.
+    Per-file signatures detect insertion, removal, rename and edits even when
+    an unrelated file retains the newest modification time.
     """
     scanned_dirs: list[Path] = [Path(user_dir), Path(project_dir), Path(plugin_root)]
     scanned_dirs.extend(_project_skill_dirs(Path(cwd)))
     scanned_dirs.extend(Path(p) for p in additional)
     scanned_dirs.extend(_additional_skill_dirs([Path(p) for p in additional]))
 
-    # Fold mtimes over every scanned dir, keyed by resolved path so duplicates
+    # Record each scanned directory, keyed by resolved path so duplicates
     # collapse and ordering is stable.
-    dir_mtimes = tuple(
+    directory_signatures = tuple(
         sorted(
-            (str(path.resolve()), _dir_max_mtime(path))
+            (str(path.resolve()), _skill_dir_signature(path))
             for path in {d.resolve(): d for d in scanned_dirs}.values()
         )
     )
@@ -884,39 +885,42 @@ def _compute_merged_skills_cache_key(
         project_dir,
         plugin_root,
         additional,
-        dir_mtimes,
+        directory_signatures,
     )
 
 
 def _get_merged_skills() -> dict[str, Skill]:
     global _merged_skills, _merged_skills_key
 
-    config = get_config()
-    cwd = str(Path.cwd().resolve())
-    user_dir = str(_expand_path(config.skills.user_skills_dir))
-    project_dir = str(_expand_path(config.skills.project_skills_dir))
-    plugin_root = str((harness_home_dir() / "plugins").resolve())
-    additional = tuple(str(path) for path in _additional_dirs_from_env())
+    # Root/key comparison and publication must be one operation: copied thread
+    # contexts can otherwise return a different runtime's global cache value.
+    with _merged_skills_lock:
+        config = get_config()
+        cwd = str(get_execution_cwd().resolve())
+        user_dir = str(_expand_path(config.skills.user_skills_dir))
+        project_dir = str(_expand_path(config.skills.project_skills_dir))
+        plugin_root = str(get_plugin_root())
+        additional = tuple(str(path) for path in _additional_dirs_from_env())
 
-    cache_key = _compute_merged_skills_cache_key(
-        cwd=cwd,
-        user_dir=user_dir,
-        project_dir=project_dir,
-        plugin_root=plugin_root,
-        additional=additional,
-    )
-
-    if _merged_skills is None or _merged_skills_key != cache_key:
-        _merged_skills = discover_merged_skills(
+        cache_key = _compute_merged_skills_cache_key(
             cwd=cwd,
             user_dir=user_dir,
             project_dir=project_dir,
             plugin_root=plugin_root,
-            additional_dirs=list(additional),
+            additional=additional,
         )
-        _merged_skills_key = cache_key
 
-    return _merged_skills
+        if _merged_skills is None or _merged_skills_key != cache_key:
+            _merged_skills = discover_merged_skills(
+                cwd=cwd,
+                user_dir=user_dir,
+                project_dir=project_dir,
+                plugin_root=plugin_root,
+                additional_dirs=list(additional),
+            )
+            _merged_skills_key = cache_key
+
+        return _merged_skills
 
 
 def _apply_skill_restrictions(skill: Skill) -> None:

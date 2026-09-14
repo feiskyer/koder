@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
@@ -18,20 +19,36 @@ class ChannelGateResult:
     reason: Optional[str] = None
 
 
-def find_channel_entry(server_name: str, channels: list[ChannelEntry]) -> Optional[ChannelEntry]:
+@dataclass(frozen=True)
+class PluginChannelOrigin:
+    """Discovery provenance, never inferred from a public MCP server name."""
+
+    name: str
+    marketplace: str | None = None
+
+
+def find_channel_entry(
+    server_name: str,
+    channels: Sequence[ChannelEntry],
+    *,
+    plugin_origin: PluginChannelOrigin | None = None,
+) -> Optional[ChannelEntry]:
     """Find the channel entry matching *server_name* in the enabled list.
 
     - Server-kind: exact match on the full ``server_name``.
-    - Plugin-kind: split ``server_name`` on ``:``, match when the first
-      segment is ``"plugin"`` and the second equals ``entry.name``.
+    - Plugin-kind: require the actual discovered plugin and recorded marketplace.
+      A server name that looks like ``plugin:name`` is not provenance.
     """
-    parts = server_name.split(":")
     for entry in channels:
         if isinstance(entry, ChannelEntryServer):
             if server_name == entry.name:
                 return entry
         elif isinstance(entry, ChannelEntryPlugin):
-            if len(parts) >= 2 and parts[0] == "plugin" and parts[1] == entry.name:
+            if (
+                plugin_origin is not None
+                and plugin_origin.name == entry.name
+                and plugin_origin.marketplace == entry.marketplace
+            ):
                 return entry
     return None
 
@@ -39,6 +56,9 @@ def find_channel_entry(server_name: str, channels: list[ChannelEntry]) -> Option
 def gate_channel_server(
     server_name: str,
     capabilities: Any = None,
+    *,
+    plugin_origin: PluginChannelOrigin | None = None,
+    channels: Sequence[ChannelEntry] | None = None,
 ) -> ChannelGateResult:
     """Decide whether *server_name* should register as a channel.
 
@@ -79,7 +99,11 @@ def gate_channel_server(
         )
 
     # Step 2: Session check
-    entry = find_channel_entry(server_name, get_allowed_channels())
+    entry = find_channel_entry(
+        server_name,
+        get_allowed_channels() if channels is None else channels,
+        plugin_origin=plugin_origin,
+    )
     if entry is None:
         return ChannelGateResult(
             action="skip",

@@ -19,7 +19,9 @@ from typing import Awaitable, Callable, List, Optional, Union
 from pydantic import BaseModel
 
 from ..core.security import SecurityGuard
+from ..harness.execution_context import get_execution_cwd
 from ..harness.tools import shell_executor as harness_shell_executor
+from ..utils.async_tasks import await_owned_task
 from .compat import function_tool
 from .permission_context import approve_sandbox_degradation, required_sandbox_execution
 from .todo import TodoRuntimeIdentity, get_todo_store_or_none
@@ -168,6 +170,7 @@ class BackgroundShell:
         self.last_read_index = 0
         self.status = "running"  # running, completed, failed, terminated, error
         self.exit_code: Optional[int] = None
+        self._termination_task: Optional[asyncio.Task["BackgroundShell"]] = None
 
     def add_output(self, line: str):
         """Add new output line."""
@@ -303,19 +306,21 @@ class BackgroundShellManager:
                     cls._shells[shell_id].status = "error"
                     cls._shells[shell_id].add_output(f"Monitor error: {str(e)}")
             finally:
-                if shell_id in cls._monitor_tasks:
+                if cls._monitor_tasks.get(shell_id) is asyncio.current_task():
                     del cls._monitor_tasks[shell_id]
 
         task = asyncio.create_task(monitor())
         cls._monitor_tasks[shell_id] = task
 
     @classmethod
-    def _cancel_monitor(cls, shell_id: str) -> None:
-        """Cancel and remove a monitoring task (internal use only)."""
-        if shell_id in cls._monitor_tasks:
-            task = cls._monitor_tasks[shell_id]
-            if not task.done():
-                task.cancel()
+    async def _cancel_monitor(cls, shell_id: str, task: Optional[asyncio.Task]) -> None:
+        """Join the captured monitor without removing a later generation."""
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if cls._monitor_tasks.get(shell_id) is task:
             del cls._monitor_tasks[shell_id]
 
     @classmethod
@@ -335,14 +340,31 @@ class BackgroundShellManager:
         if not shell:
             raise ValueError(f"Shell not found: {shell_id}")
 
-        # Terminate the process
-        await shell.terminate()
+        if shell._termination_task is None:
+            monitor = cls._monitor_tasks.get(shell_id)
 
-        # Clean up monitoring and remove from manager
-        cls._cancel_monitor(shell_id)
-        cls._remove(shell_id)
+            async def terminate_and_join():
+                await shell.terminate()
+                await cls._cancel_monitor(shell_id, monitor)
+                if cls.get(shell_id) is shell:
+                    cls._remove(shell_id)
+                return shell
 
-        return shell
+            shell._termination_task = asyncio.create_task(terminate_and_join())
+
+        # Multiple stop requests share ownership. Cancelling a waiter must not
+        # interrupt the process/reader cleanup or leave a detached monitor.
+        cleanup = shell._termination_task
+        try:
+            return await asyncio.shield(cleanup)
+        except asyncio.CancelledError as original:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await await_owned_task(cleanup)
+            raise original
+        finally:
+            if cleanup.done() and (cleanup.cancelled() or cleanup.exception() is not None):
+                if shell._termination_task is cleanup:
+                    shell._termination_task = None
 
 
 def build_sandbox_unavailable_approval(
@@ -438,6 +460,7 @@ async def run_shell(command: str, timeout: int = 120, run_in_background: bool = 
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    cwd=get_execution_cwd(),
                     **_new_session_kwargs(),
                 )
             else:
@@ -445,6 +468,7 @@ async def run_shell(command: str, timeout: int = 120, run_in_background: bool = 
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    cwd=get_execution_cwd(),
                     **_new_session_kwargs(),
                 )
 

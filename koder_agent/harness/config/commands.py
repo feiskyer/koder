@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 import yaml
 from pydantic import ValidationError
 
 from koder_agent.config import get_config_manager
 from koder_agent.harness.config.schema import RuntimeConfig, parse_runtime_config_source
-from koder_agent.harness.config.service import RuntimeConfigService
+from koder_agent.harness.config.service import RuntimeConfigService, read_config_text
 from koder_agent.harness.config.settings_bundle import (
     export_settings_bundle,
     import_settings_bundle,
@@ -83,28 +87,7 @@ async def handle_config_subcommand(args: argparse.Namespace) -> int:
         return 0
 
     if args.config_action == "edit":
-        if not manager.config_path.exists():
-            manager.save(RuntimeConfig())
-        editor = (
-            subprocess.list2cmdline([arg]) for arg in []
-        )  # pragma: no cover - quiet lint placeholder
-        editor = None
-        import os
-        import sys
-
-        editor = os.environ.get("EDITOR")
-        if not editor:
-            if sys.platform == "win32":
-                editor = "notepad"
-            elif sys.platform == "darwin":
-                editor = "open -e"
-            else:
-                editor = "nano"
-        try:
-            subprocess.run([editor, str(manager.config_path)], check=True)
-        except FileNotFoundError:
-            subprocess.run(f"{editor} {manager.config_path}", shell=True, check=True)
-        return 0
+        return _handle_config_edit(manager.config_path)
 
     if args.config_action == "export":
         try:
@@ -127,7 +110,7 @@ async def handle_config_subcommand(args: argparse.Namespace) -> int:
                 scope=args.scope,
                 dry_run=getattr(args, "dry_run", False),
             )
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             print(f"Config import failed: {exc}")
             return 1
         verb = "Checked" if result.dry_run else "Imported"
@@ -148,7 +131,13 @@ async def handle_config_subcommand(args: argparse.Namespace) -> int:
         current = data
         keys = args.key.split(".")
         for key in keys[:-1]:
-            current = current.setdefault(key, {})
+            if not isinstance(current, dict) or key not in current:
+                print(f"Unknown configuration key: {args.key}")
+                return 1
+            current = current[key]
+        if not isinstance(current, dict) or keys[-1] not in current:
+            print(f"Unknown configuration key: {args.key}")
+            return 1
         value = args.value
         lowered = value.lower()
         if lowered == "true":
@@ -174,6 +163,64 @@ async def handle_config_subcommand(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_config_edit(config_path: Path) -> int:
+    """Edit a private candidate and publish only a validated, current snapshot."""
+    temporary: Path | None = None
+    try:
+        editor = os.environ.get("EDITOR")
+        if editor:
+            # EDITOR is an argv specification, never a shell program.
+            argv = shlex.split(editor, posix=sys.platform != "win32")
+            if sys.platform == "win32":
+                argv = [
+                    arg[1:-1] if arg.startswith('"') and arg.endswith('"') else arg for arg in argv
+                ]
+        else:
+            argv = (
+                ["notepad"]
+                if sys.platform == "win32"
+                else ["open", "-W", "-e"]
+                if sys.platform == "darwin"
+                else ["nano"]
+            )
+        if not argv:
+            raise ValueError("EDITOR must specify an executable")
+        original = read_config_text(config_path)
+        initial = (
+            original
+            if original is not None
+            else yaml.safe_dump(
+                RuntimeConfig().model_dump(exclude_none=False), sort_keys=False, allow_unicode=True
+            )
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, filename = tempfile.mkstemp(prefix=".config.", suffix=".yaml", dir=config_path.parent)
+        temporary = Path(filename)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(initial)
+        subprocess.run([*argv, str(temporary)], check=True)
+        if temporary.is_symlink():
+            raise ValueError("Editor candidate must not be a symlink")
+        content = temporary.read_bytes().decode("utf-8")
+        if content != initial or original is None:
+            RuntimeConfigService(config_path).save_text(content, expected_text=original)
+        return 0
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        yaml.YAMLError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        # Validation exceptions may include submitted values; keep them out of
+        # the command output, especially when editing credential-bearing YAML.
+        print(f"Config edit failed ({type(exc).__name__}); configuration was not accepted.")
+        return 1
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def _handle_config_validate() -> int:
     """Validate the config YAML and its effective environment overrides.
 
@@ -185,7 +232,9 @@ def _handle_config_validate() -> int:
 
     if config_path.exists():
         try:
-            raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if raw is None:
+                raw = {}
         except yaml.YAMLError as exc:
             print(f"Config invalid: YAML parse error at {config_path}: {exc}")
             return 1

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from agents import ModelBehaviorError
 
 from koder_agent.config import reset_config_manager
 from koder_agent.config.manager import ConfigManager
@@ -76,6 +77,74 @@ def test_llm_completion_uses_aresponses_for_copilot_codex(monkeypatch, tmp_path)
     assert text == "ok"
     assert calls["aresponses"] == 1
     assert "api_key" not in captured
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete", "cancelled"])
+@pytest.mark.parametrize("as_mapping", [False, True])
+def test_auxiliary_responses_terminal_failure_rejects_partial_text(
+    monkeypatch, tmp_path, status, as_mapping
+):
+    _write_config(
+        tmp_path,
+        {"model": {"name": "gpt-5.1-codex", "provider": "github_copilot"}},
+    )
+    payload = {
+        "status": status,
+        "output_text": "partial-output-canary",
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "partial-output-canary"}],
+            }
+        ],
+        "error": {"message": "private-provider-error-canary"},
+    }
+    calls = []
+
+    async def fake_aresponses(**kwargs):
+        calls.append(kwargs)
+        return payload if as_mapping else SimpleNamespace(**payload)
+
+    monkeypatch.setattr("koder_agent.utils.client.litellm.aresponses", fake_aresponses)
+
+    with pytest.raises(ModelBehaviorError, match=status) as caught:
+        asyncio.run(
+            llm_completion(
+                [{"role": "user", "content": "hello"}],
+                return_metadata=True,
+            )
+        )
+
+    assert len(calls) == 1
+    assert "partial-output-canary" not in str(caught.value)
+    assert "private-provider-error-canary" not in str(caught.value)
+
+
+@pytest.mark.parametrize("as_mapping", [False, True])
+def test_auxiliary_responses_completed_text_is_preserved(monkeypatch, tmp_path, as_mapping):
+    _write_config(
+        tmp_path,
+        {"model": {"name": "gpt-5.1-codex", "provider": "github_copilot"}},
+    )
+    payload = {
+        "status": "completed",
+        "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": "complete text"}]}
+        ],
+    }
+
+    async def fake_aresponses(**_kwargs):
+        return payload if as_mapping else SimpleNamespace(**payload)
+
+    monkeypatch.setattr("koder_agent.utils.client.litellm.aresponses", fake_aresponses)
+
+    result = asyncio.run(
+        llm_completion([{"role": "user", "content": "hello"}], return_metadata=True)
+    )
+
+    assert isinstance(result, LLMCompletionResult)
+    assert result.text == "complete text"
+    assert result.truncation is None
 
 
 def test_llm_completion_uses_override_provider_credentials_and_base_url(monkeypatch, tmp_path):

@@ -4,7 +4,6 @@ import asyncio
 import atexit
 import concurrent.futures
 import logging
-import os
 import threading
 import weakref
 from contextlib import ExitStack, contextmanager
@@ -13,6 +12,18 @@ from pathlib import Path
 from typing import Any, Iterable, List
 
 from rich.console import Console
+
+from koder_agent.harness.channels.admission import ChannelAdmission
+from koder_agent.harness.channels.gate import (
+    PluginChannelOrigin,
+    find_channel_entry,
+    gate_channel_server,
+)
+from koder_agent.harness.channels.notification import ChannelNotificationRouter
+from koder_agent.harness.channels.state import get_allowed_channels
+from koder_agent.harness.channels.types import ChannelEntryPlugin
+from koder_agent.harness.execution_context import get_execution_cwd
+from koder_agent.harness.plugins.context import get_plugin_root
 
 try:  # pragma: no cover - depends on optional SDK extras at import time
     from agents.mcp import MCPServer
@@ -146,6 +157,10 @@ class _MCPServerOwnerState:
     def is_closed(self) -> bool:
         with self.lock:
             return self.closed
+
+    def is_accepting(self) -> bool:
+        with self.lock:
+            return self.accepting_adoptions
 
 
 async def _run_mcp_owner_cleanup(
@@ -447,6 +462,14 @@ async def reconnect_unhealthy_servers(
     return results
 
 
+class _PluginMCPConfigs(list[MCPServerConfig]):
+    """Retain plugin origins separately from user-controlled MCP server fields."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.channel_origins: dict[int, PluginChannelOrigin] = {}
+
+
 @contextmanager
 def _load_plugin_mcp_configs():
     """Yield plugin MCP configs while their private plugin snapshots exist."""
@@ -454,6 +477,7 @@ def _load_plugin_mcp_configs():
 
     from koder_agent.harness.plugins.env import expand_plugin_vars, plugin_env_vars
     from koder_agent.harness.plugins.lifecycle import PluginLifecycleService
+    from koder_agent.harness.plugins.marketplace import MarketplaceStore
     from koder_agent.harness.plugins.path_safety import (
         PluginPathError,
         open_plugin_component,
@@ -461,10 +485,11 @@ def _load_plugin_mcp_configs():
     )
 
     with ExitStack() as snapshots:
-        configs: List[MCPServerConfig] = []
+        configs = _PluginMCPConfigs()
         try:
-            plugin_root = Path.home() / ".koder" / "plugins"
+            plugin_root = get_plugin_root()
             lifecycle = PluginLifecycleService(plugin_root)
+            marketplaces = MarketplaceStore.default()
             for manifest, state in lifecycle.installed_plugins():
                 if not state.enabled:
                     continue
@@ -488,7 +513,12 @@ def _load_plugin_mcp_configs():
                         if mcp_json_path is None:
                             continue
                         raw = json.loads(mcp_json_path.read_text("utf-8"))
-                except PluginPathError:
+                except (PluginPathError, OSError, ValueError) as exc:
+                    _logger.warning(
+                        "Failed to read .mcp.json from plugin '%s': %s",
+                        manifest.name,
+                        exc,
+                    )
                     continue
                 try:
                     servers = raw.get("mcpServers", {})
@@ -522,6 +552,16 @@ def _load_plugin_mcp_configs():
                             source_path=str(mcp_source_path),
                         )
                         configs.append(config)
+                        installation = state.origin
+                        configs.channel_origins[id(config)] = PluginChannelOrigin(
+                            name=manifest.name,
+                            marketplace=(
+                                installation.marketplace
+                                if installation is not None
+                                and marketplaces.matches_origin(installation)
+                                else None
+                            ),
+                        )
                         _logger.info(
                             "Loaded MCP server '%s' from plugin '%s'",
                             server_name,
@@ -598,7 +638,7 @@ async def load_mcp_servers(
     owner = MCPServerSet()
     try:
         manager = MCPServerManager()
-        configs = list(await manager.list_servers(cwd=os.getcwd()))
+        configs = list(await manager.list_servers(cwd=str(get_execution_cwd())))
 
         # Also load MCP servers from enabled plugins
         plugin_config_source = _load_plugin_mcp_configs()
@@ -607,6 +647,7 @@ async def load_mcp_servers(
         else:
             plugin_configs = list(plugin_config_source)
         plugin_config_ids = {id(config) for config in plugin_configs}
+        plugin_origins = getattr(plugin_configs, "channel_origins", {})
         if plugin_configs:
             configs.extend(plugin_configs)
         if extra_configs:
@@ -617,42 +658,34 @@ async def load_mcp_servers(
         if not configs:
             return owner
 
-        # Determine which servers need channel notification interception
-        channel_callback = None
-        channel_server_names: set[str] = set()
-        try:
-            from koder_agent.harness.channels.gate import gate_channel_server
-            from koder_agent.harness.channels.notification import ChannelNotificationRouter
-            from koder_agent.harness.channels.state import get_allowed_channels
+        # Interception is installed before initialization, but each callback
+        # stays closed until its initialized server is adopted below.
+        channel_admissions: dict[str, ChannelAdmission] = {}
+        allowed = get_allowed_channels()
+        if allowed:
+            from .notifications import get_notification_handler
 
-            allowed = get_allowed_channels()
-            if allowed:
-                # Pre-scan configs to identify which servers will be channels
-                # (we can't check capabilities yet — the server hasn't connected)
-                # Instead, we tag all servers in the --channels list
-                from koder_agent.harness.channels.gate import find_channel_entry
-
-                for config in configs:
-                    if find_channel_entry(config.name, allowed) is not None:
-                        channel_server_names.add(config.name)
-
-                if channel_server_names:
-                    from .notifications import get_notification_handler
-
-                    handler = get_notification_handler()
-                    # Reuse existing router if session_flow already created one
-                    router = handler.channel_router or ChannelNotificationRouter()
-                    if handler.channel_router is None:
-                        handler.set_channel_router(router)
-
-                    async def _channel_callback(
-                        server_name: str, method: str, params: dict
-                    ) -> None:
-                        await router.dispatch_raw_notification(server_name, method, params)
-
-                    channel_callback = _channel_callback
-        except ImportError:
-            pass
+            handler = get_notification_handler()
+            router = handler.channel_router or ChannelNotificationRouter()
+            if handler.channel_router is None:
+                handler.set_channel_router(router)
+            for config in configs:
+                origin = plugin_origins.get(id(config))
+                if find_channel_entry(config.name, allowed, plugin_origin=origin) is not None:
+                    channel_admissions[config.name] = ChannelAdmission(
+                        config.name, router, owner._owner_state.is_accepting, origin
+                    )
+                elif origin is not None and origin.marketplace is None:
+                    if any(
+                        isinstance(entry, ChannelEntryPlugin) and entry.name == origin.name
+                        for entry in allowed
+                    ):
+                        _console.print(
+                            f"[yellow]Channel '{config.name}' skipped: plugin '{origin.name}' "
+                            "has no matching verified marketplace provenance. Reinstall it "
+                            "from the registered marketplace, or explicitly enable "
+                            f"this installed server, use --channels server:{config.name}.[/yellow]"
+                        )
 
         # Create server instances — channel-aware for those in --channels
         if MCPServerFactory is None:
@@ -660,8 +693,8 @@ async def load_mcp_servers(
 
         _logger.debug(
             "Channel server names: %s, callback set: %s",
-            channel_server_names,
-            channel_callback is not None,
+            set(channel_admissions),
+            bool(channel_admissions),
         )
         # Configure reconnection with retry
         reconnection_config = ReconnectionConfig(max_attempts=3, initial_delay=1.0, max_delay=10.0)
@@ -685,7 +718,7 @@ async def load_mcp_servers(
                     _console.print(f"[yellow]⚠ {approval_message}[/yellow]")
                     continue
 
-                cb = channel_callback if config.name in channel_server_names else None
+                cb = channel_admissions.get(config.name)
                 _logger.debug(
                     "Creating server '%s': channel_callback=%s",
                     config.name,
@@ -725,12 +758,15 @@ async def load_mcp_servers(
                 if runtime_resources is not None:
                     plugin_resources_adopted = True
                 connected.append((config, server))
-                if config.name in channel_server_names:
+                if cb is not None:
+                    cb.bind(server)
                     # Verify capability after connection
                     caps = getattr(server, "server_initialize_result", None)
                     if caps is not None:
                         caps = getattr(caps, "capabilities", caps)
-                    result = gate_channel_server(config.name, caps)
+                    result = gate_channel_server(
+                        config.name, caps, plugin_origin=plugin_origins.get(id(config))
+                    )
                     if result.action == "register":
                         _logger.info("Channel registered: '%s'", config.name)
                     else:

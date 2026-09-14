@@ -7,6 +7,13 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from koder_agent.harness.agents.runtime_context import (
+    get_runtime_agent_service,
+    get_runtime_agent_session,
+)
+from koder_agent.harness.agents.teams.runtime import TEAM_LEAD_NAME
+from koder_agent.harness.agents.teams.tool_runtime import get_effective_team_context
+
 from .compat import function_tool
 
 
@@ -26,22 +33,18 @@ async def _team_create_impl(
     _team_service=None,
 ) -> str:
     """Core implementation for team_create tool."""
-    if _team_service is None:
-        from koder_agent.harness.agents.teams.service import TeamService
-
-        _team_service = TeamService()
-
     try:
-        team_id = _team_service.create_team(
-            team_name,
-            description=description,
-        )
-        record = _team_service.get(team_id)
+        if _team_service is None:
+            runtime = get_runtime_agent_service().get_team_tool_runtime()
+            record = runtime.create(team_name, description, get_runtime_agent_session())
+        else:
+            team_id = _team_service.create_team(team_name, description=description)
+            record = _team_service.get(team_id)
         return json.dumps(
             {
                 "status": "created",
                 "team_name": team_name,
-                "team_id": team_id,
+                "team_id": record.id,
                 "config_path": record.config_path,
                 "lead_agent_id": record.lead_agent_id,
             }
@@ -61,7 +64,15 @@ async def _team_delete_impl(
     _team_id: str | None = None,
 ) -> str:
     """Core implementation for team_delete tool."""
-    if _team_service is None:
+    runtime = None
+    if _team_service is None and _team_id is None:
+        context = get_effective_team_context()
+        if context is not None:
+            if context.sender_name != TEAM_LEAD_NAME:
+                return json.dumps({"status": "error", "error": "Only the leader can delete a team"})
+            _team_service, _team_id = context.team_service, context.team_id
+            runtime = get_runtime_agent_service().team_tool_runtime
+    elif _team_service is None:
         from koder_agent.harness.agents.teams.service import TeamService
 
         _team_service = TeamService()
@@ -77,6 +88,8 @@ async def _team_delete_impl(
     try:
         team = _team_service.get(_team_id)
         _team_service.delete_team(_team_id)
+        if runtime is not None:
+            runtime.clear(get_runtime_agent_session(), _team_id)
         return json.dumps(
             {
                 "status": "deleted",

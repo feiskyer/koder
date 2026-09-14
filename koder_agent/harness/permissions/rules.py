@@ -7,6 +7,8 @@ import os
 import shlex
 from dataclasses import dataclass
 
+from .shell_segments import parse_shell_segments
+
 
 @dataclass(frozen=True)
 class PermissionRule:
@@ -154,8 +156,8 @@ def _shell_prefix_is_safe(tokens: list[str]) -> str | None:
     """Return a widened ``<...>:*`` prefix rule for safe verbs, else ``None``.
 
     ``tokens`` is a single command segment (already split from any chain). The
-    first token is normalized to its basename so ``/usr/local/bin/npm`` widens
-    like ``npm``.
+    A basename selects the known verb family, but the resulting rule retains
+    the actual executable path the user approved.
     """
     if not tokens:
         return None
@@ -170,33 +172,17 @@ def _shell_prefix_is_safe(tokens: list[str]) -> str | None:
 
     two_token_subs = _SAFE_TWO_TOKEN_VERBS.get(base)
     if two_token_subs is not None and len(tokens) >= 2 and tokens[1] in two_token_subs:
-        return f"{base} {tokens[1]}:*"
+        return f"{shlex.join(tokens[:2])}:*"
 
     if base in _SAFE_SINGLE_TOKEN_VERBS:
-        return f"{base}:*"
+        return f"{shlex.quote(tokens[0])}:*"
 
     return None
 
 
 def _default_shell_segments(command: str) -> list[list[str]]:
-    """Split a command into per-segment token lists (quote-aware).
-
-    Mirrors the classifier's segmentation: split on the shell operators
-    ``| || && ;`` (and physical newlines) first, then ``shlex.split`` each
-    segment. Raises ``ValueError`` on malformed input (unbalanced quotes) so
-    callers can refuse to widen.
-    """
-    from .shell_classifier import COMMAND_SPLIT_PATTERN
-
-    segments: list[list[str]] = []
-    for line in command.splitlines():
-        for raw_segment in COMMAND_SPLIT_PATTERN.split(line):
-            if not raw_segment.strip():
-                continue
-            tokens = shlex.split(raw_segment, posix=True)
-            if tokens:
-                segments.append(tokens)
-    return segments
+    """Use the same literal segment boundaries as permission evaluation."""
+    return [list(segment.tokens) for segment in parse_shell_segments(command)]
 
 
 def derive_shell_prefix_rule(command: str, *, segmenter=None) -> str | None:
@@ -226,7 +212,12 @@ def derive_shell_prefix_rule(command: str, *, segmenter=None) -> str | None:
     # Never widen a chain: approving ``ls && rm -rf x`` must stay exact.
     if len(segments) != 1:
         return None
-    return _shell_prefix_is_safe(segments[0])
+    prefix = _shell_prefix_is_safe(segments[0])
+    # Unusual quoting/spacing remains an exact approval rather than publishing
+    # a different spelling that may not authorize the original request.
+    if prefix is not None and not command.lstrip().startswith(prefix[:-2]):
+        return None
+    return prefix
 
 
 def derive_path_prefix_rule(target: str) -> str | None:

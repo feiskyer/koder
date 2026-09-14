@@ -1,6 +1,6 @@
 """Scheduler model-call preflight behavior."""
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,8 +10,8 @@ from koder_agent.core.turn_cancellation import current_turn_cancellation_scope
 from koder_agent.harness.memory.auto_compact import AutoCompactManager
 
 
-@contextmanager
-def _scheduler_with_history(history):
+@asynccontextmanager
+async def _scheduler_with_history(history):
     with (
         patch("koder_agent.core.scheduler.get_all_tools", return_value=[]),
         patch("koder_agent.core.scheduler.get_display_hooks"),
@@ -42,7 +42,10 @@ def _scheduler_with_history(history):
         scheduler._estimate_instruction_context_tokens = MagicMock(return_value=10)
         scheduler._estimate_tool_schema_tokens = MagicMock(return_value=10)
         scheduler._estimate_run_input_tokens = MagicMock(return_value=10)
-        yield scheduler, session
+        try:
+            yield scheduler, session
+        finally:
+            await scheduler.cleanup()
 
 
 @pytest.mark.asyncio
@@ -50,7 +53,7 @@ async def test_scheduler_compacts_history_before_provider_call():
     events = []
     history = [{"role": "user", "content": "h" * 60}]
 
-    with _scheduler_with_history(history) as (scheduler, session):
+    async with _scheduler_with_history(history) as (scheduler, session):
 
         async def compact_once():
             events.append("compact")
@@ -76,7 +79,7 @@ async def test_scheduler_compacts_history_before_provider_call():
 
 @pytest.mark.asyncio
 async def test_scheduler_rejects_impossible_input_without_provider_or_compaction():
-    with _scheduler_with_history([]) as (scheduler, _session):
+    async with _scheduler_with_history([]) as (scheduler, _session):
         scheduler._estimate_instruction_context_tokens.return_value = 15
         scheduler._estimate_tool_schema_tokens.return_value = 15
         scheduler._estimate_run_input_tokens.return_value = 60
@@ -96,8 +99,9 @@ async def test_scheduler_rejects_impossible_input_without_provider_or_compaction
     assert "response reserve=20" in response
 
 
-def test_scheduler_static_estimate_includes_tool_schema_overhead():
-    with _scheduler_with_history([]) as (scheduler, _session):
+@pytest.mark.asyncio
+async def test_scheduler_static_estimate_includes_tool_schema_overhead():
+    async with _scheduler_with_history([]) as (scheduler, _session):
         del scheduler.__dict__["_estimate_instruction_context_tokens"]
         del scheduler.__dict__["_estimate_tool_schema_tokens"]
         scheduler._static_context_tokens_cache = None
@@ -133,7 +137,7 @@ async def test_scheduler_counts_responses_function_call_output():
             "output": "x" * 100_000,
         },
     ]
-    with _scheduler_with_history(history) as (scheduler, _session):
+    async with _scheduler_with_history(history) as (scheduler, _session):
         estimated = await scheduler._estimate_session_tokens()
 
     assert estimated > 10_000
@@ -150,7 +154,7 @@ async def test_scheduler_counts_function_call_arguments():
         },
         {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
     ]
-    with _scheduler_with_history(history) as (scheduler, _session):
+    async with _scheduler_with_history(history) as (scheduler, _session):
         estimated = await scheduler._estimate_session_tokens()
 
     assert estimated > 10_000
@@ -165,7 +169,7 @@ async def test_cancellation_scope_precedes_retrieval_preflight_and_compaction():
             self.callback = callback
 
     ui = StreamingUI()
-    with _scheduler_with_history([]) as (scheduler, _session):
+    async with _scheduler_with_history([]) as (scheduler, _session):
 
         async def verify_scope(*_args, **_kwargs):
             scope = current_turn_cancellation_scope()

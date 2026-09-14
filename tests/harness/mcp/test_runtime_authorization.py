@@ -444,12 +444,13 @@ async def test_admitted_operation_drains_before_cleanup_and_later_operation_is_d
     await asyncio.sleep(0)
     session.list_resources.assert_not_awaited()
     assert server.cleaned == 0
-    assert not denied.done()
+    # Denial returns without waiting for admitted work. Otherwise a consumer
+    # owning a paused stream could deadlock before it can close that stream.
+    with pytest.raises(MCPAuthorizationError, match="approval was reset"):
+        await denied
 
     release.set()
     assert await admitted == "admitted-result"
-    with pytest.raises(MCPAuthorizationError, match="approval was reset"):
-        await denied
 
     assert validator.in_flight == 0
     session.list_resources.assert_not_awaited()

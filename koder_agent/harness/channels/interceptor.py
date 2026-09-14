@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable
 from mcp.shared.message import SessionMessage
 from mcp.types import JSONRPCNotification
 
+from .admission import ChannelAdmission
 from .notification import CHANNEL_NOTIFICATION_METHOD, CHANNEL_PERMISSION_METHOD
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,17 @@ class ChannelInterceptingStream:
         server_name: str = "",
     ) -> None:
         self._inner = inner
-        self._on_notification = on_notification
+        self._on_notification = (
+            on_notification.for_stream(self)
+            if isinstance(on_notification, ChannelAdmission)
+            else on_notification
+        )
         self._server_name = server_name
+        self.bound_session: Any = None
+
+    def bind_session(self, session: Any) -> None:
+        """Bind the actual negotiated session without inspecting SDK internals."""
+        self.bound_session = session
 
     async def receive(self) -> Any:
         """Receive the next message, intercepting channel notifications."""
@@ -51,7 +61,9 @@ class ChannelInterceptingStream:
             if not isinstance(message, SessionMessage):
                 return message
 
-            root = message.message.root
+            # MCP 1 wraps the union in a RootModel; MCP 2 delivers the concrete
+            # JSON-RPC notification/response/error model directly.
+            root = getattr(message.message, "root", message.message)
             if not isinstance(root, JSONRPCNotification):
                 return message
 

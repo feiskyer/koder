@@ -1,9 +1,10 @@
-"""Recovery helpers for runtime transcript persistence."""
+"""Standalone SQLite snapshot helpers, not automatic recovery for main Sessions."""
 
 from __future__ import annotations
 
 import os
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,20 +51,20 @@ def create_backup(
 ) -> BackupResult:
     """Snapshot a HEALTHY runtime DB to ``<db>.bak`` so recovery has something to restore.
 
-    ``recover_partial_write`` restores from a ``.bak`` sibling, but nothing was
-    ever creating it. Callers that own the runtime DB writes (e.g. the transcript
-    store) should invoke this at a safe point -- ideally before a risky write, and
-    after a clean startup -- so a later corrupted primary can be recovered.
+    Only explicit callers create these snapshots. Main CLI persistence uses
+    ``EnhancedSQLiteSession`` and the SDK store, not this backup/restore path.
+    Integrators must choose their own backup cadence and recovery ownership.
 
     Uses SQLite's online backup API to capture a transactionally-consistent copy
-    even under WAL mode / concurrent access, writes it to a temp file, then
-    atomically ``os.replace``s it into place. A backup is only taken when the
-    source is healthy, so a corrupt DB can never clobber a good backup.
+    even under WAL mode / concurrent source access. Each call owns an independent
+    staging directory beside the destination. The candidate is checked before
+    atomic ``os.replace`` publication, so a rejected snapshot leaves the previous
+    backup intact. Concurrent publishers may replace one another's complete
+    snapshots; they never share or delete one another's staging database.
 
-    NOTE (wiring): this helper is not yet called from the transcript store
-    (``harness/memory/transcript_store.py``), which owns the actual writes and is
-    outside this change's file set. That store should call ``create_backup`` after
-    a successful commit so ``recover_partial_write`` has a backup to fall back to.
+    The standalone ``TranscriptStore`` does not automatically invoke this
+    helper either. A helper test is not evidence of main-session backup or
+    recovery integration.
     """
     runtime_db = Path(runtime_db_path)
     backup_db = (
@@ -77,28 +78,27 @@ def create_backup(
         # Never overwrite a known-good backup with a corrupt source.
         return BackupResult(created=False, reason="runtime database is not healthy")
 
-    backup_db.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = backup_db.with_suffix(backup_db.suffix + ".tmp")
     try:
-        source = sqlite3.connect(runtime_db)
-        try:
-            dest = sqlite3.connect(tmp_path)
+        backup_db.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=f".{backup_db.name}.", dir=backup_db.parent
+        ) as staging:
+            tmp_path = Path(staging) / "snapshot.db"
+            source = sqlite3.connect(runtime_db)
             try:
-                source.backup(dest)
+                dest = sqlite3.connect(tmp_path)
+                try:
+                    source.backup(dest)
+                finally:
+                    dest.close()
             finally:
-                dest.close()
-        finally:
-            source.close()
-        os.replace(tmp_path, backup_db)
+                source.close()
+            if not _sqlite_db_is_healthy(tmp_path):
+                return BackupResult(created=False, reason="backup failed integrity check")
+            os.replace(tmp_path, backup_db)
     except (sqlite3.DatabaseError, OSError):
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
         return BackupResult(created=False, reason="failed to write backup")
 
-    if not _sqlite_db_is_healthy(backup_db):
-        return BackupResult(created=False, reason="backup failed integrity check")
     return BackupResult(created=True, reason="backup created")
 
 
@@ -106,7 +106,14 @@ def recover_partial_write(
     runtime_db_path: str | Path,
     backup_db_path: str | Path | None = None,
 ) -> RecoveryResult:
-    """Restore a runtime transcript DB from the last known good backup when needed."""
+    """Restore a complete backup snapshot to a quiescent, damaged primary.
+
+    Callers must close primary connections and coordinate its writers before
+    recovery. This helper does not replace an actively used SQLite database.
+    The backup itself is read through SQLite's snapshot API, including committed
+    WAL data, and a validated candidate is published without truncating the
+    existing target in place.
+    """
     runtime_db = Path(runtime_db_path)
     backup_db = (
         Path(backup_db_path)
@@ -123,8 +130,7 @@ def recover_partial_write(
     if not _sqlite_db_is_healthy(backup_db):
         return RecoveryResult(recovered=False, reason="backup database is not healthy")
 
-    runtime_db.parent.mkdir(parents=True, exist_ok=True)
-    runtime_db.write_bytes(backup_db.read_bytes())
-    if _sqlite_db_is_healthy(runtime_db):
+    restored = create_backup(backup_db, runtime_db.resolve())
+    if restored.created:
         return RecoveryResult(recovered=True, reason="restored from backup")
-    return RecoveryResult(recovered=False, reason="restored database failed integrity check")
+    return RecoveryResult(recovered=False, reason=f"restore failed: {restored.reason}")

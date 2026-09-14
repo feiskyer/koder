@@ -7,6 +7,8 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from koder_agent.harness.execution_context import execution_path, get_execution_cwd
+
 from .compat import function_tool
 
 
@@ -58,7 +60,7 @@ def glob_search(pattern: str, path: Optional[str] = None) -> str:
         Matching files sorted by modification time (newest first)
     """
     try:
-        base_path = Path(path) if path else Path.cwd()
+        base_path = execution_path(path) if path else get_execution_cwd()
 
         # Validate base path
         if not base_path.exists():
@@ -79,7 +81,7 @@ def glob_search(pattern: str, path: Optional[str] = None) -> str:
         matches = []
         for match in all_matches:
             # Skip hidden directories and common ignore patterns
-            parts = match.parts
+            parts = match.relative_to(base_path).parts
             if any(part.startswith(".") and part not in {".github", ".vscode"} for part in parts):
                 continue
             if any(
@@ -192,7 +194,7 @@ def grep_search(
                 "  Windows: choco install ripgrep"
             )
 
-        base_path = Path(path) if path else Path.cwd()
+        base_path = execution_path(path) if path else get_execution_cwd()
 
         # Validate base path
         if not base_path.exists():
@@ -254,7 +256,9 @@ def grep_search(
         cmd.append(str(base_path))
 
         # Run ripgrep
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(
+            cmd, cwd=get_execution_cwd(), capture_output=True, text=True, timeout=30
+        )
 
         # Handle exit codes: 0 = matches, 1 = no matches, 2+ = error
         if result.returncode >= 2:

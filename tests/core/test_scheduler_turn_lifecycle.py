@@ -6,7 +6,6 @@ import sys
 import textwrap
 import threading
 import time
-from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -380,7 +379,9 @@ async def test_scheduler_cleanup_finishes_once_through_repeated_cancellation():
     scheduler.session.close.assert_awaited_once()
 
 
-def test_scheduler_cleanup_allows_process_to_terminate_with_bounded_timeout():
+def test_scheduler_cleanup_allows_process_to_terminate_with_bounded_timeout(
+    tmp_path, python_child_environment
+):
     script = textwrap.dedent("""
         import asyncio
         import sys
@@ -490,7 +491,8 @@ def test_scheduler_cleanup_allows_process_to_terminate_with_bounded_timeout():
 
     completed = subprocess.run(
         [sys.executable, "-c", script],
-        cwd=Path(__file__).resolve().parents[2],
+        cwd=tmp_path,
+        env=python_child_environment,
         capture_output=True,
         text=True,
         timeout=10,
@@ -573,7 +575,7 @@ async def test_stream_json_timeout_finishes_goal_once_as_error(monkeypatch):
     scheduler._handle_stream_json_unlocked = blocked_turn
 
     with skill_invocation_scope(manual_skill):
-        with pytest.raises(TimeoutError):
+        with pytest.raises(asyncio.TimeoutError):
             await scheduler.handle_stream_json("hello", on_event=lambda _event: None)
         restored = get_active_restrictions()
         assert restored is not None
@@ -587,6 +589,29 @@ async def test_stream_json_timeout_finishes_goal_once_as_error(monkeypatch):
         "cancelled": False,
     }
     scheduler._append_interruption_marker_if_needed.assert_not_awaited()
+    _assert_turn_contexts_reset()
+
+
+@pytest.mark.asyncio
+async def test_stream_json_exhausted_deadline_uses_asyncio_timeout_contract(monkeypatch):
+    scheduler = _make_scheduler()
+    scheduler._handle_stream_json_unlocked = AsyncMock()
+
+    async def slow_goal_start(*_args, **_kwargs):
+        await asyncio.sleep(0.02)
+
+    scheduler.goal_runtime.on_turn_start.side_effect = slow_goal_start
+    monkeypatch.setattr("koder_agent.core.scheduler.get_turn_timeout", lambda: 0.001)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await scheduler.handle_stream_json("hello", on_event=lambda _event: None)
+
+    scheduler._handle_stream_json_unlocked.assert_not_awaited()
+    scheduler.goal_runtime.on_turn_end.assert_awaited_once()
+    assert scheduler.goal_runtime.on_turn_end.await_args.kwargs == {
+        "error": True,
+        "cancelled": False,
+    }
     _assert_turn_contexts_reset()
 
 
@@ -703,7 +728,7 @@ async def test_stream_json_timeout_captures_partial_usage(monkeypatch):
     monkeypatch.setattr("koder_agent.core.scheduler.Runner.run_streamed", lambda *_a, **_k: result)
     monkeypatch.setattr("koder_agent.core.scheduler.get_turn_timeout", lambda: 0.01)
 
-    with pytest.raises(TimeoutError):
+    with pytest.raises(asyncio.TimeoutError):
         await scheduler.handle_stream_json("hello", on_event=lambda _event: None)
 
     scheduler._capture_usage.assert_awaited_once_with(result)
@@ -772,3 +797,63 @@ async def test_interactive_streaming_api_error_captures_partial_usage(monkeypatc
 
     assert "stream failed" in response
     scheduler._capture_usage.assert_awaited_once_with(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("display_kind", ["rich", "text", "empty"])
+async def test_fixed_bottom_cancel_notice_preserves_partial_output(monkeypatch, display_kind):
+    import io
+
+    from rich.console import Console
+    from rich.text import Text
+
+    scheduler = _make_scheduler()
+    _prepare_streaming_scheduler(scheduler)
+    partial_text = "" if display_kind == "empty" else "partial provider response"
+    display = Mock()
+    display.get_display_content.return_value = (
+        Text(partial_text) if display_kind == "rich" else None
+    )
+    display.get_final_text.return_value = partial_text
+    monkeypatch.setattr("koder_agent.core.scheduler.StreamingDisplayManager", lambda _: display)
+
+    class StreamingUI:
+        cancel_callback = None
+        final_content = None
+
+        def update_output(self, _value):
+            pass
+
+        def set_cancel_callback(self, callback):
+            self.cancel_callback = callback
+
+        def set_final_content(self, content):
+            self.final_content = content
+
+        def set_final_text(self, text):
+            self.final_content = text
+
+    ui = StreamingUI()
+
+    class Result:
+        final_output = None
+        cancel = Mock()
+
+        async def stream_events(self):
+            ui.cancel_callback()
+            if False:
+                yield None
+
+    result = Result()
+    monkeypatch.setattr("koder_agent.core.scheduler.Runner.run_streamed", lambda *_a, **_k: result)
+    response = await scheduler._handle_streaming("hello", streaming_ui=ui)
+    output = io.StringIO()
+    Console(file=output, color_system=None).print(ui.final_content)
+
+    assert "Operation cancelled by user" in output.getvalue()
+    if partial_text:
+        assert partial_text in output.getvalue()
+        assert response == partial_text
+    assert scheduler._last_turn_cancelled
+    assert ui.cancel_callback is None
+    result.cancel.assert_called_once_with(mode="immediate")

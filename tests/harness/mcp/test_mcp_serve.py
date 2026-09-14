@@ -4,9 +4,40 @@ from __future__ import annotations
 
 import asyncio
 from argparse import Namespace
+from contextlib import AsyncExitStack, asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
+import anyio
+import mcp
+
 from koder_agent.mcp.serve import _build_tool_list, create_mcp_server
+
+
+@asynccontextmanager
+async def connected_session():
+    """Drive real server dispatch through SDK streams and initialization."""
+    server = create_mcp_server()
+    to_server, server_read = anyio.create_memory_object_stream(10)
+    to_client, client_read = anyio.create_memory_object_stream(10)
+
+    @asynccontextmanager
+    async def transport():
+        yield client_read, to_server
+
+    async with to_server, server_read, to_client, client_read, anyio.create_task_group() as group:
+        group.start_soon(server.run, server_read, to_client, server.create_initialization_options())
+        async with AsyncExitStack() as stack:
+            if hasattr(mcp, "Client"):
+                client = await stack.enter_async_context(
+                    mcp.Client(transport(), mode="legacy", cache=None, read_timeout_seconds=5)
+                )
+                session = client.session
+            else:
+                session = await stack.enter_async_context(mcp.ClientSession(client_read, to_server))
+                await session.initialize()
+            yield session
+        group.cancel_scope.cancel()
+
 
 # ---------------------------------------------------------------------------
 # Tool list construction
@@ -59,7 +90,7 @@ class TestBuildToolList:
         mcp_tools, _ = _build_tool_list()
         for t in mcp_tools:
             assert t.name
-            assert isinstance(t.inputSchema, dict)
+            assert isinstance(t.model_dump(by_alias=True)["inputSchema"], dict)
 
 
 # ---------------------------------------------------------------------------
@@ -72,10 +103,7 @@ class TestCreateMcpServer:
 
     def test_server_has_handlers(self):
         server = create_mcp_server()
-        from mcp import types
-
-        assert types.ListToolsRequest in server.request_handlers
-        assert types.CallToolRequest in server.request_handlers
+        assert server.create_initialization_options().capabilities.tools is not None
 
 
 # ---------------------------------------------------------------------------
@@ -128,23 +156,11 @@ class TestToolCallViaServer:
         """Calling a known tool (list_directory) should succeed."""
 
         async def _run():
-            server = create_mcp_server()
-            from mcp import types
-
-            handler = server.request_handlers[types.CallToolRequest]
-
-            request = types.CallToolRequest(
-                method="tools/call",
-                params=types.CallToolRequestParams(
-                    name="list_directory",
-                    arguments={"path": "."},
-                ),
-            )
-            response = await handler(request)
-            result = response.root
-            assert hasattr(result, "content")
-            assert len(result.content) > 0
-            assert result.content[0].type == "text"
+            async with connected_session() as session:
+                result = await session.call_tool("list_directory", {"path": "."})
+                assert result.model_dump(by_alias=True).get("isError") is not True
+                assert len(result.content) > 0
+                assert result.content[0].type == "text"
 
         asyncio.run(_run())
 
@@ -152,39 +168,19 @@ class TestToolCallViaServer:
         """Calling an unknown tool should return an error result."""
 
         async def _run():
-            server = create_mcp_server()
-            from mcp import types
-
-            handler = server.request_handlers[types.CallToolRequest]
-
-            request = types.CallToolRequest(
-                method="tools/call",
-                params=types.CallToolRequestParams(
-                    name="nonexistent_tool_xyz",
-                    arguments={},
-                ),
-            )
-            response = await handler(request)
-            result = response.root
-            assert result.isError is True
+            async with connected_session() as session:
+                result = await session.call_tool("nonexistent_tool_xyz", {})
+                assert result.model_dump(by_alias=True)["isError"] is True
 
         asyncio.run(_run())
 
     def test_todo_tools_are_not_callable_without_an_mcp_request_identity(self):
         async def _run():
-            server = create_mcp_server()
-            from mcp import types
-
-            handler = server.request_handlers[types.CallToolRequest]
-            requests = [
-                types.CallToolRequest(
-                    method="tools/call",
-                    params=types.CallToolRequestParams(name=name, arguments={}),
+            async with connected_session() as session:
+                responses = await asyncio.gather(
+                    *(session.call_tool(name, {}) for name in ("todo_read", "todo_write"))
                 )
-                for name in ("todo_read", "todo_write")
-            ]
-            responses = await asyncio.gather(*(handler(request) for request in requests))
-            assert all(response.root.isError is True for response in responses)
+                assert all(response.model_dump(by_alias=True)["isError"] for response in responses)
 
         asyncio.run(_run())
 
@@ -192,20 +188,10 @@ class TestToolCallViaServer:
         """The list_tools handler should return all exposed tools."""
 
         async def _run():
-            server = create_mcp_server()
-            from mcp import types
-
-            handler = server.request_handlers[types.ListToolsRequest]
-
-            request = types.ListToolsRequest(
-                method="tools/list",
-                params=None,
-            )
-            response = await handler(request)
-            result = response.root
-            assert hasattr(result, "tools")
-            names = {t.name for t in result.tools}
-            assert "read_file" in names
-            assert "task_delegate" not in names
+            async with connected_session() as session:
+                result = await session.list_tools()
+                names = {t.name for t in result.tools}
+                assert "read_file" in names
+                assert "task_delegate" not in names
 
         asyncio.run(_run())

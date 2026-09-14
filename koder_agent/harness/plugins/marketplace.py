@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from koder_agent.utils.atomic_file import write_text_atomic
+
 from .manifest import find_manifest, parse_manifest
 from .name_validation import canonical_marketplace_name
+from .state import PluginInstallOrigin
 
 _GITHUB_SHORTHAND = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
 
@@ -36,6 +40,7 @@ class MarketplacePlugin:
     description: str
     source: str  # marketplace name
     path: str  # local path to plugin directory
+    origin: PluginInstallOrigin | None = None
 
 
 def _marketplace_cache_dir() -> Path:
@@ -44,19 +49,34 @@ def _marketplace_cache_dir() -> Path:
     return harness_home_dir() / "plugins" / "marketplace-cache"
 
 
-def _clone_github_repo(repo: str, target: Path) -> bool:
-    """Clone a GitHub repo to target directory. Returns True on success."""
-    url = f"https://github.com/{repo}.git"
+def _repository_cache_path(name: str, source: str) -> Path:
+    fingerprint = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    return _marketplace_cache_dir() / f"{name[:180]}-{fingerprint}"
+
+
+def _clone_repository(url: str, target: Path) -> bool:
+    """Reuse only a checkout of the requested origin, and surface pull failure."""
     try:
+        if target.is_symlink():
+            return False
         if target.exists():
-            # Pull latest
-            subprocess.run(
+            remote = subprocess.run(
+                ["git", "-C", str(target), "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if remote.returncode != 0 or remote.stdout.strip() != url:
+                return False
+            result = subprocess.run(
                 ["git", "-C", str(target), "pull", "--ff-only"],
                 capture_output=True,
+                text=True,
                 timeout=120,
                 check=False,
             )
-            return True
+            return result.returncode == 0
         target.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             ["git", "clone", "--depth", "1", url, str(target)],
@@ -68,6 +88,10 @@ def _clone_github_repo(repo: str, target: Path) -> bool:
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False
+
+
+def _clone_github_repo(repo: str, target: Path) -> bool:
+    return _clone_repository(f"https://github.com/{repo}.git", target)
 
 
 def _parse_marketplace_input(source: str) -> tuple[str, str, str]:
@@ -165,7 +189,7 @@ class MarketplaceStore:
 
     def _save(self, data: dict[str, dict]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        write_text_atomic(self._path, json.dumps(data, indent=2))
 
     def add(self, source_input: str) -> tuple[MarketplaceSource | None, str]:
         """Register a marketplace source.
@@ -204,34 +228,15 @@ class MarketplaceStore:
 
         local_path = raw_source
         if source_type == "github":
-            cache = _marketplace_cache_dir() / name
+            cache = _repository_cache_path(name, raw_source)
             if not _clone_github_repo(raw_source, cache):
                 return None, f"Failed to clone https://github.com/{raw_source}.git"
             local_path = str(cache)
         elif source_type == "git":
-            cache = _marketplace_cache_dir() / name
-            try:
-                if cache.exists():
-                    subprocess.run(
-                        ["git", "-C", str(cache), "pull", "--ff-only"],
-                        capture_output=True,
-                        timeout=120,
-                        check=False,
-                    )
-                else:
-                    cache.parent.mkdir(parents=True, exist_ok=True)
-                    result = subprocess.run(
-                        ["git", "clone", "--depth", "1", raw_source, str(cache)],
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                        check=False,
-                    )
-                    if result.returncode != 0:
-                        return None, f"Failed to clone {raw_source}"
-                local_path = str(cache)
-            except (subprocess.TimeoutExpired, OSError) as exc:
-                return None, f"Git operation failed: {exc}"
+            cache = _repository_cache_path(name, raw_source)
+            if not _clone_repository(raw_source, cache):
+                return None, f"Failed to prepare repository cache for marketplace '{name}'"
+            local_path = str(cache)
         elif source_type == "directory":
             if not Path(local_path).is_dir():
                 return None, f"Directory not found: {local_path}"
@@ -283,6 +288,38 @@ class MarketplaceStore:
             path=entry.get("path", ""),
         )
 
+    @staticmethod
+    def _entry_origin(name: str, entry: dict) -> PluginInstallOrigin | None:
+        source_type = entry.get("source_type", "directory")
+        path = entry.get("path")
+        raw_source = entry.get("raw_source")
+        if raw_source is None and source_type == "directory":
+            raw_source = path
+        if (
+            not isinstance(source_type, str)
+            or source_type not in {"directory", "github", "git"}
+            or not isinstance(path, str)
+            or not path
+            or not isinstance(raw_source, str)
+            or not raw_source
+        ):
+            return None
+        # Bind both the registered source and its effective local checkout.
+        # Store only a digest, not potentially credential-bearing source URLs.
+        identity = json.dumps(
+            [source_type, raw_source, str(Path(path).expanduser().resolve())],
+            separators=(",", ":"),
+        )
+        return PluginInstallOrigin(name, hashlib.sha256(identity.encode("utf-8")).hexdigest())
+
+    def matches_origin(self, origin: PluginInstallOrigin) -> bool:
+        """Check an installation receipt against the current registered source."""
+        try:
+            entry = self._load().get(origin.marketplace)
+            return entry is not None and self._entry_origin(origin.marketplace, entry) == origin
+        except (OSError, RuntimeError, ValueError):
+            return False
+
     def discover_plugins(self, marketplace_name: str) -> list[MarketplacePlugin]:
         """List all plugins available from a registered marketplace.
 
@@ -290,12 +327,16 @@ class MarketplaceStore:
         subdirectories like ``plugins/`` and ``external_plugins/`` where
         GitHub-hosted marketplaces typically nest their plugin directories.
         """
-        source = self.get(marketplace_name)
-        if source is None:
+        marketplace_name, _reason = canonical_marketplace_name(marketplace_name)
+        if marketplace_name is None:
             return []
-        source_path = Path(source.path)
+        entry = self._load().get(marketplace_name)
+        if entry is None:
+            return []
+        source_path = Path(entry.get("path", ""))
         if not source_path.is_dir():
             return []
+        origin = self._entry_origin(marketplace_name, entry)
 
         plugins: list[MarketplacePlugin] = []
         seen_names: set[str] = set()
@@ -325,8 +366,9 @@ class MarketplaceStore:
                         name=manifest.name,
                         version=manifest.version,
                         description=manifest.description,
-                        source=source.name,
+                        source=marketplace_name,
                         path=str(subdir),
+                        origin=origin,
                     )
                 )
         return plugins

@@ -9,10 +9,12 @@ import os
 import re
 import subprocess
 import threading
+import urllib.error
 import urllib.request
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar, Token, copy_context
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -29,6 +31,8 @@ from koder_agent.harness.session_env import (
     session_env_file,
 )
 
+from .command_process import HookCommandCancelledError, run_command
+
 logger = logging.getLogger(__name__)
 
 # Maximum characters of hook output injected into model context.
@@ -37,11 +41,17 @@ _MAX_HOOK_OUTPUT_CHARS = 10_000
 # Thread-local guard to prevent reentrant dispatch (e.g., an agent-type hook
 # triggering its own PreToolUse check which would cause infinite recursion).
 _dispatch_guard = threading.local()
+_foreground_cancellation: ContextVar[threading.Event | None] = ContextVar(
+    "koder_hook_foreground_cancellation", default=None
+)
 
 # Default hook timeout (seconds) when a hook config omits ``timeout``.
 # A hook must never run unbounded: ``subprocess.run(timeout=None)`` /
 # ``urlopen(timeout=None)`` would block the dispatching thread forever.
 _DEFAULT_HOOK_TIMEOUT_SECONDS = 60
+# Command cleanup normally completes within a polling interval. Other hook
+# types may be blocked in non-cancellable I/O; never join those indefinitely.
+_CANCELLATION_JOIN_TIMEOUT_SECONDS = 2.0
 
 # Events that receive KODER_ENV_FILE.
 _ENV_FILE_EVENTS = frozenset({"SessionStart", "CwdChanged", "FileChanged"})
@@ -245,6 +255,20 @@ class HookScope:
     plugin_name: str | None = None
 
 
+@dataclass
+class CommandHookSnapshot:
+    """Loaded hook definitions; usable only inside ``snapshot_command_hooks``.
+
+    Plugin resources remain owned by the context. Definitions, including project
+    trust payloads and disable flags, are detached from mutable skill registries.
+    Referenced command files and external approval state are not frozen.
+    """
+
+    cwd: Path
+    _scopes: list[HookScope]
+    _active: bool = True
+
+
 @dataclass(frozen=True)
 class HookListing:
     event: str
@@ -375,10 +399,10 @@ def _hooks_disabled_level(
     return None
 
 
-def _project_search_roots(cwd: str | Path) -> list[Path]:
+def _project_search_roots(cwd: str | Path, home: Path | None = None) -> list[Path]:
     roots: list[Path] = []
     current = Path(cwd).resolve()
-    home = Path.home().resolve()
+    home = (home if home is not None else Path.home()).resolve()
     while True:
         roots.append(current)
         if current == home or current.parent == current:
@@ -401,9 +425,9 @@ def resolve_hook_project_root(cwd: str | Path) -> Path:
     return Path(cwd).resolve()
 
 
-def _project_settings_paths(cwd: str | Path) -> list[Path]:
+def _project_settings_paths(cwd: str | Path, home: Path | None = None) -> list[Path]:
     paths: list[Path] = []
-    for current in _project_search_roots(cwd):
+    for current in _project_search_roots(cwd, home):
         candidate = settings_path(current)
         if candidate.exists():
             paths.append(candidate)
@@ -414,10 +438,15 @@ def _project_settings_paths(cwd: str | Path) -> list[Path]:
 
 
 @contextmanager
-def load_hook_scopes(cwd: str | Path) -> Iterator[list[HookScope]]:
+def load_hook_scopes(
+    cwd: str | Path, *, home: str | Path | None = None
+) -> Iterator[list[HookScope]]:
+    """Load scopes, optionally for an explicit destination user profile."""
+    home_dir = Path(home).expanduser().resolve() if home is not None else None
     with ExitStack() as plugin_snapshots:
         scopes: list[HookScope] = []
-        user_settings = harness_home_dir() / "settings.json"
+        user_root = home_dir / ".koder" if home_dir is not None else harness_home_dir()
+        user_settings = user_root / "settings.json"
         if user_settings.exists():
             settings = _load_json_file(user_settings)
             hooks = settings.get("hooks")
@@ -431,7 +460,9 @@ def load_hook_scopes(cwd: str | Path) -> Iterator[list[HookScope]]:
                         disable_all_hooks=settings.get("disableAllHooks") is True,
                     )
                 )
-        policy_settings = managed_settings_path()
+        policy_settings = (
+            user_root / "managed-settings.json" if home_dir is not None else managed_settings_path()
+        )
         if policy_settings.exists():
             settings = load_managed_settings(policy_settings).data
             hooks = settings.get("hooks")
@@ -445,7 +476,7 @@ def load_hook_scopes(cwd: str | Path) -> Iterator[list[HookScope]]:
                         disable_all_hooks=settings.get("disableAllHooks") is True,
                     )
                 )
-        for path in _project_settings_paths(cwd):
+        for path in _project_settings_paths(cwd, home_dir):
             settings = _load_json_file(path)
             hooks = settings.get("hooks")
             source = "local_settings" if path.name == "settings.local.json" else "project_settings"
@@ -458,7 +489,9 @@ def load_hook_scopes(cwd: str | Path) -> Iterator[list[HookScope]]:
                     disable_all_hooks=settings.get("disableAllHooks") is True,
                 )
             )
-        plugin_root = harness_home_dir() / "plugins"
+        from koder_agent.harness.plugins.context import get_plugin_root
+
+        plugin_root = user_root / "plugins" if home_dir is not None else get_plugin_root()
         if plugin_root.exists():
             try:
                 from koder_agent.harness.plugins.lifecycle import PluginLifecycleService
@@ -510,6 +543,24 @@ def load_hook_scopes(cwd: str | Path) -> Iterator[list[HookScope]]:
         if dynamic_registry is not None:
             scopes.extend(dynamic_registry.snapshot())
         yield scopes
+
+
+@contextmanager
+def snapshot_command_hooks(
+    *, cwd: str | Path, home: str | Path | None = None
+) -> Iterator[CommandHookSnapshot]:
+    """Capture hooks before a transaction and retain resources through dispatch.
+
+    Pass the yielded snapshot to ``dispatch_command_hooks`` for each event.
+    This does not execute hooks or persist approvals. Existing dispatch rules
+    (trust checks, deduplication, once, async and cancellation) remain in force.
+    """
+    with load_hook_scopes(cwd, home=home) as scopes:
+        snapshot = CommandHookSnapshot(Path(cwd).resolve(), deepcopy(scopes))
+        try:
+            yield snapshot
+        finally:
+            snapshot._active = False
 
 
 def list_configured_hooks(cwd: str | Path) -> list[HookListing]:
@@ -652,17 +703,15 @@ def _run_command_hook(
         cmd = command
         use_shell = True
     try:
-        result = subprocess.run(
+        result = run_command(
             cmd,
             input=payload_text,
-            text=True,
             cwd=str(cwd),
             shell=use_shell,
-            capture_output=True,
             env=env,
-            check=False,
             # Never run unbounded: timeout=None would block forever.
             timeout=_bounded_timeout(timeout),
+            cancel_event=_foreground_cancellation.get(),
         )
     except subprocess.TimeoutExpired:
         return 2, "", "Hook timed out (fail-closed)"
@@ -693,6 +742,13 @@ def _run_http_hook(
         with urllib.request.urlopen(request, timeout=_bounded_timeout(timeout)) as response:
             body = response.read().decode("utf-8")
             return response.status, body.strip(), ""
+    except urllib.error.HTTPError as exc:
+        diagnostic = str(exc)
+        try:
+            exc.close()
+        except Exception as cleanup_error:
+            logger.debug("HTTP hook response cleanup failed (%s)", type(cleanup_error).__name__)
+        return 500, "", diagnostic
     except Exception as exc:  # pragma: no cover - defensive
         return 500, "", str(exc)
 
@@ -958,31 +1014,23 @@ def _run_async_command(
     timeout: int | float | None = None,
     on_complete: Callable[[], None] | None = None,
 ) -> None:
-    if shell:
-        cmd: str | list[str] = [shell, "-c", command]
-        use_shell = False
-    else:
-        cmd = command
-        use_shell = True
-
     # Use bounded timeout to prevent indefinite thread blocking.
     effective_timeout = _bounded_timeout(timeout)
 
     def _target():
         try:
-            subprocess.run(
-                cmd,
-                input=payload_text,
-                text=True,
-                cwd=str(cwd),
-                shell=use_shell,
-                capture_output=True,
+            code, _stdout, _stderr = _run_command_hook(
+                command=command,
+                payload_text=payload_text,
+                cwd=cwd,
                 env=env,
-                check=False,
+                shell=shell,
                 timeout=effective_timeout,
             )
-        except subprocess.TimeoutExpired:
-            logger.debug("Async hook timed out after %s seconds: %s", effective_timeout, command)
+            if code == 2:
+                logger.debug(
+                    "Async hook failed or timed out after at most %s seconds", effective_timeout
+                )
         finally:
             if on_complete is not None:
                 on_complete()
@@ -996,13 +1044,21 @@ def _run_async_command(
         raise
 
 
+def _check_foreground_cancellation() -> None:
+    cancellation = _foreground_cancellation.get()
+    if cancellation is not None and cancellation.is_set():
+        raise HookCommandCancelledError()
+
+
 def dispatch_command_hooks(
     *,
     cwd: str | Path,
     event_name: str,
     payload: dict[str, Any],
     match_value: str | None = None,
+    snapshot: CommandHookSnapshot | None = None,
 ) -> HookDispatchResult:
+    _check_foreground_cancellation()
     # Reentrancy guard: prevent infinite recursion when an agent-type hook
     # triggers tool calls that would dispatch back into this function.
     if getattr(_dispatch_guard, "in_dispatch", False):
@@ -1014,6 +1070,7 @@ def dispatch_command_hooks(
             event_name=event_name,
             payload=payload,
             match_value=match_value,
+            snapshot=snapshot,
         )
     finally:
         _dispatch_guard.in_dispatch = False
@@ -1025,8 +1082,12 @@ def _dispatch_command_hooks_inner(
     event_name: str,
     payload: dict[str, Any],
     match_value: str | None = None,
+    snapshot: CommandHookSnapshot | None = None,
 ) -> HookDispatchResult:
-    with load_hook_scopes(cwd) as scopes:
+    if snapshot is not None and (not snapshot._active or snapshot.cwd != Path(cwd).resolve()):
+        raise ValueError("Hook snapshot is closed or belongs to a different cwd")
+    scope_context = nullcontext(snapshot._scopes) if snapshot is not None else load_hook_scopes(cwd)
+    with scope_context as scopes:
         # Parse settings once so trust validation and execution share one immutable
         # dispatch snapshot even if a settings file changes concurrently. The same
         # scope also keeps plugin snapshots alive through synchronous execution.
@@ -1101,6 +1162,7 @@ def _dispatch_loaded_hook_scopes(
             if not _matches_matcher(group.get("matcher"), match_value):
                 continue
             for hook in group.get("hooks") or []:
+                _check_foreground_cancellation()
                 if not isinstance(hook, dict):
                     continue
                 if not _matches_if(hook.get("if"), payload):
@@ -1179,7 +1241,7 @@ def _dispatch_loaded_hook_scopes(
                                 context.__exit__(None, None, None)
 
                             async_cleanup = close_async_snapshot
-                        result = HookDispatchResult(matched_hooks=result.matched_hooks + 1)
+                        result = replace(result, matched_hooks=result.matched_hooks + 1)
                         _run_async_command(
                             command=command,
                             payload_text=payload_text,
@@ -1190,7 +1252,7 @@ def _dispatch_loaded_hook_scopes(
                             on_complete=async_cleanup,
                         )
                         continue
-                    result = HookDispatchResult(matched_hooks=result.matched_hooks + 1)
+                    result = replace(result, matched_hooks=result.matched_hooks + 1)
                     code, stdout, stderr = _run_command_hook(
                         command=command,
                         payload_text=payload_text,
@@ -1203,7 +1265,7 @@ def _dispatch_loaded_hook_scopes(
                     url = hook.get("url")
                     if not isinstance(url, str) or not url.strip():
                         continue
-                    result = HookDispatchResult(matched_hooks=result.matched_hooks + 1)
+                    result = replace(result, matched_hooks=result.matched_hooks + 1)
                     code, stdout, stderr = _run_http_hook(
                         url=url,
                         payload_text=payload_text,
@@ -1215,7 +1277,7 @@ def _dispatch_loaded_hook_scopes(
                     prompt_text = hook.get("prompt")
                     if not isinstance(prompt_text, str) or not prompt_text.strip():
                         continue
-                    result = HookDispatchResult(matched_hooks=result.matched_hooks + 1)
+                    result = replace(result, matched_hooks=result.matched_hooks + 1)
                     stdout = _run_prompt_hook(
                         prompt_text=prompt_text,
                         payload_text=payload_text,
@@ -1225,7 +1287,7 @@ def _dispatch_loaded_hook_scopes(
                     prompt_text = hook.get("prompt")
                     if not isinstance(prompt_text, str) or not prompt_text.strip():
                         continue
-                    result = HookDispatchResult(matched_hooks=result.matched_hooks + 1)
+                    result = replace(result, matched_hooks=result.matched_hooks + 1)
                     stdout = _run_agent_hook(
                         prompt_text=prompt_text,
                         payload_text=payload_text,
@@ -1252,6 +1314,7 @@ def _dispatch_loaded_hook_scopes(
                         elicitation_action=result.elicitation_action,
                         elicitation_content=result.elicitation_content,
                     )
+    _check_foreground_cancellation()
     if event_name == "SessionStart" and isinstance(payload.get("session_id"), str):
         session_id = str(payload["session_id"])
         session_env_file(session_id)
@@ -1268,19 +1331,51 @@ async def dispatch_command_hooks_async(
 ) -> HookDispatchResult:
     """Run :func:`dispatch_command_hooks` off the event loop.
 
-    ``dispatch_command_hooks`` performs blocking I/O (``subprocess.run``,
+    ``dispatch_command_hooks`` performs blocking I/O (command subprocesses,
     ``urllib.request.urlopen``). Async callers must use this entrypoint so a
     slow hook cannot freeze the event loop (streaming UI, subagents, cron).
     ``asyncio.to_thread`` copies the current context, so contextvars such as
     the active skill hook scopes propagate into the worker thread.
     """
-    return await asyncio.to_thread(
-        dispatch_command_hooks,
-        cwd=cwd,
-        event_name=event_name,
-        payload=payload,
-        match_value=match_value,
-    )
+    cancellation = threading.Event()
+
+    def dispatch() -> HookDispatchResult:
+        token = _foreground_cancellation.set(cancellation)
+        try:
+            return dispatch_command_hooks(
+                cwd=cwd,
+                event_name=event_name,
+                payload=payload,
+                match_value=match_value,
+            )
+        finally:
+            _foreground_cancellation.reset(token)
+
+    task = asyncio.create_task(asyncio.to_thread(dispatch))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        cancellation.set()
+        # Cancelling a to_thread waiter cannot stop its worker. Signal the
+        # command loop and allow bounded cleanup before propagating cancellation.
+        # HTTP/model hooks may remain in uninterruptible I/O; their worker still
+        # owns its scopes and must not continue to later hooks once it returns.
+        deadline = asyncio.get_running_loop().time() + _CANCELLATION_JOIN_TIMEOUT_SECONDS
+        while not task.done():
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait({task}, timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+
+        def discard_outcome(completed: asyncio.Task[HookDispatchResult]) -> None:
+            if not completed.cancelled():
+                completed.exception()  # cancellation wins over a worker error
+
+        task.add_done_callback(discard_outcome)
+        raise
 
 
 @contextmanager

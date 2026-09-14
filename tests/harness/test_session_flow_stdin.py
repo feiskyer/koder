@@ -11,19 +11,17 @@ from koder_agent.harness.onboarding import OnboardingState
 from koder_agent.tools.todo import TodoRuntimeIdentity, TodoStore
 
 
-@pytest.fixture(scope="module", autouse=True)
-def _close_inherited_pytest_asyncio_loop():
-    """Do not let this module's ``asyncio.run`` calls orphan pytest's loop."""
-    try:
-        inherited_loop = asyncio.get_event_loop()
-    except RuntimeError:
-        inherited_loop = None
+@pytest.fixture(autouse=True)
+def _isolate_default_runtime_home(tmp_path, monkeypatch):
+    original_home = Path.home
+    user_home = original_home()
 
-    if inherited_loop is not None and not inherited_loop.is_running():
-        inherited_loop.close()
-        asyncio.set_event_loop(None)
+    def test_home(_cls):
+        current = original_home()
+        # Keep explicit per-test home overrides, but never use the real profile.
+        return tmp_path if current == user_home else current
 
-    yield
+    monkeypatch.setattr(Path, "home", classmethod(test_home))
 
 
 class _FakeStdin:
@@ -1296,7 +1294,11 @@ def test_switch_cancellation_requested_inside_no_await_commit_is_fully_committed
     asyncio.run(scenario())
 
 
-def test_old_cleanup_failure_does_not_desynchronize_switch_state(caplog):
+def test_old_cleanup_failure_does_not_desynchronize_switch_state(caplog, monkeypatch):
+    monkeypatch.setattr(
+        "koder_agent.core.session.EnhancedSQLiteSession", _FakeEnhancedSQLiteSession
+    )
+
     async def scenario():
         builder = _LifecycleBuilder()
         state = session_flow._SchedulerState.create(builder, "old")

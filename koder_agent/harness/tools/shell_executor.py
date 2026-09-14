@@ -15,9 +15,9 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Awaitable, Callable, Union
 
+from koder_agent.harness.execution_context import get_execution_cwd
 from koder_agent.harness.sandbox.backend import (
     SandboxExecutionContext,
     SandboxExecutionRequirement,
@@ -79,7 +79,7 @@ def _selected_backend_status(sandbox_state):
 def _sandbox_snapshot(sandbox_state, backend_status) -> SandboxExecutionRequirement:
     return SandboxExecutionRequirement(
         backend_id=sandbox_state.backend,
-        canonical_cwd=canonical_workspace_path(Path.cwd()),
+        canonical_cwd=canonical_workspace_path(get_execution_cwd()),
         policy_digest=sandbox_policy_digest(sandbox_state.policy),
         capability_digest=backend_capability_digest(backend_status.capabilities),
     )
@@ -92,7 +92,7 @@ def _sandbox_snapshot_mismatch(
     use_sandbox: bool,
     require_complete_capabilities: bool,
 ) -> str | None:
-    current_cwd = canonical_workspace_path(Path.cwd())
+    current_cwd = canonical_workspace_path(get_execution_cwd())
     if not sandbox_state.enabled:
         return "sandbox is no longer enabled"
     if not use_sandbox:
@@ -136,7 +136,7 @@ def capture_unsandboxed_fallback_requirement(
     backend_status = _selected_backend_status(sandbox_state)
     if backend_status is None:
         return None
-    canonical_cwd = canonical_workspace_path(Path.cwd())
+    canonical_cwd = canonical_workspace_path(get_execution_cwd())
     losses = unsandboxed_fallback_losses(
         sandbox_state.policy,
         backend_status.capabilities,
@@ -178,7 +178,7 @@ def unsandboxed_fallback_requirement_mismatch(
 
     if not sandbox_state.enabled:
         return "sandbox is no longer enabled"
-    if is_excluded_command(command, cwd=Path.cwd()):
+    if is_excluded_command(command, cwd=get_execution_cwd()):
         return "command is now excluded from sandbox execution"
     current = capture_unsandboxed_fallback_requirement(
         sandbox_state,
@@ -495,6 +495,7 @@ async def _run_foreground_unsandboxed(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
+            cwd=get_execution_cwd(),
             **_new_session_kwargs(),
         )
     else:
@@ -503,6 +504,7 @@ async def _run_foreground_unsandboxed(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=child_env,
+            cwd=get_execution_cwd(),
             **_new_session_kwargs(),
         )
 
@@ -580,8 +582,10 @@ async def execute_shell_command(
 
     timeout = max(1, min(timeout, 600))
 
-    sandbox_state = resolve_sandbox_settings(Path.cwd())
-    use_sandbox = sandbox_state.enabled and not is_excluded_command(command, cwd=Path.cwd())
+    sandbox_state = resolve_sandbox_settings(get_execution_cwd())
+    use_sandbox = sandbox_state.enabled and not is_excluded_command(
+        command, cwd=get_execution_cwd()
+    )
     if required_sandbox is not None:
         mismatch_reason = _sandbox_snapshot_mismatch(
             required_sandbox,
@@ -632,10 +636,10 @@ async def execute_shell_command(
                             f"{degradation_reason}",
                         )
 
-                    refreshed_state = resolve_sandbox_settings(Path.cwd())
+                    refreshed_state = resolve_sandbox_settings(get_execution_cwd())
                     refreshed_use_sandbox = refreshed_state.enabled and not is_excluded_command(
                         command,
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                     )
                     mismatch_reason = _sandbox_snapshot_mismatch(
                         degradation_snapshot,
@@ -662,8 +666,8 @@ async def execute_shell_command(
             child_env = build_sandbox_env(session_id)
             sandbox_result = await execute_with_sdk_backend(
                 SandboxExecutionContext(
-                    cwd=Path.cwd().resolve(),
-                    repo_root=Path.cwd().resolve(),
+                    cwd=get_execution_cwd().resolve(),
+                    repo_root=get_execution_cwd().resolve(),
                     command=command,
                     env=child_env,
                     timeout=timeout,
@@ -678,7 +682,11 @@ async def execute_shell_command(
                 if degradation_warning:
                     output = f"{degradation_warning}\n{output}"
                 return ShellExecutionResult(
-                    status="success" if sandbox_result.exit_code == 0 else "error",
+                    status=(
+                        "success"
+                        if sandbox_result.status == "success" and sandbox_result.exit_code == 0
+                        else "error"
+                    ),
                     output=output,
                     exit_code=sandbox_result.exit_code,
                 )
@@ -703,7 +711,7 @@ async def execute_shell_command(
                 fallback_requirement.reason,
             )
             if approved:
-                refreshed_state = resolve_sandbox_settings(Path.cwd())
+                refreshed_state = resolve_sandbox_settings(get_execution_cwd())
                 mismatch_reason = unsandboxed_fallback_requirement_mismatch(
                     fallback_requirement,
                     refreshed_state,
@@ -746,6 +754,7 @@ async def execute_shell_command(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=child_env,
+                cwd=get_execution_cwd(),
                 **_new_session_kwargs(),
             )
         else:
@@ -754,6 +763,7 @@ async def execute_shell_command(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=child_env,
+                cwd=get_execution_cwd(),
                 **_new_session_kwargs(),
             )
         shell = BackgroundProcess(
@@ -813,6 +823,7 @@ async def execute_powershell_command(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=child_env,
+            cwd=get_execution_cwd(),
             **_new_session_kwargs(),
         )
         shell = BackgroundProcess(
@@ -839,6 +850,7 @@ async def execute_powershell_command(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=child_env,
+        cwd=get_execution_cwd(),
         **_new_session_kwargs(),
     )
     try:

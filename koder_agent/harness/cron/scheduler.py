@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from .expression import cron_matches_now, field_matches
-from .storage import CronStorage
+from .storage import CronClaim, CronStorage
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ class CronScheduler:
 
     Call `start()` to begin polling. Call `stop()` to shut down.
     The `on_fire` callback receives the prompt string when a job fires.
+    Synchronous callbacks are acknowledged on return. An `on_claim_fire` consumer
+    instead owns the claim until it explicitly completes/releases the delivery.
     """
 
     def __init__(
@@ -34,12 +36,14 @@ class CronScheduler:
         on_fire: Callable[[str], None] | None = None,
         *,
         on_job_fire: Callable[[dict[str, Any]], object] | None = None,
+        on_claim_fire: Callable[[CronClaim], object] | None = None,
         delete_one_shot_after_fire: bool = True,
         check_interval: float = 60.0,
     ):
         self._storage = storage
         self._on_fire = on_fire
         self._on_job_fire = on_job_fire
+        self._on_claim_fire = on_claim_fire
         self._delete_one_shot_after_fire = delete_one_shot_after_fire
         self._check_interval = check_interval
         self._task: Optional[asyncio.Task] = None
@@ -59,33 +63,48 @@ class CronScheduler:
         self._reset_fired_set_if_needed(now)
 
         jobs = self._storage.list_all()
+        pending_ids = self._storage.pending_ids()
         for job in jobs:
             job_id = str(job.get("id") or "")
             if not job_id or job_id in self._fired_this_minute:
                 continue
             try:
-                matches = _cron_matches_now(str(job.get("cron") or ""), now)
+                matches = job_id in pending_ids or _cron_matches_now(
+                    str(job.get("cron") or ""), now
+                )
             except Exception:
                 logger.exception("Invalid cron job %s skipped", job_id)
                 continue
             if matches:
+                if (
+                    self._on_claim_fire is None
+                    and self._on_job_fire is None
+                    and self._on_fire is None
+                ):
+                    continue
+                claim = self._storage.claim(job_id, minute=int(now.timestamp()) // 60)
+                if claim is None:
+                    continue
                 self._fired_this_minute.add(job_id)
                 logger.info("Firing cron job %s: %s", job_id, str(job.get("prompt", ""))[:50])
                 delivered = False
+                transferred = False
                 try:
-                    if self._on_job_fire is not None:
-                        self._on_job_fire(dict(job))
+                    if self._on_claim_fire is not None:
+                        # A queued consumer now owns the lock and acknowledgement.
+                        transferred = self._on_claim_fire(claim) is not False
+                    elif self._on_job_fire is not None:
+                        delivered = self._on_job_fire(dict(claim.job)) is not False
                     elif self._on_fire is not None:
-                        self._on_fire(str(job.get("prompt") or ""))
-                    delivered = True
+                        self._on_fire(str(claim.job.get("prompt") or ""))
+                        delivered = True
+                    if delivered:
+                        claim.complete(delete_one_shot=self._delete_one_shot_after_fire)
                 except Exception:
                     logger.exception("Error firing cron job %s", job_id)
-                if (
-                    delivered
-                    and self._delete_one_shot_after_fire
-                    and not job.get("recurring", True)
-                ):
-                    self._storage.delete(job_id)
+                finally:
+                    if not transferred:
+                        claim.release()
 
     async def _loop(self) -> None:
         """Main scheduler loop."""

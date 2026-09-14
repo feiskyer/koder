@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shlex
 import sys
 import types
 from pathlib import Path
@@ -20,6 +21,22 @@ from koder_agent.harness.agents.hooks import SubagentLifecycleHooks
 from koder_agent.harness.permissions.service import PermissionService
 
 
+def _python_command(script):
+    return shlex.join(
+        [
+            "uv",
+            "run",
+            "--no-project",
+            "--no-env-file",
+            "--python",
+            sys.executable,
+            "python",
+            "-c",
+            script,
+        ]
+    )
+
+
 def test_subagent_frontmatter_hooks_run_for_matching_tools(tmp_path):
     pre_path = tmp_path / "pre.json"
     post_path = tmp_path / "post.json"
@@ -35,7 +52,9 @@ def test_subagent_frontmatter_hooks_run_for_matching_tools(tmp_path):
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python -c \"import sys, pathlib; pathlib.Path(r'{pre_path}').write_text(sys.stdin.read())\"",
+                            "command": _python_command(
+                                f"import sys, pathlib; pathlib.Path({str(pre_path)!r}).write_text(sys.stdin.read())"
+                            ),
                         }
                     ],
                 }
@@ -46,7 +65,9 @@ def test_subagent_frontmatter_hooks_run_for_matching_tools(tmp_path):
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"python -c \"import sys, pathlib; pathlib.Path(r'{post_path}').write_text(sys.stdin.read())\"",
+                            "command": _python_command(
+                                f"import sys, pathlib; pathlib.Path({str(post_path)!r}).write_text(sys.stdin.read())"
+                            ),
                         }
                     ],
                 }
@@ -86,7 +107,9 @@ def test_project_subagent_start_and_stop_hooks_run_from_settings(tmp_path):
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": f"python -c \"import sys, pathlib; pathlib.Path(r'{start_path}').write_text(sys.stdin.read())\"",
+                                    "command": _python_command(
+                                        f"import sys, pathlib; pathlib.Path({str(start_path)!r}).write_text(sys.stdin.read())"
+                                    ),
                                 }
                             ],
                         }
@@ -96,7 +119,9 @@ def test_project_subagent_start_and_stop_hooks_run_from_settings(tmp_path):
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": f"python -c \"import sys, pathlib; pathlib.Path(r'{stop_path}').write_text(sys.stdin.read())\"",
+                                    "command": _python_command(
+                                        f"import sys, pathlib; pathlib.Path({str(stop_path)!r}).write_text(sys.stdin.read())"
+                                    ),
                                 }
                             ],
                         }
@@ -150,9 +175,7 @@ def test_subagent_shell_preflight_does_not_fail_without_tool_arguments(tmp_path)
 
 
 def test_subagent_frontmatter_command_hooks_are_timeout_bounded(monkeypatch):
-    """Fix 5 (subagent parity): the frontmatter hook mini-runner must never call
-    subprocess.run with timeout=None — a hanging PreToolUse/Stop hook would
-    otherwise freeze the subagent forever."""
+    """Definition-local hooks must supply a finite default to the shared runner."""
     seen = {}
 
     def fake_run(command, **kwargs):
@@ -165,7 +188,7 @@ def test_subagent_frontmatter_command_hooks_are_timeout_bounded(monkeypatch):
 
         return _R()
 
-    monkeypatch.setattr("koder_agent.harness.agents.hooks.subprocess.run", fake_run)
+    monkeypatch.setattr("koder_agent.harness.agents.hooks.run_command", fake_run)
 
     # SubagentLifecycleHooks is already imported (module fully loaded), so reach
     # the private mini-runner via its module without re-triggering package import.
@@ -173,5 +196,5 @@ def test_subagent_frontmatter_command_hooks_are_timeout_bounded(monkeypatch):
     rules = [{"hooks": [{"type": "command", "command": "echo hi"}]}]
     hooks_mod._run_command_hooks(rules, {"event": "PreToolUse"}, cwd=".")
 
-    assert seen["timeout"] not in (None, "MISSING"), "hook subprocess.run got an unbounded timeout"
+    assert seen["timeout"] not in (None, "MISSING"), "hook runner got an unbounded timeout"
     assert isinstance(seen["timeout"], (int, float)) and seen["timeout"] > 0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import uuid4
 
 
 def _utc_now_iso() -> str:
@@ -21,6 +22,7 @@ class TeamRecord:
     lead_session_id: str | None
     config_path: str
     created_at: str
+    generation: str = ""
 
     @classmethod
     def create(
@@ -41,6 +43,7 @@ class TeamRecord:
             lead_session_id=lead_session_id,
             config_path=config_path,
             created_at=_utc_now_iso(),
+            generation=uuid4().hex,
         )
 
 
@@ -61,6 +64,7 @@ class TeamMemberRecord:
     mode: str | None
     is_active: bool
     joined_at: str
+    generation: str = ""
 
     @classmethod
     def create(
@@ -93,6 +97,7 @@ class TeamMemberRecord:
             mode=mode,
             is_active=is_active,
             joined_at=_utc_now_iso(),
+            generation=uuid4().hex,
         )
 
 

@@ -113,4 +113,26 @@ def filter_incomplete_tool_calls(messages: list[dict]) -> list[dict]:
         if msg.get("role") != "tool" or msg.get("tool_call_id") in remaining_call_ids
     ]
 
-    return filtered
+    # The Agents SDK persists Responses items, not only Chat Completions
+    # tool_calls. Keep their pairing namespace separate from tool_call_id.
+    native_calls = {
+        msg["call_id"]
+        for msg in filtered
+        if msg.get("type") == "function_call"
+        and isinstance(msg.get("call_id"), str)
+        and msg["call_id"]
+    }
+    native_outputs = {
+        msg["call_id"]
+        for msg in filtered
+        if msg.get("type") == "function_call_output"
+        and isinstance(msg.get("call_id"), str)
+        and msg["call_id"]
+    }
+    paired_native_ids = native_calls & native_outputs
+    return [
+        msg
+        for msg in filtered
+        if msg.get("type") not in {"function_call", "function_call_output"}
+        or (isinstance(msg.get("call_id"), str) and msg["call_id"] in paired_native_ids)
+    ]

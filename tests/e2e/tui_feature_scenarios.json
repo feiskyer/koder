@@ -50,11 +50,11 @@
       "validation_level": "acceptance",
       "purpose": "Run an advisor review through a deterministic OpenAI-compatible fixture with session transcript, focus, git diff, advisor model routing, and no-context short-circuit coverage.",
       "env": {
-        "KODER_BASE_URL": "http://127.0.0.1:19086/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "advisor-secret-token"
       },
       "fake_openai": {
-        "port": 19086,
+        "port": 0,
         "response": "# Advisor Review\n\n## Assessment\nadvisor-fixture: add regression coverage.",
         "log_file": "$HOME/fake-openai-advisor.log",
         "ready_file": "$HOME/fake-openai-advisor.ready"
@@ -80,11 +80,11 @@
         {
           "send": "!test -f \"$HOME/fake-openai-advisor.ready\" && cat \"$HOME/fake-openai-advisor.ready\"",
           "expect_all": [
-            "ready http://127.0.0.1:19086/v1"
+            "ready $FAKE_OPENAI_URL"
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"advisor seeded user request: review validation plan\"},{\"role\":\"assistant\",\"content\":\"advisor seeded assistant answer: verify tmux evidence\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"advisor-seed.txt\").write_text(\"seeded advisor transcript\\n\", encoding=\"utf-8\"); print(\"advisor-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"advisor seeded user request: review validation plan\"},{\"role\":\"assistant\",\"content\":\"advisor seeded assistant answer: verify tmux evidence\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"advisor-seed.txt\").write_text(\"seeded advisor transcript\\n\", encoding=\"utf-8\"); print(\"advisor-fixture\", sid)'",
           "expect_all": [
             "advisor-fixture"
           ]
@@ -359,7 +359,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$PYTHONPATH/tests/fixtures/fake_gh_autofix_pr.sh\" bin/gh && chmod +x bin/gh && printf diff > \"$HOME/.koder/autofix-pr-state\" && { marker=\"autofix-pr-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
+          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/fake_gh_autofix_pr.sh\" bin/gh && chmod +x bin/gh && printf diff > \"$HOME/.koder/autofix-pr-state\" && { marker=\"autofix-pr-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
           "expect_all": [
             "autofix-pr-gh-fixture"
           ]
@@ -438,7 +438,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import json, sqlite3; from pathlib import Path; db=Path.home()/\".koder\"/\"koder.db\"; db.parent.mkdir(parents=True, exist_ok=True); conn=sqlite3.connect(db); conn.execute(\"create table if not exists ctx (sid text primary key, msgs text, title text)\"); conn.execute(\"insert or replace into ctx values (?, ?, ?)\", (\"legacy-session\", json.dumps([{\"role\":\"user\",\"content\":\"legacy hello\"}]), \"legacy-title\")); conn.commit(); print(\"legacy-fixture\")'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import json, sqlite3; from pathlib import Path; db=Path.home()/\".koder\"/\"koder.db\"; db.parent.mkdir(parents=True, exist_ok=True); conn=sqlite3.connect(db); conn.execute(\"create table if not exists ctx (sid text primary key, msgs text, title text)\"); conn.execute(\"insert or replace into ctx values (?, ?, ?)\", (\"legacy-session\", json.dumps([{\"role\":\"user\",\"content\":\"legacy hello\"}]), \"legacy-title\")); conn.commit(); print(\"legacy-fixture\")'",
           "expect_all": [
             "legacy-fixture"
           ]
@@ -712,11 +712,11 @@
       "validation_level": "acceptance",
       "purpose": "Ask a side question through a deterministic OpenAI-compatible LLM fixture using recent session context.",
       "env": {
-        "KODER_BASE_URL": "http://127.0.0.1:19081/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "btw-secret-token"
       },
       "fake_openai": {
-        "port": 19081,
+        "port": 0,
         "response": "btw-fixture-answer: check migration coverage.",
         "log_file": "$HOME/fake-openai-btw.log",
         "ready_file": "$HOME/fake-openai-btw.ready"
@@ -748,11 +748,11 @@
         {
           "send": "!test -f \"$HOME/fake-openai-btw.ready\" && cat \"$HOME/fake-openai-btw.ready\"",
           "expect_all": [
-            "ready http://127.0.0.1:19081/v1"
+            "ready $FAKE_OPENAI_URL"
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"btw seeded user context: retry validation checklist\"},{\"role\":\"assistant\",\"content\":\"btw seeded assistant context: use tmux acceptance evidence\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"btw-seed.txt\").write_text(\"seeded btw transcript\\n\", encoding=\"utf-8\"); print(\"btw-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"btw seeded user context: retry validation checklist\"},{\"role\":\"assistant\",\"content\":\"btw seeded assistant context: use tmux acceptance evidence\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"btw-seed.txt\").write_text(\"seeded btw transcript\\n\", encoding=\"utf-8\"); print(\"btw-fixture\", sid)'",
           "expect_all": [
             "btw-fixture"
           ]
@@ -939,6 +939,7 @@
         "tmux runner launches Koder with real --channels and development-channel CLI arguments",
         "/channels reports enabled state, configured count, and development-channel state",
         "/channels lists server, plugin, and development entries with stable labels",
+        "/channels reports the bounded inbox state, capacity and rejection count",
         "help and invalid mutation arguments return usage guidance",
         "channel allow-list state does not implicitly create MCP server configuration"
       ],
@@ -963,7 +964,12 @@
             "entries:",
             "- server:test-channel",
             "- plugin:team-chat@local",
-            "- server:dev-channel [development]"
+            "- server:dev-channel [development]",
+            "inbox_status: open",
+            "pending=0 running=0",
+            "messages=0/4096",
+            "inbox_rejected: 0",
+            "inbox_path:"
           ]
         },
         {
@@ -1342,8 +1348,9 @@
       "validation_level": "acceptance",
       "purpose": "Seed session history, run manual compaction, prove persisted compacted transcript shape, and keep the TUI usable.",
       "env": {
-        "KODER_API_KEY": "",
-        "OPENAI_API_KEY": ""
+        "KODER_API_KEY": "scenario-key",
+        "OPENAI_API_KEY": "",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL"
       },
       "acceptance_criteria": [
         "a deterministic session transcript can be seeded into the active session",
@@ -1362,7 +1369,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"compact older user\"},{\"role\":\"assistant\",\"content\":\"compact older assistant\"},{\"role\":\"user\",\"content\":\"compact kept user\"},{\"role\":\"assistant\",\"content\":\"compact kept assistant\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); marker=\"compact-\"+\"fixture\"; print(marker, sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"compact older user \" * 200},{\"role\":\"assistant\",\"content\":\"compact older assistant \" * 200},{\"role\":\"user\",\"content\":\"compact kept user\"},{\"role\":\"assistant\",\"content\":\"compact kept assistant\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); marker=\"compact-\"+\"fixture\"; print(marker, sid)'",
           "expect_all": [
             "compact-fixture"
           ]
@@ -1382,7 +1389,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=asyncio.run(EnhancedSQLiteSession(sid).get_items()); assert len(items)==3, len(items); assert items[0][\"content\"].startswith(\"[Conversation compacted]\"), items[0]; assert \"Compacted 2 earlier messages\" in items[0][\"content\"], items[0]; assert items[-1][\"content\"]==\"compact kept assistant\", items[-1]; marker=\"compact-\"+\"db-ok\"; Path(\"compact-db-proof.txt\").write_text(marker+\"\\n\", encoding=\"utf-8\"); print(marker, sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=asyncio.run(EnhancedSQLiteSession(sid).get_items()); assert len(items)==3, len(items); assert items[0][\"content\"].startswith(\"[Conversation compacted]\"), items[0]; assert \"Compacted 2 earlier messages\" in items[0][\"content\"], items[0]; assert items[-1][\"content\"]==\"compact kept assistant\", items[-1]; marker=\"compact-\"+\"db-ok\"; Path(\"compact-db-proof.txt\").write_text(marker+\"\\n\", encoding=\"utf-8\"); print(marker, sid)'",
           "expect_all": [
             "compact-db-ok"
           ]
@@ -1401,14 +1408,24 @@
             "compact-db-ok"
           ]
         }
-      ]
+      ],
+      "fake_openai": {
+        "port": 0,
+        "response": "Compacted 2 earlier messages",
+        "log_file": "$HOME/fake-openai-compact.log",
+        "ready_file": "$HOME/fake-openai-compact.ready"
+      }
     },
     "config": {
       "validation_level": "acceptance",
       "purpose": "Inspect runtime configuration after live model and reasoning-effort changes, including persisted YAML state.",
+      "env": {
+        "KODER_API_KEY": "synthetic-config-key",
+        "OPENAI_API_KEY": ""
+      },
       "acceptance_criteria": [
         "config renders model, voice, skills, and harness sections",
-        "/model changes are reflected in /config YAML",
+        "/model changes are reflected in /config YAML and the live bottom model label",
         "/effort changes are reflected in /config YAML",
         "resetting model and effort returns config to openai/gpt-4.1 with medium effort",
         "backing config.yaml contains the final persisted values"
@@ -1451,7 +1468,11 @@
           "expect_all": [
             "name: claude-sonnet-4-6",
             "provider: anthropic",
-            "reasoning_effort: high"
+            "reasoning_effort: high",
+            "Model: claude-sonnet-4-6"
+          ],
+          "expect_bottom_all": [
+            "Model: claude-sonnet-4-6"
           ]
         },
         {
@@ -1466,7 +1487,7 @@
           "expect_all": [
             "model: gpt-4.1",
             "provider: openai",
-            "effective_model: litellm/openai/gpt-4.1"
+            "effective_model: gpt-4.1"
           ]
         },
         {
@@ -1474,7 +1495,11 @@
           "expect_all": [
             "name: gpt-4.1",
             "provider: openai",
-            "reasoning_effort: medium"
+            "reasoning_effort: medium",
+            "Model: gpt-4.1"
+          ],
+          "expect_bottom_all": [
+            "Model: gpt-4.1"
           ]
         }
       ],
@@ -1516,14 +1541,14 @@
           "send": "/context",
           "expect_all": [
             "## Context Usage",
-            "**Model:** litellm/openai/gpt-4.1",
+            "**Model:** gpt-4.1",
             "| Instructions | 9 |",
             "### Instructions",
             "- AGENTS.md"
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"ctx viz user prompt\"},{\"role\":\"assistant\",\"content\":\"ctx viz assistant answer\"},{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"context-seed.txt\").write_text(\"seeded context accounting\\n\", encoding=\"utf-8\"); print(os.environ[\"KODER_CONTEXT_MARKER\"], sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"ctx viz user prompt\"},{\"role\":\"assistant\",\"content\":\"ctx viz assistant answer\"},{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"context-seed.txt\").write_text(\"seeded context accounting\\n\", encoding=\"utf-8\"); print(os.environ[\"KODER_CONTEXT_MARKER\"], sid)'",
           "expect_all": [
             "context-fixture-ok"
           ]
@@ -1595,7 +1620,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python \"$PYTHONPATH/scripts/seed_tmux_usage_fixture.py\" known",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python \"$KODER_SCENARIO_SOURCE_ROOT/scripts/seed_tmux_usage_fixture.py\" known",
           "expect_all": [
             "known-usage-fixture"
           ]
@@ -1621,7 +1646,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python \"$PYTHONPATH/scripts/seed_tmux_usage_fixture.py\" unknown",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python \"$KODER_SCENARIO_SOURCE_ROOT/scripts/seed_tmux_usage_fixture.py\" unknown",
           "expect_all": [
             "unknown-usage-fixture"
           ]
@@ -1695,7 +1720,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"ctx viz user prompt\"},{\"role\":\"assistant\",\"content\":\"ctx viz assistant answer\"},{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"ctx-viz-seed.txt\").write_text(\"seeded ctx viz context\\n\", encoding=\"utf-8\"); print(os.environ[\"KODER_CTX_VIZ_MARKER\"], sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"ctx viz user prompt\"},{\"role\":\"assistant\",\"content\":\"ctx viz assistant answer\"},{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"ctx-viz-seed.txt\").write_text(\"seeded ctx viz context\\n\", encoding=\"utf-8\"); print(os.environ[\"KODER_CTX_VIZ_MARKER\"], sid)'",
           "expect_all": [
             "ctx-viz-fixture-ok"
           ]
@@ -1759,7 +1784,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"change conversation file\"},{\"toolUseResult\":{\"filePath\":\"conversation.txt\",\"structuredPatch\":[{\"lines\":[\"-old\",\"+new\",\"+extra\"]}]}}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"diff-seed.txt\").write_text(\"seeded conversation diff\\n\", encoding=\"utf-8\"); print(\"diff-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"change conversation file\"},{\"toolUseResult\":{\"filePath\":\"conversation.txt\",\"structuredPatch\":[{\"lines\":[\"-old\",\"+new\",\"+extra\"]}]}}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"diff-seed.txt\").write_text(\"seeded conversation diff\\n\", encoding=\"utf-8\"); print(\"diff-fixture\", sid)'",
           "expect_all": [
             "diff-fixture"
           ]
@@ -1848,7 +1873,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; secret=os.environ[\"OPENAI_API_KEY\"]; items=[{\"role\":\"assistant\",\"content\":\"checking tool\",\"tool_calls\":[{\"id\":\"tool-1\",\"function\":{\"name\":\"run_shell\",\"arguments\":json.dumps({\"command\":\"echo ready\",\"api_key\":secret})}}]},{\"role\":\"tool\",\"tool_call_id\":\"tool-1\",\"name\":\"run_shell\",\"content\":\"completed secret=\"+secret}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"debug-tool-fixture.txt\").write_text(\"seeded tool-call records\\n\", encoding=\"utf-8\"); print(\"debug-tool-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; secret=os.environ[\"OPENAI_API_KEY\"]; items=[{\"role\":\"assistant\",\"content\":\"checking tool\",\"tool_calls\":[{\"id\":\"tool-1\",\"function\":{\"name\":\"run_shell\",\"arguments\":json.dumps({\"command\":\"echo ready\",\"api_key\":secret})}}]},{\"role\":\"tool\",\"tool_call_id\":\"tool-1\",\"name\":\"run_shell\",\"content\":\"completed secret=\"+secret}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"debug-tool-fixture.txt\").write_text(\"seeded tool-call records\\n\", encoding=\"utf-8\"); print(\"debug-tool-fixture\", sid)'",
           "expect_all": [
             "debug-tool-fixture"
           ],
@@ -1946,7 +1971,6 @@
           "expect_all": [
             "cwd:",
             "python:",
-            "installation_type: development",
             "invoked_binary:",
             "config_path:",
             "model: gpt-4.1",
@@ -1955,14 +1979,15 @@
             "mcp_servers: 0",
             "ripgrep_working:",
             "ripgrep_mode:",
-            "ripgrep_path:"
+            "ripgrep_path:",
+            "invoked_binary: $RUNTIME_CLI"
           ],
           "expect_regex": [
             "cwd: .*/repo",
-            "python: .*/\\.venv/bin/python3",
-            "invoked_binary: .*/\\.venv/bin/koder",
             "config_path: .*/home/\\.koder/config\\.yaml",
-            "ripgrep_working: (true|false)"
+            "ripgrep_working: (true|false)",
+            "installation_type: (development|local|unknown)",
+            "python: $RUNTIME_PYTHON_PATTERN"
           ]
         },
         {
@@ -2301,7 +2326,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; s=EnhancedSQLiteSession(sid); asyncio.run(s.set_title(\"Export Scenario\")); asyncio.run(s.add_items([{\"role\":\"user\",\"content\":\"hello export\"},{\"role\":\"assistant\",\"content\":\"export ready\"},{\"role\":\"user\",\"content\":\"write both formats\"}])); Path(\"export-seed.txt\").write_text(\"seeded export session\\n\", encoding=\"utf-8\"); print(\"export-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; s=EnhancedSQLiteSession(sid); asyncio.run(s.set_title(\"Export Scenario\")); asyncio.run(s.add_items([{\"role\":\"user\",\"content\":\"hello export\"},{\"role\":\"assistant\",\"content\":\"export ready\"},{\"role\":\"user\",\"content\":\"write both formats\"}])); Path(\"export-seed.txt\").write_text(\"seeded export session\\n\", encoding=\"utf-8\"); print(\"export-fixture\", sid)'",
           "expect_all": [
             "export-fixture"
           ]
@@ -2507,7 +2532,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,json,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; s=EnhancedSQLiteSession(sid); items=[{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})},{\"type\":\"function_call\",\"name\":\"edit_file\",\"arguments\":json.dumps({\"path\":\"missing-context.md\"})},{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})}]; asyncio.run(s.add_items(items)); Path(\"files-seed.txt\").write_text(\"seeded files context\\n\", encoding=\"utf-8\"); print(\"files-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,json,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; s=EnhancedSQLiteSession(sid); items=[{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})},{\"type\":\"function_call\",\"name\":\"edit_file\",\"arguments\":json.dumps({\"path\":\"missing-context.md\"})},{\"type\":\"function_call\",\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})}]; asyncio.run(s.add_items(items)); Path(\"files-seed.txt\").write_text(\"seeded files context\\n\", encoding=\"utf-8\"); print(\"files-fixture\", sid)'",
           "expect_all": [
             "files-fixture"
           ]
@@ -2678,7 +2703,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.goals import GoalAccountingMode, GoalStatus, GoalStore; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; store=GoalStore(db_path=str(db)); asyncio.run(store.replace_goal(sid, \"ship durable goals\", GoalStatus.ACTIVE, token_budget=50000)); asyncio.run(store.account_usage(sid, time_delta_seconds=90, token_delta=1200, mode=GoalAccountingMode.ACTIVE_ONLY)); asyncio.run(store.close()); Path(\"goal-proof.txt\").write_text(\"goal-seeded\\n\", encoding=\"utf-8\"); print(\"goal-seeded\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.goals import GoalAccountingMode, GoalStatus, GoalStore; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; store=GoalStore(db_path=str(db)); asyncio.run(store.replace_goal(sid, \"ship durable goals\", GoalStatus.ACTIVE, token_budget=50000)); asyncio.run(store.account_usage(sid, time_delta_seconds=90, token_delta=1200, mode=GoalAccountingMode.ACTIVE_ONLY)); asyncio.run(store.close()); Path(\"goal-proof.txt\").write_text(\"goal-seeded\\n\", encoding=\"utf-8\"); print(\"goal-seeded\", sid)'",
           "expect_all": [
             "goal-seeded"
           ]
@@ -2737,6 +2762,13 @@
           "file_contains": [
             "$REPO/goal-proof.txt",
             "goal-seeded"
+          ]
+        },
+        {
+          "sqlite_contains": [
+            "$HOME/.koder/koder.db",
+            "select count(*) from session_goals",
+            "0"
           ]
         }
       ]
@@ -3079,7 +3111,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"inspect current session\"},{\"role\":\"assistant\",\"content\":\"reading file\",\"tool_calls\":[{\"id\":\"tool-1\",\"function\":{\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})}}]},{\"role\":\"tool\",\"tool_call_id\":\"tool-1\",\"name\":\"read_file\",\"content\":\"# Test project\"},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"insights-seed.txt\").write_text(\"seeded insights session\\n\", encoding=\"utf-8\"); print(os.environ[\"KODER_INSIGHTS_MARKER\"], sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,json,os,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"inspect current session\"},{\"role\":\"assistant\",\"content\":\"reading file\",\"tool_calls\":[{\"id\":\"tool-1\",\"function\":{\"name\":\"read_file\",\"arguments\":json.dumps({\"path\":\"AGENTS.md\"})}}]},{\"role\":\"tool\",\"tool_call_id\":\"tool-1\",\"name\":\"read_file\",\"content\":\"# Test project\"},{\"type\":\"function_call\",\"name\":\"write_file\",\"arguments\":json.dumps({\"file_path\":\"docs/runtime-notes.md\"})}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"insights-seed.txt\").write_text(\"seeded insights session\\n\", encoding=\"utf-8\"); print(os.environ[\"KODER_INSIGHTS_MARKER\"], sid)'",
           "expect_all": [
             "insights-fixture-ok"
           ]
@@ -3147,7 +3179,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$PYTHONPATH/tests/fixtures/fake_gh_issue.sh\" bin/gh && chmod +x bin/gh && printf list > \"$HOME/.koder/issue-state\" && { marker=\"issue-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
+          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/fake_gh_issue.sh\" bin/gh && chmod +x bin/gh && printf list > \"$HOME/.koder/issue-state\" && { marker=\"issue-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
           "expect_all": [
             "issue-gh-fixture"
           ]
@@ -3429,7 +3461,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync koder mcp add-json scenario-mcp '{\"command\":\"python\",\"args\":[\"-m\",\"scenario_server\"],\"env\":{\"SCENARIO\":\"1\"}}' --scope project",
+          "send": "!mcp_fixture_json=$(uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import json,sys; from pathlib import Path; print(json.dumps({\"command\":str(Path(sys.executable).resolve()),\"args\":[\"-m\",\"scenario_server\"],\"env\":{\"SCENARIO\":\"1\"}}))') && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder mcp add-json scenario-mcp \"$mcp_fixture_json\" --scope project",
           "expect_all": [
             "Added MCP server: scenario-mcp"
           ]
@@ -3440,15 +3472,15 @@
             "scenario-mcp",
             "[project]",
             "stdio",
-            "python -m scenario_server"
+            "$RUNTIME_PYTHON_RESOLVED -m scenario_server"
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync koder mcp get scenario-mcp --scope project",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder mcp get scenario-mcp --scope project",
           "expect_all": [
             "\"name\": \"scenario-mcp\"",
             "\"transport_type\": \"stdio\"",
-            "\"command\": \"python\"",
+            "\"command\": \"$RUNTIME_PYTHON_RESOLVED\"",
             "\"env_vars\": {",
             "\"SCENARIO\": \"1\"",
             "\"scope\": \"project\""
@@ -3461,7 +3493,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync koder mcp remove scenario-mcp --scope project",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder mcp remove scenario-mcp --scope project",
           "expect_all": [
             "Removed MCP server: scenario-mcp"
           ]
@@ -3668,7 +3700,7 @@
           "expect_all": [
             "model: gpt-4.1",
             "provider: openai",
-            "effective_model: litellm/openai/gpt-4.1"
+            "effective_model: gpt-4.1"
           ]
         },
         {
@@ -3703,13 +3735,13 @@
           "expect_all": [
             "model: gpt-4.1",
             "provider: openai",
-            "effective_model: litellm/openai/gpt-4.1"
+            "effective_model: gpt-4.1"
           ]
         },
         {
           "send": "/status",
           "expect_all": [
-            "Model: litellm/openai/gpt-4.1",
+            "Model: gpt-4.1",
             "provider: openai"
           ]
         }
@@ -3812,7 +3844,27 @@
     "onboarding": {
       "validation_level": "acceptance",
       "purpose": "Validate onboarding checklist against real API-key, model, and workspace state transitions.",
+      "env": {
+        "KODER_API_KEY": "",
+        "OPENAI_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+        "GOOGLE_API_KEY": "",
+        "GEMINI_API_KEY": "",
+        "AZURE_API_KEY": "",
+        "OPENROUTER_API_KEY": ""
+      },
+      "cli_args": [
+        "--session",
+        "onboarding-scenario"
+      ],
+      "prelaunch_files": [
+        {
+          "path": "$HOME/.koder/session-env/onboarding-scenario.sh",
+          "content": "export KODER_API_KEY=synthetic-onboarding-bootstrap-key\n"
+        }
+      ],
       "acceptance_criteria": [
+        "a private session credential permits startup and is then explicitly removed",
         "missing API key renders API-key guidance while model and workspace are detected",
         "session-scoped KODER_API_KEY makes setup complete without restarting the TUI",
         "removing .koder makes workspace guidance appear while API key remains configured",
@@ -3828,6 +3880,12 @@
         "session env file"
       ],
       "turns": [
+        {
+          "send": "/env unset KODER_API_KEY",
+          "expect_all": [
+            "env: removed KODER_API_KEY from this session."
+          ]
+        },
         {
           "send": "/onboarding",
           "expect_all": [
@@ -4020,6 +4078,7 @@
         "mailbox messages can be queued, consumed, and marked read",
         "empty consumed inbox renders a clear CLI message",
         "history records sent and read events",
+        "unregistered members cannot claim team tasks",
         "team tasks can be created, claimed, listed, completed, and persisted"
       ],
       "acceptance_artifacts": [
@@ -4095,6 +4154,22 @@
           "send": "/peers task claim peers-scenario 1 worker-a",
           "expect_all": [
             "peers: task claim",
+            "success: False",
+            "reason: inactive_member"
+          ]
+        },
+        {
+          "send": "/peers member add peers-scenario worker-a",
+          "expect_all": [
+            "peers: member added",
+            "agent_id: worker-a",
+            "name: worker-a"
+          ]
+        },
+        {
+          "send": "/peers task claim peers-scenario 1 worker-a",
+          "expect_all": [
+            "peers: task claim",
             "task_id: 1",
             "owner: worker-a",
             "success: True",
@@ -4162,6 +4237,18 @@
     "permissions": {
       "validation_level": "acceptance",
       "purpose": "Inspect permission status and verify permission-engine decisions across default and enabled sandbox policy.",
+      "env": {
+        "KODER_MODEL": "openai/koder-fixture",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
+        "KODER_API_KEY": "synthetic-permission-classifier-key"
+      },
+      "fake_openai": {
+        "port": 0,
+        "response": "{\"risk_level\":\"moderate\",\"allowed\":true,\"reason\":\"synthetic contained mutation fixture\"}",
+        "log_file": "$HOME/fake-openai-permissions.log",
+        "ready_file": "$HOME/fake-openai-permissions.ready"
+      },
       "acceptance_criteria": [
         "permissions status renders mode, rules, denials, and working directories",
         "default mutating shell command requires approval",
@@ -4172,7 +4259,8 @@
       "acceptance_artifacts": [
         "permissions command captures",
         "permission decision captures",
-        "local sandbox settings file"
+        "local sandbox settings file",
+        "synthetic auxiliary classifier request log"
       ],
       "turns": [
         {
@@ -4230,6 +4318,12 @@
               "\"enabled\": true",
               "\"backend\": \"unix-local\""
             ]
+          ]
+        },
+        {
+          "file_contains": [
+            "$HOME/fake-openai-permissions.log",
+            "Classify this shell command: touch blocked.txt"
           ]
         }
       ]
@@ -4402,7 +4496,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$PYTHONPATH/tests/fixtures/fake_gh_pr_comments.sh\" bin/gh && chmod +x bin/gh && printf normal > \"$HOME/.koder/pr-comments-state\" && { marker=\"pr-comments-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
+          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/fake_gh_pr_comments.sh\" bin/gh && chmod +x bin/gh && printf normal > \"$HOME/.koder/pr-comments-state\" && { marker=\"pr-comments-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
           "expect_all": [
             "pr-comments-gh-fixture"
           ]
@@ -4492,7 +4586,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$PYTHONPATH/tests/fixtures/fake_gh_pr_comments.sh\" bin/gh && chmod +x bin/gh && printf normal > \"$HOME/.koder/pr-comments-state\" && { marker=\"pr-comments-alias-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
+          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/fake_gh_pr_comments.sh\" bin/gh && chmod +x bin/gh && printf normal > \"$HOME/.koder/pr-comments-state\" && { marker=\"pr-comments-alias-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
           "expect_all": [
             "pr-comments-alias-fixture"
           ]
@@ -4580,7 +4674,7 @@
           ]
         },
         {
-          "send": "!current=\"$(uv --project \"$PYTHONPATH\" run --no-sync python -c 'from koder_agent.harness.version_info import resolve_runtime_version; print(resolve_runtime_version())')\" && grep -F \"last_release_notes_seen: $current\" \"$HOME/.koder/config.yaml\" && grep -F 'Added configurable statusline setup' \"$HOME/.koder/cache/changelog.md\" && { marker=\"release-\"; marker=\"${marker}config-ok\"; echo \"$marker\"; }",
+          "send": "!current=\"$(uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'from koder_agent.harness.version_info import resolve_runtime_version; print(resolve_runtime_version())')\" && grep -F \"last_release_notes_seen: $current\" \"$HOME/.koder/config.yaml\" && grep -F 'Added configurable statusline setup' \"$HOME/.koder/cache/changelog.md\" && { marker=\"release-\"; marker=\"${marker}config-ok\"; echo \"$marker\"; }",
           "expect_all": [
             "Shell Mode",
             "last_release_notes_seen: $RUNTIME_VERSION",
@@ -4774,7 +4868,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync koder --session resume-target -p \"/rename resume-title\" && uv --project \"$PYTHONPATH\" run --no-sync koder --session resume-duplicate-one -p \"/rename duplicate-title\" && uv --project \"$PYTHONPATH\" run --no-sync koder --session resume-duplicate-two -p \"/rename duplicate-title\" && echo resume-fixture",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder --session resume-target -p \"/rename resume-title\" && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder --session resume-duplicate-one -p \"/rename duplicate-title\" && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder --session resume-duplicate-two -p \"/rename duplicate-title\" && printf '%s%s\\n' resume- fixture",
           "expect_all": [
             "resume-fixture"
           ],
@@ -4839,12 +4933,12 @@
       "validation_level": "acceptance",
       "purpose": "Review local and PR diffs through deterministic fake gh and OpenAI-compatible fixtures, including clean and gh-failure edges.",
       "env": {
-        "KODER_BASE_URL": "http://127.0.0.1:19084/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "review-secret-token",
         "PATH": "$REPO/bin:$PATH"
       },
       "fake_openai": {
-        "port": 19084,
+        "port": 0,
         "response": "review-fixture-finding: verify the changed diff path and add regression coverage.",
         "log_file": "$HOME/fake-openai-review.log",
         "ready_file": "$HOME/fake-openai-review.ready"
@@ -4868,7 +4962,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$PYTHONPATH/tests/fixtures/fake_gh_review.sh\" bin/gh && chmod +x bin/gh && test -f \"$HOME/fake-openai-review.ready\" && echo review-fixtures-ready",
+          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/fake_gh_review.sh\" bin/gh && chmod +x bin/gh && test -f \"$HOME/fake-openai-review.ready\" && echo review-fixtures-ready",
           "expect_all": [
             "review-fixtures-ready"
           ]
@@ -4977,7 +5071,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"first prompt\"},{\"role\":\"assistant\",\"content\":\"first reply\"},{\"role\":\"user\",\"content\":\"second prompt\"},{\"role\":\"assistant\",\"content\":\"second reply\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); marker=\"rewind-\"+\"seed\"; print(marker, sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"first prompt\"},{\"role\":\"assistant\",\"content\":\"first reply\"},{\"role\":\"user\",\"content\":\"second prompt\"},{\"role\":\"assistant\",\"content\":\"second reply\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); marker=\"rewind-\"+\"seed\"; print(marker, sid)'",
           "expect_all": [
             "rewind-seed"
           ]
@@ -5039,7 +5133,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=asyncio.run(EnhancedSQLiteSession(sid).get_items()); assert items==[{\"role\":\"user\",\"content\":\"first prompt\"},{\"role\":\"assistant\",\"content\":\"first reply\"}], items; marker=\"rewind-\"+\"db-ok\"; Path(\"rewind-db-proof.txt\").write_text(marker+\"\\n\", encoding=\"utf-8\"); print(marker, sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio, sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=asyncio.run(EnhancedSQLiteSession(sid).get_items()); assert items==[{\"role\":\"user\",\"content\":\"first prompt\"},{\"role\":\"assistant\",\"content\":\"first reply\"}], items; marker=\"rewind-\"+\"db-ok\"; Path(\"rewind-db-proof.txt\").write_text(marker+\"\\n\", encoding=\"utf-8\"); print(marker, sid)'",
           "expect_all": [
             "rewind-db-ok"
           ]
@@ -5164,7 +5258,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import json; from koder_agent.tools.cron import cron_create; first=json.loads(cron_create(\"0 9 * * *\", \"morning standup\")); second=json.loads(cron_create(\"30 14 * * 1\", \"monday review\", recurring=False)); bad=json.loads(cron_create(\"invalid\", \"bad\")); marker=\"schedule-\"+\"create-ok\"; print(marker, first[\"id\"], second[\"id\"], bad[\"error\"])'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import json; from koder_agent.tools.cron import cron_create; first=json.loads(cron_create(\"0 9 * * *\", \"morning standup\")); second=json.loads(cron_create(\"30 14 * * 1\", \"monday review\", recurring=False)); bad=json.loads(cron_create(\"invalid\", \"bad\")); marker=\"schedule-\"+\"create-ok\"; print(marker, first[\"id\"], second[\"id\"], bad[\"error\"])'",
           "expect_all": [
             "schedule-create-ok",
             "Invalid cron expression"
@@ -5185,7 +5279,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import json; from pathlib import Path; from koder_agent.tools.cron import cron_delete, cron_list; jobs=json.loads(cron_list())[\"jobs\"]; cron_delete(jobs[0][\"id\"]); content=Path.home().joinpath(\".koder\", \"scheduled_tasks.json\").read_text(encoding=\"utf-8\"); ok=(\"monday review\" in content and \"morning standup\" not in content); marker=\"schedule-\"+\"delete-ok\"; fail=\"schedule-\"+\"delete-failed\"; Path(\"schedule-proof.txt\").write_text((marker if ok else fail)+\"\\n\", encoding=\"utf-8\"); print(marker if ok else fail)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import json; from pathlib import Path; from koder_agent.tools.cron import cron_delete, cron_list; jobs=json.loads(cron_list())[\"jobs\"]; cron_delete(jobs[0][\"id\"]); content=Path.home().joinpath(\".koder\", \"scheduled_tasks.json\").read_text(encoding=\"utf-8\"); ok=(\"monday review\" in content and \"morning standup\" not in content); marker=\"schedule-\"+\"delete-ok\"; fail=\"schedule-\"+\"delete-failed\"; Path(\"schedule-proof.txt\").write_text((marker if ok else fail)+\"\\n\", encoding=\"utf-8\"); print(marker if ok else fail)'",
           "expect_all": [
             "schedule-delete-ok"
           ]
@@ -5293,7 +5387,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import json; from pathlib import Path; from koder_agent.tools.cron import cron_delete, cron_list; jobs=json.loads(cron_list())[\"jobs\"]; cron_delete(jobs[0][\"id\"]); content=Path.home().joinpath(\".koder\", \"scheduled_tasks.json\").read_text(encoding=\"utf-8\"); ok=(\"monday review\" in content and \"check build\" not in content); marker=\"loop-\"+\"delete-ok\"; fail=\"loop-\"+\"delete-failed\"; Path(\"loop-proof.txt\").write_text((marker if ok else fail)+\"\\n\", encoding=\"utf-8\"); print(marker if ok else fail)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import json; from pathlib import Path; from koder_agent.tools.cron import cron_delete, cron_list; jobs=json.loads(cron_list())[\"jobs\"]; cron_delete(jobs[0][\"id\"]); content=Path.home().joinpath(\".koder\", \"scheduled_tasks.json\").read_text(encoding=\"utf-8\"); ok=(\"monday review\" in content and \"check build\" not in content); marker=\"loop-\"+\"delete-ok\"; fail=\"loop-\"+\"delete-failed\"; Path(\"loop-proof.txt\").write_text((marker if ok else fail)+\"\\n\", encoding=\"utf-8\"); print(marker if ok else fail)'",
           "expect_all": [
             "loop-delete-ok"
           ]
@@ -5333,11 +5427,11 @@
       "validation_level": "acceptance",
       "purpose": "Run a deterministic security review over pending git changes and verify the clean-worktree short circuit.",
       "env": {
-        "KODER_BASE_URL": "http://127.0.0.1:19085/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "security-review-secret-token"
       },
       "fake_openai": {
-        "port": 19085,
+        "port": 0,
         "response": "# Security Review\n\nNo high-confidence security findings.",
         "log_file": "$HOME/fake-openai-security-review.log",
         "ready_file": "$HOME/fake-openai-security-review.ready"
@@ -5611,7 +5705,7 @@
           "send": "/status",
           "expect_all": [
             "version:",
-            "Model: litellm/openai/gpt-4.1",
+            "Model: gpt-4.1",
             "Session:",
             "provider: openai",
             "account: local-runtime",
@@ -5645,7 +5739,7 @@
         {
           "send": "/status",
           "expect_all": [
-            "Model: litellm/openai/gpt-4.1",
+            "Model: gpt-4.1",
             "provider: openai"
           ]
         }
@@ -5764,7 +5858,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$PYTHONPATH/tests/fixtures/fake_gh_subscribe_pr.sh\" bin/gh && chmod +x bin/gh && printf list > \"$HOME/.koder/subscribe-pr-state\" && { marker=\"subscribe-pr-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
+          "send": "!mkdir -p bin \"$HOME/.koder\" && cp \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/fake_gh_subscribe_pr.sh\" bin/gh && chmod +x bin/gh && printf list > \"$HOME/.koder/subscribe-pr-state\" && { marker=\"subscribe-pr-gh-\"; marker=\"${marker}fixture\"; echo \"$marker\"; }",
           "expect_all": [
             "subscribe-pr-gh-fixture"
           ]
@@ -6041,7 +6135,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"thinkback user prompt one\"},{\"role\":\"assistant\",\"content\":\"thinkback assistant answer one\"},{\"role\":\"tool\",\"content\":\"thinkback tool output one\"},{\"role\":\"user\",\"content\":\"thinkback user prompt two\"},{\"role\":\"assistant\",\"content\":\"thinkback assistant answer two\"},{\"role\":\"user\",\"content\":\"thinkback user prompt three\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"thinkback-seed.txt\").write_text(\"seeded thinkback turns\\n\", encoding=\"utf-8\"); print(\"thinkback-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"thinkback user prompt one\"},{\"role\":\"assistant\",\"content\":\"thinkback assistant answer one\"},{\"role\":\"tool\",\"content\":\"thinkback tool output one\"},{\"role\":\"user\",\"content\":\"thinkback user prompt two\"},{\"role\":\"assistant\",\"content\":\"thinkback assistant answer two\"},{\"role\":\"user\",\"content\":\"thinkback user prompt three\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"thinkback-seed.txt\").write_text(\"seeded thinkback turns\\n\", encoding=\"utf-8\"); print(\"thinkback-fixture\", sid)'",
           "expect_all": [
             "thinkback-fixture"
           ]
@@ -6117,7 +6211,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"play user first\"},{\"role\":\"assistant\",\"content\":\"play assistant second\"},{\"role\":\"tool\",\"content\":\"play tool third\"},{\"role\":\"user\",\"content\":\"play user fourth\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"thinkback-play-seed.txt\").write_text(\"seeded thinkback-play turns\\n\", encoding=\"utf-8\"); print(\"thinkback-play-fixture\", sid)'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,sqlite3; from pathlib import Path; from koder_agent.core.session import EnhancedSQLiteSession; db=Path.home()/\".koder\"/\"koder.db\"; conn=sqlite3.connect(db); sid=conn.execute(\"select session_id from session_metadata order by updated_at desc limit 1\").fetchone()[0]; items=[{\"role\":\"user\",\"content\":\"play user first\"},{\"role\":\"assistant\",\"content\":\"play assistant second\"},{\"role\":\"tool\",\"content\":\"play tool third\"},{\"role\":\"user\",\"content\":\"play user fourth\"}]; asyncio.run(EnhancedSQLiteSession(sid).add_items(items)); Path(\"thinkback-play-seed.txt\").write_text(\"seeded thinkback-play turns\\n\", encoding=\"utf-8\"); print(\"thinkback-play-fixture\", sid)'",
           "expect_all": [
             "thinkback-play-fixture"
           ]
@@ -6156,11 +6250,11 @@
       "validation_level": "acceptance",
       "purpose": "Generate a provider-backed code exploration plan through a deterministic OpenAI-compatible fixture.",
       "env": {
-        "KODER_BASE_URL": "http://127.0.0.1:19082/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "torch-secret-token"
       },
       "fake_openai": {
-        "port": 19082,
+        "port": 0,
         "response": "torch-fixture-plan: inspect koder_agent/core/usage_tracker.py and search for context token accounting.",
         "log_file": "$HOME/fake-openai-torch.log",
         "ready_file": "$HOME/fake-openai-torch.ready"
@@ -6191,7 +6285,7 @@
         {
           "send": "!test -f \"$HOME/fake-openai-torch.ready\" && cat \"$HOME/fake-openai-torch.ready\"",
           "expect_all": [
-            "ready http://127.0.0.1:19082/v1"
+            "ready $FAKE_OPENAI_URL"
           ]
         },
         {
@@ -6242,11 +6336,11 @@
       "validation_level": "acceptance",
       "purpose": "Generate a provider-backed implementation plan through a deterministic OpenAI-compatible fixture without mutating the workspace.",
       "env": {
-        "KODER_BASE_URL": "http://127.0.0.1:19083/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "ultraplan-secret-token"
       },
       "fake_openai": {
-        "port": 19083,
+        "port": 0,
         "response": "ultraplan-fixture-plan: update koder_agent/core/usage_tracker.py, add tests, and run tmux validation.",
         "log_file": "$HOME/fake-openai-ultraplan.log",
         "ready_file": "$HOME/fake-openai-ultraplan.ready"
@@ -6278,11 +6372,11 @@
         {
           "send": "!test -f \"$HOME/fake-openai-ultraplan.ready\" && cat \"$HOME/fake-openai-ultraplan.ready\"",
           "expect_all": [
-            "ready http://127.0.0.1:19083/v1"
+            "ready $FAKE_OPENAI_URL"
           ]
         },
         {
-          "send": "!git status --short > ultraplan-status-before.txt && cat ultraplan-status-before.txt",
+          "send": "!git status --short > \"$HOME/ultraplan-status-before.txt\" && cat \"$HOME/ultraplan-status-before.txt\"",
           "expect_all": [
             "M sample.txt"
           ]
@@ -6304,7 +6398,7 @@
           ]
         },
         {
-          "send": "!git status --short > ultraplan-status-after.txt && cmp ultraplan-status-before.txt ultraplan-status-after.txt && echo ultraplan-status-unchanged",
+          "send": "!git status --short > \"$HOME/ultraplan-status-after.txt\" && cmp \"$HOME/ultraplan-status-before.txt\" \"$HOME/ultraplan-status-after.txt\" && echo ultraplan-status-unchanged",
           "expect_all": [
             "ultraplan-status-unchanged"
           ]
@@ -6329,7 +6423,7 @@
         },
         {
           "file_contains": [
-            "$REPO/ultraplan-status-after.txt",
+            "$HOME/ultraplan-status-after.txt",
             "M sample.txt"
           ]
         }
@@ -6368,7 +6462,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python \"$PYTHONPATH/scripts/seed_tmux_usage_fixture.py\" known",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python \"$KODER_SCENARIO_SOURCE_ROOT/scripts/seed_tmux_usage_fixture.py\" known",
           "expect_all": [
             "known-usage-fixture"
           ]
@@ -6452,18 +6546,18 @@
       "acceptance_artifacts": [
         "version command capture",
         "status command capture",
-        "koder --version visible shell capture"
+        "koder --version visible shell capture",
+        "version-proof.txt CLI output"
       ],
       "turns": [
         {
           "send": "/version",
           "expect_all": [
-            "version:",
+            "version: $RUNTIME_VERSION",
             "package: koder",
-            "source:",
+            "source: installed-package",
             "build_time: scenario-build",
-            "cli_banner:",
-            "(Koder)"
+            "cli_banner: $RUNTIME_VERSION (Koder)"
           ],
           "expect_not": [
             "python:"
@@ -6472,16 +6566,25 @@
         {
           "send": "/status",
           "expect_all": [
-            "version:",
+            "version: $RUNTIME_VERSION",
             "Runtime slash commands",
             "connectivity: local"
           ]
         },
         {
-          "send": "!uv run koder --version",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync --no-env-file koder --version | tee version-proof.txt && printf '%s%s\\n' 'version-cli-' 'finished'",
           "capture": "visible",
           "expect_all": [
-            "(Koder)"
+            "$RUNTIME_VERSION (Koder)",
+            "version-cli-finished"
+          ]
+        }
+      ],
+      "post_assertions": [
+        {
+          "file_contains": [
+            "$REPO/version-proof.txt",
+            "$RUNTIME_VERSION (Koder)"
           ]
         }
       ]
@@ -6854,6 +6957,7 @@
       "acceptance_criteria": [
         "team mailbox message is persisted, consumed, and marked read",
         "team history records sent and read events",
+        "unregistered members are rejected before a registered member claims work",
         "team task is persisted with completed status and owner",
         "empty consumed inbox renders a clear CLI message"
       ],
@@ -6910,6 +7014,22 @@
             "peers: task created",
             "task_id: 1",
             "subject: check mailbox"
+          ]
+        },
+        {
+          "send": "/peers task claim team-scenario 1 worker-a",
+          "expect_all": [
+            "peers: task claim",
+            "success: False",
+            "reason: inactive_member"
+          ]
+        },
+        {
+          "send": "/peers member add team-scenario worker-a",
+          "expect_all": [
+            "peers: member added",
+            "agent_id: worker-a",
+            "name: worker-a"
           ]
         },
         {
@@ -7598,10 +7718,148 @@
     }
   },
   "features": {
+    "mcp-configured-startup": {
+      "validation_level": "acceptance",
+      "purpose": "Start the real CLI with preconfigured stdio MCP peers, complete SDK initialization/tool discovery, continue despite one rejected handshake, chat, and close the peers on exit.",
+      "env": {
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "MCP_TIMEOUT": "3000"
+      },
+      "prelaunch_files": [
+        {
+          "path": "$REPO/mcp_peer.py",
+          "source": "tests/fixtures/mcp_stdio_server.py"
+        },
+        {
+          "path": "$HOME/.koder/config.yaml",
+          "content": "mcp_servers:\n  - name: startup-fixture\n    transport_type: stdio\n    command: python\n    args: [mcp_peer.py, --trace, mcp-startup.jsonl]\n  - name: rejected-fixture\n    transport_type: stdio\n    command: python\n    args: [mcp_peer.py, --trace, mcp-rejected.jsonl, --mode, fail]\n"
+        }
+      ],
+      "fake_openai": {
+        "port": 0,
+        "response": "MCP_STARTUP_CHAT_OK",
+        "log_file": "$HOME/mcp-startup-provider.jsonl",
+        "ready_file": "$HOME/mcp-startup-provider.ready"
+      },
+      "acceptance_criteria": [
+        "MCP configuration exists before the CLI launches",
+        "the actual SDK initializes the good stdio peer and lists its tools",
+        "a peer rejecting initialization does not prevent the chat prompt",
+        "the provider receives startup_echo and the CLI displays the chat response",
+        "exit terminates the TUI and both peer traces prove stdin cleanup"
+      ],
+      "acceptance_artifacts": [
+        "real terminal chat and exit captures",
+        "MCP wire method and shutdown traces",
+        "provider request containing the discovered MCP tool"
+      ],
+      "turns": [
+        {
+          "send": "MCP startup probe",
+          "expect_all": ["MCP_STARTUP_CHAT_OK"],
+          "expect_not": ["unsupported operand type", "Ignoring cancel scope error"],
+          "timeout": 30
+        },
+        {
+          "send": "/exit",
+          "expect_session_dead": true
+        }
+      ],
+      "post_assertions": [
+        {
+          "file_contains": [
+            "$REPO/mcp-startup.jsonl",
+            ["\"method\": \"initialize\"", "\"method\": \"tools/list\"", "\"closed\": true"]
+          ]
+        },
+        {
+          "file_contains": [
+            "$REPO/mcp-rejected.jsonl",
+            ["\"method\": \"initialize\"", "\"closed\": true"]
+          ]
+        },
+        {
+          "file_contains": ["$HOME/mcp-startup-provider.jsonl", "startup_echo"]
+        }
+      ]
+    },
+    "resume-untitled-history": {
+      "validation_level": "acceptance",
+      "purpose": "Resume real SDK history whose session has no generated title or Koder metadata row.",
+      "env": {
+        "PYTHON_DOTENV_DISABLED": "1"
+      },
+      "acceptance_criteria": [
+        "the fixture stores real SDK conversation items and confirms the target has no metadata row",
+        "/resume resolves the persisted session id without requiring title metadata",
+        "/session shows the resumed id",
+        "both stored messages remain intact and the title remains optional"
+      ],
+      "acceptance_artifacts": [
+        "metadata-free fixture creation capture",
+        "resume and session command captures",
+        "persisted conversation rows and resumed metadata"
+      ],
+      "turns": [
+        {
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync --no-env-file python \"$KODER_SCENARIO_SOURCE_ROOT/tests/fixtures/seed_session_history.py\" --database \"$HOME/.koder/koder.db\" --session-id resume-untitled-target",
+          "expect_all": [
+            "untitled-fixture-ready: resume-untitled-target"
+          ],
+          "expect_not": [
+            "Traceback"
+          ]
+        },
+        {
+          "send": "/resume resume-untitled-target",
+          "expect_all": [
+            "Switched to session: resume-untitled-target"
+          ],
+          "expect_not": [
+            "Session resume-untitled-target was not found."
+          ]
+        },
+        {
+          "send": "/session",
+          "expect_all": [
+            "session_id: resume-untitled-target",
+            "display_name: resume-untitled-target"
+          ]
+        }
+      ],
+      "post_assertions": [
+        {
+          "sqlite_contains": [
+            "$HOME/.koder/koder.db",
+            "select case when count(*) = 2 then 'untitled-history-intact' else 'invalid-count' end from agent_messages where session_id = 'resume-untitled-target'",
+            "untitled-history-intact"
+          ]
+        },
+        {
+          "sqlite_contains": [
+            "$HOME/.koder/koder.db",
+            "select message_data from agent_messages where session_id = 'resume-untitled-target' order by id",
+            [
+              "Untitled user message",
+              "Untitled assistant reply"
+            ]
+          ]
+        },
+        {
+          "sqlite_contains": [
+            "$HOME/.koder/koder.db",
+            "select case when not exists (select 1 from session_metadata where session_id = 'resume-untitled-target' and coalesce(title, '') <> '') then 'title-remains-optional' else 'unexpected-title' end",
+            "title-remains-optional"
+          ]
+        }
+      ]
+    },
     "onboarding-session-env-startup": {
       "validation_level": "acceptance",
       "purpose": "Use a fixed session with a persisted selected-provider credential before launch, suppress the startup setup panel, then remove only that credential and verify explicit onboarding reports it missing despite an unrelated provider key.",
       "env": {
+        "KODER_CONTEXT_WINDOW": "128000",
         "KODER_API_KEY": "",
         "OPENAI_API_KEY": "synthetic-unrelated-openai-key",
         "ANTHROPIC_API_KEY": "",
@@ -7698,7 +7956,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio; from pathlib import Path; from types import SimpleNamespace; import koder_agent.harness.memory.auto_dream as ad; from koder_agent.harness.memory.memory_files import parse_memory_file; from koder_agent.harness.memory.retrieval import retrieve_relevant_memories; home=Path.home(); project_a=home/\"auto-dream-project-a\"; project_b=home/\"auto-dream-project-b\"; project_a.mkdir(); project_b.mkdir(); ad.llm_extract_memories=lambda messages: asyncio.sleep(0, result=SimpleNamespace(memories=[{\"type\":\"project\",\"content\":\"projectonlyzxq\",\"description\":\"auto dream project scenario\"},{\"type\":\"user\",\"content\":\"userglobalqvx\",\"description\":\"auto dream user scenario\"}], errors=[])); result=asyncio.run(ad.run_auto_dream_from_messages([{\"role\":\"user\",\"content\":\"remember scoped validation\"}], manager=ad.AutoDreamManager(config=ad.DreamConfig(write_mode=\"automatic\")), origin_project_root=project_a, origin_session_id=\"auto-dream-scenario-session\", task_storage=ad.default_auto_dream_task_storage())); project_files=list((project_a/\".koder\"/\"memory\").glob(\"*.md\")); user_files=list((home/\".koder\"/\"memory\").glob(\"*.md\")); project_scope_ok=len(project_files)==1 and parse_memory_file(project_files[0].read_text()).memory_type==\"project\"; user_scope_ok=len(user_files)==1 and parse_memory_file(user_files[0].read_text()).memory_type==\"user\"; cross_project=retrieve_relevant_memories(\"projectonlyzxq\", [project_b/\".koder\"/\"memory\", home/\".koder\"/\"memory\"], max_tokens=1000); user_cross_project=retrieve_relevant_memories(\"userglobalqvx\", [project_b/\".koder\"/\"memory\", home/\".koder\"/\"memory\"], max_tokens=1000); print(f\"auto-dream-runtime-ok task_id={result.task_id} memories={result.memories_written} saved={result.saved_path} project_scope_ok={project_scope_ok} user_scope_ok={user_scope_ok} cross_project_retrieved={bool(cross_project.memories)} user_cross_project_retrieved={bool(user_cross_project.memories)}\")'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio; from pathlib import Path; from types import SimpleNamespace; import koder_agent.harness.memory.auto_dream as ad; from koder_agent.harness.memory.memory_files import parse_memory_file; from koder_agent.harness.memory.retrieval import retrieve_relevant_memories; home=Path.home(); project_a=home/\"auto-dream-project-a\"; project_b=home/\"auto-dream-project-b\"; project_a.mkdir(); project_b.mkdir(); ad.llm_extract_memories=lambda messages: asyncio.sleep(0, result=SimpleNamespace(memories=[{\"type\":\"project\",\"content\":\"projectonlyzxq\",\"description\":\"auto dream project scenario\"},{\"type\":\"user\",\"content\":\"userglobalqvx\",\"description\":\"auto dream user scenario\"}], errors=[])); result=asyncio.run(ad.run_auto_dream_from_messages([{\"role\":\"user\",\"content\":\"remember scoped validation\"}], manager=ad.AutoDreamManager(config=ad.DreamConfig(write_mode=\"automatic\")), origin_project_root=project_a, origin_session_id=\"auto-dream-scenario-session\", task_storage=ad.default_auto_dream_task_storage())); project_files=list((project_a/\".koder\"/\"memory\").glob(\"*.md\")); user_files=list((home/\".koder\"/\"memory\").glob(\"*.md\")); project_scope_ok=len(project_files)==1 and parse_memory_file(project_files[0].read_text()).memory_type==\"project\"; user_scope_ok=len(user_files)==1 and parse_memory_file(user_files[0].read_text()).memory_type==\"user\"; cross_project=retrieve_relevant_memories(\"projectonlyzxq\", [project_b/\".koder\"/\"memory\", home/\".koder\"/\"memory\"], max_tokens=1000); user_cross_project=retrieve_relevant_memories(\"userglobalqvx\", [project_b/\".koder\"/\"memory\", home/\".koder\"/\"memory\"], max_tokens=1000); print(f\"auto-dream-runtime-ok task_id={result.task_id} memories={result.memories_written} saved={result.saved_path} project_scope_ok={project_scope_ok} user_scope_ok={user_scope_ok} cross_project_retrieved={bool(cross_project.memories)} user_cross_project_retrieved={bool(user_cross_project.memories)}\")'",
           "expect_all": [
             "auto-dream-runtime-ok",
             "task_id=1",
@@ -7721,7 +7979,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c 'from koder_agent.harness.memory.auto_dream import default_auto_dream_task_storage; s=default_auto_dream_task_storage(); s.update(\"1\", metadata={\"errors\":[\"scenario warning\"],\"memories_written\":3}); (s.root/\"broken.json\").write_text(\"{not json\", encoding=\"utf-8\"); print(\"auto-dream-update-ok\")'",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'from koder_agent.harness.memory.auto_dream import default_auto_dream_task_storage; s=default_auto_dream_task_storage(); s.update(\"1\", metadata={\"errors\":[\"scenario warning\"],\"memories_written\":3}); (s.root/\"broken.json\").write_text(\"{not json\", encoding=\"utf-8\"); print(\"auto-dream-update-ok\")'",
           "expect_all": [
             "auto-dream-update-ok"
           ]
@@ -7807,7 +8065,7 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p \"$HOME/.koder/memory\" \"$HOME/.koder/tokens\" \"$HOME/.koder/cache\" .koder/memory .koder/session-memory && printf 'model:\\n  name: gpt-4.1\\n' > \"$HOME/.koder/config.yaml\" && printf '%s\\n' '{\"ui\":\"user\"}' > \"$HOME/.koder/settings.json\" && printf '%s\\n' '{\"project\":true}' > .koder/settings.json && printf '%s\\n' '{\"local\":true}' > .koder/settings.local.json && printf 'user memory marker\\n' > \"$HOME/.koder/memory/user.md\" && printf 'project memory marker\\n' > .koder/memory/project.md && printf 'session note marker\\n' > .koder/session-memory/notes.md && printf 'SECRET_TOKEN_SHOULD_NOT_EXPORT\\n' > \"$HOME/.koder/tokens/secret.json\" && printf 'CACHE_SECRET_SHOULD_NOT_EXPORT\\n' > \"$HOME/.koder/cache/model.json\" && uv --project \"$PYTHONPATH\" run --no-sync koder config export \"$HOME/.koder/settings-bundle-scenario.json\" && uv --project \"$PYTHONPATH\" run --no-sync koder config export \"$HOME/.koder/project-bundle-scenario.json\" --scope project && echo settings-bundle-exported",
+          "send": "!mkdir -p \"$HOME/.koder/memory\" \"$HOME/.koder/tokens\" \"$HOME/.koder/cache\" .koder/memory .koder/session-memory && printf 'model:\\n  name: gpt-4.1\\n' > \"$HOME/.koder/config.yaml\" && printf '%s\\n' '{\"ui\":\"user\"}' > \"$HOME/.koder/settings.json\" && printf '%s\\n' '{\"project\":true}' > .koder/settings.json && printf '%s\\n' '{\"local\":true}' > .koder/settings.local.json && printf 'user memory marker\\n' > \"$HOME/.koder/memory/user.md\" && printf 'project memory marker\\n' > .koder/memory/project.md && printf 'session note marker\\n' > .koder/session-memory/notes.md && printf 'SECRET_TOKEN_SHOULD_NOT_EXPORT\\n' > \"$HOME/.koder/tokens/secret.json\" && printf 'CACHE_SECRET_SHOULD_NOT_EXPORT\\n' > \"$HOME/.koder/cache/model.json\" && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder config export \"$HOME/.koder/settings-bundle-scenario.json\" && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder config export \"$HOME/.koder/project-bundle-scenario.json\" --scope project && echo settings-bundle-exported",
           "expect_all": [
             "Exported settings bundle",
             "files:",
@@ -7815,7 +8073,7 @@
           ]
         },
         {
-          "send": "!rm -f \"$HOME/.koder/config.yaml\" .koder/settings.local.json && uv --project \"$PYTHONPATH\" run --no-sync koder config import \"$HOME/.koder/settings-bundle-scenario.json\" --dry-run && test ! -f \"$HOME/.koder/config.yaml\" && test ! -f .koder/settings.local.json && echo settings-bundle-dry-run-ok",
+          "send": "!rm -f \"$HOME/.koder/config.yaml\" .koder/settings.local.json && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder config import \"$HOME/.koder/settings-bundle-scenario.json\" --dry-run && test ! -f \"$HOME/.koder/config.yaml\" && test ! -f .koder/settings.local.json && echo settings-bundle-dry-run-ok",
           "expect_all": [
             "Checked settings bundle",
             "would_write:",
@@ -7823,7 +8081,7 @@
           ]
         },
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync koder config import \"$HOME/.koder/settings-bundle-scenario.json\" && test -f \"$HOME/.koder/config.yaml\" && test -f .koder/settings.local.json && grep -q 'gpt-4.1' \"$HOME/.koder/config.yaml\" && grep -q 'local' .koder/settings.local.json && echo settings-bundle-import-ok",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder config import \"$HOME/.koder/settings-bundle-scenario.json\" && test -f \"$HOME/.koder/config.yaml\" && test -f .koder/settings.local.json && grep -q 'gpt-4.1' \"$HOME/.koder/config.yaml\" && grep -q 'local' .koder/settings.local.json && echo settings-bundle-import-ok",
           "expect_all": [
             "Imported settings bundle",
             "written:",
@@ -7831,7 +8089,7 @@
           ]
         },
         {
-          "send": "!printf 'model:\\n  name: old-model\\n' > \"$HOME/.koder/config.yaml\" && uv --project \"$PYTHONPATH\" run --no-sync koder config import \"$HOME/.koder/settings-bundle-scenario.json\" && ls \"$HOME\"/.koder/config.yaml.bak-* >/dev/null && grep -q 'gpt-4.1' \"$HOME/.koder/config.yaml\" && echo settings-bundle-backup-ok",
+          "send": "!printf 'model:\\n  name: old-model\\n' > \"$HOME/.koder/config.yaml\" && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync koder config import \"$HOME/.koder/settings-bundle-scenario.json\" && ls \"$HOME\"/.koder/config.yaml.bak-* >/dev/null && grep -q 'gpt-4.1' \"$HOME/.koder/config.yaml\" && echo settings-bundle-backup-ok",
           "expect_all": [
             "Imported settings bundle",
             "backups: 1",
@@ -7932,7 +8190,6 @@
           "type": "/sta",
           "capture": "visible",
           "expect_all": [
-            "/stats",
             "/status",
             "/statusline"
           ],
@@ -7948,8 +8205,8 @@
           },
           "capture": "visible",
           "expect_all": [
-            "/stats",
             "/status",
+            "/statusline",
             "| \u26a1 Koder |"
           ],
           "expect_not": [
@@ -7961,8 +8218,9 @@
             "Enter"
           ],
           "expect_all": [
-            "## Stats",
-            "### Current session"
+            "version:",
+            "Session:",
+            "Runtime slash commands"
           ],
           "expect_not": [
             "Window too small"
@@ -8285,11 +8543,12 @@
       ],
       "env": {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19095/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "sandbox-function-tool-secret-token"
       },
       "fake_openai": {
-        "port": 19095,
+        "port": 0,
         "response": "sandbox function tool result received",
         "log_file": "$HOME/fake-openai-sandbox-function-tool.log",
         "ready_file": "$HOME/fake-openai-sandbox-function-tool.ready",
@@ -8380,11 +8639,13 @@
     },
     "sandbox-unix-local-shell": {
       "validation_level": "acceptance",
-      "purpose": "Prove foreground shell execution uses the Unix local sandbox and blocks an outside-workspace write.",
+      "purpose": "Require explicit consent for the Unix local backend's incomplete guarantees, then prove the approved foreground attempt writes inside the workspace and blocks the private outside-workspace probe.",
       "acceptance_criteria": [
         "enabled unix-local policy is written",
-        "shell executor reports sandboxed execution",
-        "inside-workspace write succeeds",
+        "without separate degradation consent, the executor reports no creation or execution and neither target exists",
+        "the explicit consent callback observes the missing guarantees exactly once",
+        "the approved attempt reports its degradation and sandbox execution",
+        "the approved inside-workspace write succeeds",
         "outside escape write fails and leaves no file"
       ],
       "acceptance_artifacts": [
@@ -8394,9 +8655,18 @@
       ],
       "turns": [
         {
-          "send": "!rm -f /tmp/koder-sandbox-scenario-escape && mkdir -p .koder && printf '%s\n' '{\"sandbox\":{\"enabled\":true,\"backend\":\"unix-local\"}}' > .koder/settings.local.json && uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio; from koder_agent.harness.tools.shell_executor import execute_shell_command; r=asyncio.run(execute_shell_command(\"printf sandbox-inside > sandbox-inside.txt && printf sandbox-escape > /tmp/koder-sandbox-scenario-escape\")); print(r.status); print(r.output)'",
+          "send": "!mkdir -p .koder && printf '%s\n' '{\"sandbox\":{\"enabled\":true,\"backend\":\"unix-local\"}}' > .koder/settings.local.json && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio,shlex; from pathlib import Path; from koder_agent.harness.tools.shell_executor import execute_shell_command; escape=Path.home()/\"koder-sandbox-scenario-escape\"; command=\"printf sandbox-inside > sandbox-inside.txt && printf sandbox-escape > \"+shlex.quote(str(escape)); blocked=asyncio.run(execute_shell_command(command)); print(blocked.output); print(\"unapproved_writes_absent:\", not Path(\"sandbox-inside.txt\").exists() and not escape.exists()); approvals=[]; approved=asyncio.run(execute_shell_command(command, sandbox_unavailable_approval=lambda reason: approvals.append(reason) or True)); print(approved.output); print(\"explicit_degradation_approvals:\", len(approvals))'",
           "expect_all": [
+            "sandboxed: false",
+            "created: false",
+            "executed: false",
+            "explicit sandbox degradation approval required before execution",
+            "unapproved_writes_absent: True",
+            "sandbox degradation explicitly approved before execution",
+            "explicit_degradation_approvals: 1",
             "sandboxed: true",
+            "created: true",
+            "executed: true",
             "backend: unix-local",
             "Operation not permitted"
           ]
@@ -8417,18 +8687,19 @@
           ]
         },
         {
-          "path_not_exists": "/tmp/koder-sandbox-scenario-escape"
+          "path_not_exists": "$HOME/koder-sandbox-scenario-escape"
         }
       ]
     },
     "sandbox-unavailable-backend": {
       "validation_level": "acceptance",
-      "purpose": "Prove sandbox mode denies shell execution when the configured backend is unavailable.",
+      "purpose": "Prove an unknown sandbox backend cannot authorize a local fallback: permission inspection requires approval, and actual TUI shell execution fails closed because no exact fallback state can be captured.",
       "acceptance_criteria": [
         "missing backend policy is persisted",
-        "permission check denies the command",
-        "denial reason names sandbox unavailability",
-        "unavailable backend is denied without local execution"
+        "permission check requires approval without authorizing local execution",
+        "the reason names sandbox unavailability and the separate fallback approval",
+        "an actual TUI shell call reports no creation or execution when exact fallback state is unavailable",
+        "the requested mutation remains absent"
       ],
       "acceptance_artifacts": [
         "permission check capture",
@@ -8446,8 +8717,19 @@
           "expect_all": [
             "permissions: check",
             "allowed: false",
-            "requires_approval: false",
-            "configured backend is unavailable"
+            "requires_approval: true",
+            "sandbox backend is unavailable",
+            "second explicit approval"
+          ]
+        },
+        {
+          "send": "!touch unavailable-denied.txt",
+          "expect_all": [
+            "sandboxed: false",
+            "created: false",
+            "executed: false",
+            "backend: missing",
+            "unable to capture exact sandbox fallback state; host execution was blocked"
           ]
         }
       ],
@@ -8527,10 +8809,12 @@
     },
     "sandbox-protected-paths": {
       "validation_level": "acceptance",
-      "purpose": "Prove protected metadata path writes are blocked before sandbox execution mutates the path.",
+      "purpose": "Prove permission admission and executor preflight both reject protected metadata writes, even with explicit degradation consent, without creating a sandbox or running a process.",
       "acceptance_criteria": [
         "enabled unix-local policy is active",
-        "protected path write reports a sandbox violation",
+        "permission admission denies a protected path write without offering approval",
+        "executor preflight still rejects it after explicit degradation consent",
+        "the violation reports sandboxed, created, and executed as false",
         "the protected file is absent afterward"
       ],
       "acceptance_artifacts": [
@@ -8539,10 +8823,21 @@
       ],
       "turns": [
         {
-          "send": "!mkdir -p .koder .git && printf '%s\n' '{\"sandbox\":{\"enabled\":true,\"backend\":\"unix-local\"}}' > .koder/settings.local.json && uv --project \"$PYTHONPATH\" run --no-sync python -c 'import asyncio; from koder_agent.harness.tools.shell_executor import execute_shell_command; r=asyncio.run(execute_shell_command(\"touch .git/sandbox-denied\")); print(r.status); print(r.output)'",
+          "send": "!mkdir -p .koder && printf '%s\n' '{\"sandbox\":{\"enabled\":true,\"backend\":\"unix-local\"}}' > .koder/settings.local.json && uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c 'import asyncio; from koder_agent.harness.tools.shell_executor import execute_shell_command; approvals=[]; r=asyncio.run(execute_shell_command(\"touch .git/sandbox-denied\", sandbox_unavailable_approval=lambda reason: approvals.append(reason) or True)); print(r.status); print(r.output); print(\"explicit_degradation_approvals:\", len(approvals))'",
           "expect_all": [
-            "sandboxed: true",
+            "explicit_degradation_approvals: 1",
+            "sandboxed: false",
+            "created: false",
+            "executed: false",
             "sandbox violation",
+            "protected path"
+          ]
+        },
+        {
+          "send": "/permissions check run_shell touch .git/sandbox-denied",
+          "expect_all": [
+            "allowed: false",
+            "requires_approval: false",
             "protected path"
           ]
         },
@@ -8575,7 +8870,7 @@
       ],
       "turns": [
         {
-          "send": "!uv --project \"$PYTHONPATH\" run --no-sync python -c \"from koder_agent.harness.sandbox.registry import get_backend_status; print('supports_network_policy:', get_backend_status('unix-local').capabilities.supports_network_policy)\"",
+          "send": "!uv --project \"$KODER_SCENARIO_SOURCE_ROOT\" run --no-sync python -c \"from koder_agent.harness.sandbox.registry import get_backend_status; print('supports_network_policy:', get_backend_status('unix-local').capabilities.supports_network_policy)\"",
           "expect_all": [
             "supports_network_policy: unsupported"
           ]
@@ -8688,13 +8983,13 @@
           },
           "capture": "visible",
           "expect_all": [
-            "| ⚡ Koder |",
-            "│>",
+            "| \u26a1 Koder |",
+            "\u2502>",
             "sonnet-4-6"
           ],
           "expect_bottom_all": [
-            "| ⚡ Koder |",
-            "│>",
+            "| \u26a1 Koder |",
+            "\u2502>",
             "sonnet-4-6"
           ],
           "expect_not": [
@@ -8707,18 +9002,18 @@
           "expect_all": [
             "Delegated agents",
             "2 running",
-            "| ⚡ Koder |",
-            "│>",
+            "| \u26a1 Koder |",
+            "\u2502>",
             "sonnet-4-6"
           ],
           "expect_bottom_all": [
-            "| ⚡ Koder |",
-            "│>",
+            "| \u26a1 Koder |",
+            "\u2502>",
             "sonnet-4-6"
           ],
           "expect_not": [
-            "● Agent:",
-            "● read_file"
+            "\u25cf Agent:",
+            "\u25cf read_file"
           ],
           "timeout": 12
         },
@@ -8729,18 +9024,18 @@
             "parent response after delegated work",
             "Delegated agents",
             "Succeeded (2 agents, 2 tool uses)",
-            "| ⚡ Koder |",
-            "│>",
+            "| \u26a1 Koder |",
+            "\u2502>",
             "sonnet-4-6"
           ],
           "expect_bottom_all": [
-            "| ⚡ Koder |",
-            "│>",
+            "| \u26a1 Koder |",
+            "\u2502>",
             "sonnet-4-6"
           ],
           "expect_not": [
-            "● Agent:",
-            "● read_file"
+            "\u25cf Agent:",
+            "\u25cf read_file"
           ],
           "timeout": 12
         }
@@ -8761,16 +9056,318 @@
         }
       ]
     },
+    "sed-program-permissions": {
+      "validation_level": "acceptance",
+      "purpose": "Reject a model-requested sed script write without -i while allowing a literal print script in dontAsk mode.",
+      "env": {
+        "KODER_PERMISSION_MODE": "dontAsk",
+        "KODER_MODEL": "openai/koder-fixture",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
+        "KODER_API_KEY": "synthetic-sed-permission-key"
+      },
+      "fake_openai": {
+        "port": 0,
+        "scenario": "sed_query_mutation",
+        "response": "sed-permission-fixture-done",
+        "log_file": "$HOME/fake-openai-sed-permission.log",
+        "ready_file": "$HOME/fake-openai-sed-permission.ready"
+      },
+      "acceptance_criteria": [
+        "the actual runtime reports dontAsk mode",
+        "the model's sed w command is denied before creating its output file",
+        "the model's literal print script succeeds and returns the first source line",
+        "tool-result logs associate the denial and success with their exact call IDs",
+        "the source file is unchanged and the rejected output file does not exist"
+      ],
+      "acceptance_artifacts": [
+        "runtime mode capture",
+        "write and read model-turn captures",
+        "correlated synthetic provider tool-result log",
+        "source contents and rejected output-file absence"
+      ],
+      "turns": [
+        {
+          "send": "/permissions",
+          "expect_all": [
+            "mode: dontAsk"
+          ]
+        },
+        {
+          "send": "Exercise the sed write permission gate. KODER_SED_WRITE",
+          "capture": "visible",
+          "expect_all": [
+            "sed-permission-fixture-done"
+          ],
+          "timeout": 20
+        },
+        {
+          "send": "Exercise a literal sed read. KODER_SED_READ",
+          "capture": "visible",
+          "expect_all": [
+            "sed-permission-fixture-done"
+          ],
+          "timeout": 20
+        }
+      ],
+      "post_assertions": [
+        {
+          "file_contains": [
+            "$HOME/fake-openai-sed-permission.log",
+            [
+              "sed -n 'w sed-write-proof.txt' sample.txt",
+              "sed -n '1p' sample.txt",
+              "\"sed_write_denied\": true",
+              "\"sed_read_succeeded\": true"
+            ]
+          ]
+        },
+        {
+          "file_contains": [
+            "$REPO/sample.txt",
+            "initial\nchanged\n"
+          ]
+        },
+        {
+          "path_not_exists": "$REPO/sed-write-proof.txt"
+        }
+      ]
+    },
+    "git-mutating-query-modes": {
+      "validation_level": "acceptance",
+      "purpose": "Reject mutating Git query modes in dontAsk while preserving ordinary queries and the fixture reflog.",
+      "env": {
+        "KODER_PERMISSION_MODE": "dontAsk",
+        "KODER_MODEL": "openai/koder-fixture",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
+        "KODER_API_KEY": "synthetic-git-permission-key"
+      },
+      "fake_openai": {
+        "port": 0,
+        "scenario": "git_query_mutation",
+        "response": "git-permission-fixture-done",
+        "log_file": "$HOME/fake-openai-git-permission.log",
+        "ready_file": "$HOME/fake-openai-git-permission.ready"
+      },
+      "acceptance_criteria": [
+        "the actual runtime reports dontAsk mode",
+        "ordinary reflog queries remain allowed and show the fixture commit",
+        "a model-requested reflog expiry is rejected before execution",
+        "a model-requested abbreviated fsck lost-found is rejected before execution",
+        "git_command rejects abbreviated branch editing",
+        "log search arguments remain read-only",
+        "the fixture reflog remains intact and no lost-found directory is created"
+      ],
+      "acceptance_artifacts": [
+        "runtime permission mode capture",
+        "model tool response captures",
+        "synthetic provider log containing requested commands and denial results",
+        "git_command and log-search permission decisions",
+        "post-denial reflog query capture",
+        "reflog file and lost-found absence assertions"
+      ],
+      "turns": [
+        {
+          "send": "/permissions",
+          "expect_all": [
+            "mode: dontAsk"
+          ]
+        },
+        {
+          "send": "!git reflog show --format=%gs",
+          "expect_all": [
+            "commit (initial): initial"
+          ]
+        },
+        {
+          "send": "Exercise the reflog permission gate. KODER_GIT_REFLOG",
+          "capture": "visible",
+          "expect_all": [
+            "git-permission-fixture-done"
+          ],
+          "timeout": 20
+        },
+        {
+          "send": "Exercise the fsck permission gate. KODER_GIT_FSCK",
+          "capture": "visible",
+          "expect_all": [
+            "git-permission-fixture-done"
+          ],
+          "timeout": 20
+        },
+        {
+          "send": "/permissions check git_command branch --edit-desc",
+          "expect_all": [
+            "tool: git_command",
+            "allowed: false",
+            "requires_approval: false"
+          ]
+        },
+        {
+          "send": "/permissions check run_shell git log -Sfoo",
+          "expect_all": [
+            "allowed: true",
+            "requires_approval: false"
+          ]
+        },
+        {
+          "send": "!git reflog show --format=%gs",
+          "capture": "visible",
+          "expect_all": [
+            "commit (initial): initial"
+          ]
+        }
+      ],
+      "post_assertions": [
+        {
+          "file_contains": [
+            "$HOME/fake-openai-git-permission.log",
+            [
+              "git reflog expire --expire=all --all",
+              "git fsck --lost",
+              "dontAsk mode: approval auto-denied",
+              "call_koder_git_reflog",
+              "call_koder_git_fsck",
+              "\"git_reflog_denied\": true",
+              "\"git_fsck_denied\": true"
+            ]
+          ]
+        },
+        {
+          "file_contains": [
+            "$REPO/.git/logs/HEAD",
+            "commit (initial): initial"
+          ]
+        },
+        {
+          "path_not_exists": "$REPO/.git/lost-found"
+        }
+      ]
+    },
+    "streaming-cancel-recovery": {
+      "validation_level": "acceptance",
+      "purpose": "Interrupt an actual streaming terminal turn with Escape, preserve partial output, and verify the prompt and session remain usable.",
+      "cli_args": [
+        "--session",
+        "tui-cancel-recovery"
+      ],
+      "env": {
+        "KODER_MODEL": "openai/koder-fixture",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
+        "KODER_API_KEY": "synthetic-cancellation-key"
+      },
+      "fake_openai": {
+        "port": 0,
+        "response": "cancelled-turn-must-not-complete",
+        "log_file": "$HOME/fake-openai-cancel.log",
+        "ready_file": "$HOME/fake-openai-cancel.ready",
+        "scenario": "streaming_tool_queue",
+        "stream_delay": 0.08,
+        "stream_lines": 160
+      },
+      "acceptance_criteria": [
+        "a real tmux pane displays partial text from a synthetic streaming provider",
+        "Escape cancels the active turn before its final response and tool continuation",
+        "the cancellation notice and partial output survive returning to the idle prompt",
+        "a subsequent local shell command executes and creates a durable proof file",
+        "the original session metadata remains present after cancellation"
+      ],
+      "acceptance_artifacts": [
+        "streaming pane capture",
+        "cancelled pane capture",
+        "recovery command capture and proof file",
+        "synthetic provider request log",
+        "SQLite session metadata"
+      ],
+      "turns": [
+        {
+          "send": "Stream a cancellable response for terminal validation.",
+          "capture": "visible",
+          "expect_all": [
+            "streaming fixture long line 003",
+            "| \u26a1 Koder |"
+          ],
+          "expect_bottom_all": [
+            "| \u26a1 Koder |"
+          ],
+          "timeout": 12
+        },
+        {
+          "keys": [
+            "Escape"
+          ],
+          "capture": "visible",
+          "expect_all": [
+            "Operation cancelled by user",
+            "streaming fixture long line",
+            "| \u26a1 Koder |"
+          ],
+          "expect_not": [
+            "cancelled-turn-must-not-complete"
+          ],
+          "expect_bottom_all": [
+            "| \u26a1 Koder |"
+          ],
+          "timeout": 10
+        },
+        {
+          "send": "!printf '%s%s\\n' cancel- recovery-ok > cancel-proof.txt && cat cancel-proof.txt",
+          "capture": "visible",
+          "expect_all": [
+            "cancel-recovery-ok",
+            "| \u26a1 Koder |"
+          ]
+        },
+        {
+          "send": "/session",
+          "capture": "visible",
+          "expect_all": [
+            "session_id: tui-cancel-recovery",
+            "| \u26a1 Koder |"
+          ]
+        }
+      ],
+      "post_assertions": [
+        {
+          "file_contains": [
+            "$REPO/cancel-proof.txt",
+            "cancel-recovery-ok"
+          ]
+        },
+        {
+          "file_contains": [
+            "$HOME/fake-openai-cancel.log",
+            "Stream a cancellable response for terminal validation."
+          ]
+        },
+        {
+          "file_not_contains": [
+            "$HOME/fake-openai-cancel.log",
+            "\"role\": \"tool\""
+          ]
+        },
+        {
+          "sqlite_contains": [
+            "$HOME/.koder/koder.db",
+            "select session_id from session_metadata where session_id = 'tui-cancel-recovery'",
+            "tui-cancel-recovery"
+          ]
+        }
+      ]
+    },
     "fixed-bottom-queued-input": {
       "validation_level": "acceptance",
       "purpose": "Validate that interactive streaming keeps output above a fixed bottom input/status area, accepts mid-stream input, displays queued rows, and injects queued prompts into the next tool result.",
       "env": {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19090/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "fixed-bottom-secret-token"
       },
       "fake_openai": {
-        "port": 19090,
+        "port": 0,
         "response": "final answer after queued input",
         "log_file": "$HOME/fake-openai-fixed-bottom-queue.log",
         "ready_file": "$HOME/fake-openai-fixed-bottom-queue.ready",
@@ -8891,11 +9488,12 @@
       "purpose": "Verify that a provider error after streamed text and a tool call preserves the completed TUI output above the returned prompt.",
       "env": {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19093/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "fixed-bottom-error-secret-token"
       },
       "fake_openai": {
-        "port": 19093,
+        "port": 0,
         "response": "fixture stream failure",
         "log_file": "$HOME/fake-openai-fixed-bottom-error.log",
         "ready_file": "$HOME/fake-openai-fixed-bottom-error.ready",
@@ -8963,11 +9561,12 @@
       "purpose": "Validate that a short response leaves the tip, input frame, and status line together at the bottom of the visible terminal.",
       "env": {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19091/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "fixed-bottom-tip-secret-token"
       },
       "fake_openai": {
-        "port": 19091,
+        "port": 0,
         "response": "final answer after queued input",
         "log_file": "$HOME/fake-openai-fixed-bottom-tip.log",
         "ready_file": "$HOME/fake-openai-fixed-bottom-tip.ready",
@@ -9024,11 +9623,12 @@
       "purpose": "Validate soft-wrapped input and Shift+Enter newlines in idle and streaming queued-input modes.",
       "env": {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19092/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "multiline-input-secret-token"
       },
       "fake_openai": {
-        "port": 19092,
+        "port": 0,
         "response": "multiline final response",
         "log_file": "$HOME/fake-openai-multiline-input.log",
         "ready_file": "$HOME/fake-openai-multiline-input.ready",

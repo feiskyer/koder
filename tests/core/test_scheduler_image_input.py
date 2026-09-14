@@ -71,11 +71,14 @@ async def test_handle_passes_multimodal_list_to_runner_run(tmp_path):
         return _Result()
 
     scheduler = _make_scheduler("image-turn")
-    with (
-        patch("koder_agent.core.scheduler.Runner.run", side_effect=fake_run),
-        patch("koder_agent.core.scheduler.get_companion", return_value=None),
-    ):
-        await scheduler.handle("describe this", render_output=False, multimodal_input=mm)
+    try:
+        with (
+            patch("koder_agent.core.scheduler.Runner.run", side_effect=fake_run),
+            patch("koder_agent.core.scheduler.get_companion", return_value=None),
+        ):
+            await scheduler.handle("describe this", render_output=False, multimodal_input=mm)
+    finally:
+        await scheduler.cleanup()
 
     # The scheduler must forward the multimodal list verbatim as the model input.
     assert isinstance(captured["input"], list)
@@ -95,11 +98,14 @@ async def test_handle_plain_text_path_passes_string_to_runner_run():
         return _Result()
 
     scheduler = _make_scheduler("text-turn")
-    with (
-        patch("koder_agent.core.scheduler.Runner.run", side_effect=fake_run),
-        patch("koder_agent.core.scheduler.get_companion", return_value=None),
-    ):
-        await scheduler.handle("just text", render_output=False)
+    try:
+        with (
+            patch("koder_agent.core.scheduler.Runner.run", side_effect=fake_run),
+            patch("koder_agent.core.scheduler.get_companion", return_value=None),
+        ):
+            await scheduler.handle("just text", render_output=False)
+    finally:
+        await scheduler.cleanup()
 
     assert isinstance(captured["input"], str)
     assert captured["input"] == "just text"
@@ -126,8 +132,11 @@ async def test_streaming_path_passes_multimodal_list_to_run_streamed(tmp_path):
 
     scheduler._handle_streaming = fake_handle_streaming
 
-    with patch("koder_agent.core.scheduler.get_companion", return_value=None):
-        await scheduler.handle("look", render_output=False, multimodal_input=mm)
+    try:
+        with patch("koder_agent.core.scheduler.get_companion", return_value=None):
+            await scheduler.handle("look", render_output=False, multimodal_input=mm)
+    finally:
+        await scheduler.cleanup()
 
     # Bookkeeping string stays the plain text; run input is the multimodal list.
     assert captured["user_input"] == "look"

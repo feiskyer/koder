@@ -405,15 +405,21 @@ def test_direct_skill_invocation_runs_forked_skill_via_agent_service(tmp_path, m
         )(),
     )
 
-    class _AgentService:
+    from koder_agent.harness.agents.service import AgentService
+
+    class _AgentService(AgentService):
         async def run_sync(self, *, agent_definition, prompt, seed_items=None, cwd=None):
             return f"{agent_definition.agent_type}: {prompt}"
 
-    handler = HarnessInteractiveCommandHandler(agent_service=_AgentService())
+    service = _AgentService(output_root=tmp_path / "agents")
+    handler = HarnessInteractiveCommandHandler(agent_service=service)
     import asyncio
 
-    result = asyncio.run(handler.handle_slash_input("/deploy production", scheduler=None))
-    assert result == "reviewer: Deploy production"
+    try:
+        result = asyncio.run(handler.handle_slash_input("/deploy production", scheduler=None))
+        assert result == "reviewer: Deploy production"
+    finally:
+        service.close()
 
 
 def test_direct_skill_invocation_activates_skill_scoped_hooks(tmp_path, monkeypatch):

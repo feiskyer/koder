@@ -357,7 +357,7 @@ def get_skill_activation_block_message(
     return (
         f"Tool '{tool_name}' was not executed because this model response also requested "
         "get_skill. Skill activation must complete before sibling tools can run; call this "
-        "tool again in the next model step."
+        "tool again in the next model step with a new tool call ID."
     )
 
 

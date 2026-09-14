@@ -5,14 +5,21 @@ client setup for seamless authentication.
 """
 
 import asyncio
+import contextlib
 import logging
+from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
+
+from filelock import Timeout as FileLockTimeout
 
 from koder_agent.auth.base import OAuthTokens
 from koder_agent.auth.constants import TOKEN_EXPIRY_BUFFER_MS
-from koder_agent.auth.token_storage import get_token_storage
+from koder_agent.auth.token_storage import TokenStorage, get_token_storage
+from koder_agent.utils.async_tasks import await_owned_task, run_sync_owned
 
 logger = logging.getLogger(__name__)
+OAUTH_REFRESH_TIMEOUT_SECONDS = 30.0
+_REFRESH_LOCK_POLL_SECONDS = 0.05
 
 
 def _normalize_provider_for_log(provider: str) -> str:
@@ -38,7 +45,7 @@ def get_oauth_token(provider: str) -> Optional[OAuthTokens]:
     # Check if token needs refresh
     if tokens.is_expired(TOKEN_EXPIRY_BUFFER_MS):
         # Try to refresh
-        refreshed = _sync_refresh_token(provider, tokens)
+        refreshed = _sync_refresh_token(provider, tokens, storage=storage)
         if refreshed:
             return refreshed
         # If refresh failed, token is still expired
@@ -47,7 +54,42 @@ def get_oauth_token(provider: str) -> Optional[OAuthTokens]:
     return tokens
 
 
-def _sync_refresh_token(provider: str, tokens: OAuthTokens) -> Optional[OAuthTokens]:
+async def async_get_oauth_token(provider: str) -> Optional[OAuthTokens]:
+    """Acquire credentials without blocking the event loop on local storage."""
+    provider = _normalize_provider_for_log(provider)
+    storage = await run_sync_owned(get_token_storage)
+    tokens = await run_sync_owned(storage.load, provider)
+    if tokens is None:
+        return None
+    if tokens.is_expired(TOKEN_EXPIRY_BUFFER_MS):
+        return await async_refresh_token(provider, tokens, storage=storage)
+    return tokens
+
+
+def _commit_refresh(
+    provider: str,
+    previous: OAuthTokens,
+    refreshed: OAuthTokens,
+    *,
+    storage: TokenStorage | None = None,
+) -> Optional[OAuthTokens]:
+    """Commit only against the refresh input, or reuse a concurrent valid winner."""
+    if previous.provider != provider.strip().lower() or refreshed.provider != previous.provider:
+        raise ValueError("Refresh token provider mismatch")
+    if storage is None:
+        storage = get_token_storage()
+    if storage.save_if_current(previous, refreshed):
+        logger.info("Refreshed OAuth tokens for %s", previous.provider)
+        return refreshed
+    current = storage.load(previous.provider)
+    if current is not None and not current.is_expired(TOKEN_EXPIRY_BUFFER_MS):
+        return current
+    return None
+
+
+def _sync_refresh_token(
+    provider: str, tokens: OAuthTokens, *, storage: TokenStorage | None = None
+) -> Optional[OAuthTokens]:
     """Synchronously refresh OAuth tokens.
 
     Args:
@@ -57,48 +99,34 @@ def _sync_refresh_token(provider: str, tokens: OAuthTokens) -> Optional[OAuthTok
     Returns:
         Refreshed tokens or None if refresh failed
     """
+
+    def refresh():
+        return asyncio.run(async_refresh_token(provider, tokens, storage=storage))
+
     try:
-        from koder_agent.auth.providers import get_provider
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return refresh()
 
-        oauth_provider = get_provider(provider)
+    # Compatibility for explicitly synchronous callers. This necessarily blocks
+    # its caller: normal async code must use async_get_oauth_token instead.
+    # The shared refresh operation owns its deadline and publication; an outer
+    # Future timeout must not abandon a potentially rotated credential.
+    from concurrent.futures import ThreadPoolExecutor
 
-        # Run refresh in event loop
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create a new event loop for synchronous context
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(
-                    asyncio.run, oauth_provider.refresh_tokens(tokens.refresh_token)
-                )
-                result = future.result(timeout=30)
-        else:
-            result = loop.run_until_complete(oauth_provider.refresh_tokens(tokens.refresh_token))
-
-        if result.success and result.tokens:
-            # Save refreshed tokens
-            storage = get_token_storage()
-            storage.save(result.tokens)
-            logger.info(f"Refreshed OAuth tokens for {provider}")
-            return result.tokens
-
-        logger.warning(
-            "OAuth token refresh failed provider=%s category=refresh_rejected",
-            _normalize_provider_for_log(provider),
-        )
-        return None
-
-    except Exception as error:
-        logger.error(
-            "OAuth token refresh failed provider=%s category=exception exception_type=%s",
-            _normalize_provider_for_log(provider),
-            type(error).__name__,
-        )
-        return None
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(refresh).result()
 
 
-async def async_refresh_token(provider: str, tokens: OAuthTokens) -> Optional[OAuthTokens]:
+@dataclass
+class _RefreshState:
+    deadline: float
+    cancellation_requested: bool = False
+
+
+async def async_refresh_token(
+    provider: str, tokens: OAuthTokens, *, storage: TokenStorage | None = None
+) -> Optional[OAuthTokens]:
     """Asynchronously refresh OAuth tokens.
 
     Args:
@@ -108,32 +136,93 @@ async def async_refresh_token(provider: str, tokens: OAuthTokens) -> Optional[OA
     Returns:
         Refreshed tokens or None if refresh failed
     """
+    provider = _normalize_provider_for_log(provider)
+    state = _RefreshState(asyncio.get_running_loop().time() + OAUTH_REFRESH_TIMEOUT_SECONDS)
+    work = asyncio.create_task(_refresh_job(provider, tokens, storage, state))
     try:
-        from koder_agent.auth.providers import get_provider
+        return await asyncio.shield(work)
+    except asyncio.CancelledError as original:
+        state.cancellation_requested = True
+        # An already-started refresh may rotate the credential. Finish its
+        # bounded operation and conditional publication rather than losing the
+        # result. Waiters that have not sent a request stop in the lease loop.
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await await_owned_task(work)
+        raise original
 
-        oauth_provider = get_provider(provider)
-        result = await oauth_provider.refresh_tokens(tokens.refresh_token)
 
-        if result.success and result.tokens:
-            # Save refreshed tokens
-            storage = get_token_storage()
-            storage.save(result.tokens)
-            logger.info(f"Refreshed OAuth tokens for {provider}")
-            return result.tokens
-
-        logger.warning(
-            "OAuth token refresh failed provider=%s category=refresh_rejected",
-            _normalize_provider_for_log(provider),
-        )
+async def _refresh_job(
+    provider: str, tokens: OAuthTokens, storage: TokenStorage | None, state: _RefreshState
+) -> Optional[OAuthTokens]:
+    try:
+        if tokens.provider != provider:
+            raise ValueError("Refresh token provider mismatch")
+        if state.cancellation_requested:
+            return None
+        if storage is None:
+            storage = await run_sync_owned(get_token_storage)
+        return await _refresh_under_lease(provider, tokens, storage, state)
+    except asyncio.TimeoutError:
+        logger.warning("OAuth token refresh failed provider=%s category=timeout", provider)
         return None
-
     except Exception as error:
         logger.error(
             "OAuth token refresh failed provider=%s category=exception exception_type=%s",
-            _normalize_provider_for_log(provider),
+            provider,
             type(error).__name__,
         )
         return None
+
+
+async def _refresh_under_lease(
+    provider: str, tokens: OAuthTokens, storage: TokenStorage, state: _RefreshState
+) -> Optional[OAuthTokens]:
+    lock = await run_sync_owned(storage.refresh_lock, provider)
+    acquired = False
+    loop = asyncio.get_running_loop()
+    try:
+        while not acquired:
+            if state.cancellation_requested:
+                return None
+            remaining = state.deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            try:
+                # Each attempt is nonblocking. Do not leave a cancelled thread
+                # waiting to acquire a lease after its caller has returned.
+                await run_sync_owned(lock.acquire, timeout=0)
+                acquired = True
+            except FileLockTimeout:
+                await asyncio.sleep(min(_REFRESH_LOCK_POLL_SECONDS, remaining))
+
+        if state.cancellation_requested:
+            return None
+        current = await run_sync_owned(storage.load, provider)
+        if current is None:
+            return None
+        if current != tokens:
+            return current if not current.is_expired(TOKEN_EXPIRY_BUFFER_MS) else None
+        if state.cancellation_requested:
+            return None
+        remaining = state.deadline - loop.time()
+        if remaining <= 0:
+            raise asyncio.TimeoutError
+
+        from koder_agent.auth.providers import get_provider
+
+        result = await asyncio.wait_for(
+            get_provider(provider).refresh_tokens(tokens.refresh_token),
+            timeout=remaining,
+        )
+        if result.success and result.tokens:
+            return await run_sync_owned(
+                _commit_refresh, provider, tokens, result.tokens, storage=storage
+            )
+        logger.warning("OAuth token refresh failed provider=%s category=refresh_rejected", provider)
+        return None
+    finally:
+        if acquired:
+            await run_sync_owned(lock.release)
 
 
 def get_oauth_api_key(provider: str) -> Optional[str]:

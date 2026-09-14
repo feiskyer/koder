@@ -362,7 +362,7 @@ def _assistant(text):
     return {"role": "assistant", "content": text}
 
 
-async def _seed_two_turn_session(session_id):
+async def _seed_two_turn_session(session_id, request):
     """Create a session with two user turns and align file checkpoints.
 
     Returns the session with conversation:
@@ -370,6 +370,7 @@ async def _seed_two_turn_session(session_id):
       turn 2 -> user "prompt two" + assistant reply
     """
     session = EnhancedSQLiteSession(session_id, db_path=":memory:")
+    request.addfinalizer(session.close)
     cp.set_active_session(session_id)
 
     cp.begin_turn()  # checkpoint 1 (turn 1)
@@ -383,10 +384,10 @@ async def _seed_two_turn_session(session_id):
 class TestRewindCommand:
     @pytest.mark.asyncio
     async def test_conversation_mode_trims_history_without_touching_files(
-        self, checkpoint_root, tmp_path
+        self, checkpoint_root, tmp_path, request
     ):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-conv")
+        session = await _seed_two_turn_session("rw-conv", request)
         scheduler = SimpleNamespace(session=session)
 
         # A tracked file edited in turn 2.
@@ -407,10 +408,10 @@ class TestRewindCommand:
 
     @pytest.mark.asyncio
     async def test_code_mode_restores_files_without_trimming_history(
-        self, checkpoint_root, tmp_path
+        self, checkpoint_root, tmp_path, request
     ):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-code")
+        session = await _seed_two_turn_session("rw-code", request)
         scheduler = SimpleNamespace(session=session)
 
         target = tmp_path / "code.py"
@@ -434,9 +435,11 @@ class TestRewindCommand:
         assert handler.consume_pending_input_text() is None
 
     @pytest.mark.asyncio
-    async def test_both_mode_trims_history_and_restores_files(self, checkpoint_root, tmp_path):
+    async def test_both_mode_trims_history_and_restores_files(
+        self, checkpoint_root, tmp_path, request
+    ):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-both")
+        session = await _seed_two_turn_session("rw-both", request)
         scheduler = SimpleNamespace(session=session)
 
         target = tmp_path / "code.py"
@@ -456,9 +459,9 @@ class TestRewindCommand:
         assert target.read_text(encoding="utf-8") == "v1\n"
 
     @pytest.mark.asyncio
-    async def test_listing_targets_shows_modes(self, checkpoint_root):
+    async def test_listing_targets_shows_modes(self, checkpoint_root, request):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-list")
+        session = await _seed_two_turn_session("rw-list", request)
         scheduler = SimpleNamespace(session=session)
 
         out = await handler._execute_rewind(scheduler, [])
@@ -475,35 +478,35 @@ class TestRewindCommand:
         assert "code" in out and "both" in out
 
     @pytest.mark.asyncio
-    async def test_invalid_number_rejected(self, checkpoint_root):
+    async def test_invalid_number_rejected(self, checkpoint_root, request):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-bad")
+        session = await _seed_two_turn_session("rw-bad", request)
         scheduler = SimpleNamespace(session=session)
         out = await handler._execute_rewind(scheduler, ["notanumber"])
         assert out == handler._REWIND_USAGE
 
     @pytest.mark.asyncio
-    async def test_out_of_range_number_rejected(self, checkpoint_root):
+    async def test_out_of_range_number_rejected(self, checkpoint_root, request):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-range")
+        session = await _seed_two_turn_session("rw-range", request)
         scheduler = SimpleNamespace(session=session)
         out = await handler._execute_rewind(scheduler, ["99", "code"])
         assert "between 1 and 2" in out
 
     @pytest.mark.asyncio
-    async def test_code_mode_no_changes_message(self, checkpoint_root):
+    async def test_code_mode_no_changes_message(self, checkpoint_root, request):
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-nochange")
+        session = await _seed_two_turn_session("rw-nochange", request)
         scheduler = SimpleNamespace(session=session)
         # No file snapshots recorded -> code restore has nothing to do.
         out = await handler._execute_rewind(scheduler, ["1", "code"])
         assert "No tracked file changes" in out
 
     @pytest.mark.asyncio
-    async def test_code_mode_disabled_message(self, checkpoint_root, monkeypatch):
+    async def test_code_mode_disabled_message(self, checkpoint_root, monkeypatch, request):
         monkeypatch.setenv("KODER_FILE_CHECKPOINTS", "0")
         handler = HarnessInteractiveCommandHandler(emit_console=False)
-        session = await _seed_two_turn_session("rw-disabled")
+        session = await _seed_two_turn_session("rw-disabled", request)
         scheduler = SimpleNamespace(session=session)
         out = await handler._execute_rewind(scheduler, ["1", "code"])
         assert "disabled" in out.lower()

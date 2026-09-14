@@ -1,5 +1,9 @@
 """Tests for cron job persistence."""
 
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
 import pytest
 
 from koder_agent.harness.cron.storage import CronStorage
@@ -51,3 +55,58 @@ def test_persistence_roundtrip(tmp_path):
     jobs = s2.list_all()
     assert len(jobs) == 1
     assert jobs[0]["prompt"] == "persist me"
+
+
+@pytest.mark.parametrize("max_jobs", [1, 50])
+def test_concurrent_storage_instances_do_not_lose_jobs_or_bypass_limit(
+    tmp_path, monkeypatch, max_jobs
+):
+    path = tmp_path / "crons.json"
+    first = CronStorage(path, max_jobs=max_jobs)
+    second = CronStorage(path, max_jobs=max_jobs)
+    first_read = threading.Event()
+    release_first = threading.Event()
+    original_read = first._read
+
+    def hold_first_snapshot():
+        jobs = original_read()
+        first_read.set()
+        assert release_first.wait(5)
+        return jobs
+
+    monkeypatch.setattr(first, "_read", hold_first_snapshot)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_write = pool.submit(first.create, cron="* * * * *", prompt="first")
+        try:
+            assert first_read.wait(5)
+            second_write = pool.submit(second.create, cron="* * * * *", prompt="second")
+            try:
+                second_write.result(timeout=0.1)
+            except TimeoutError:
+                pass
+        finally:
+            release_first.set()
+        first_job = first_write.result(timeout=5)
+        if max_jobs == 1:
+            with pytest.raises(ValueError, match="limit"):
+                second_write.result(timeout=5)
+        else:
+            second_job = second_write.result(timeout=5)
+            assert {job["id"] for job in second.list_all()} == {
+                first_job["id"],
+                second_job["id"],
+            }
+    assert len(second.list_all()) == min(max_jobs, 2)
+
+
+@pytest.mark.parametrize("payload", [[], {"tasks": {}}, {"tasks": ["not a job"]}])
+def test_malformed_storage_is_not_silently_replaced(tmp_path, payload):
+    path = tmp_path / "crons.json"
+    original = json.dumps(payload)
+    path.write_text(original, encoding="utf-8")
+    storage = CronStorage(path)
+
+    with pytest.raises(ValueError, match="Invalid cron storage"):
+        storage.create(cron="* * * * *", prompt="new")
+
+    assert path.read_text(encoding="utf-8") == original

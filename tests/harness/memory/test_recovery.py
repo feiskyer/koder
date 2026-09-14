@@ -1,5 +1,6 @@
 import sys
 import types
+from contextlib import closing
 from pathlib import Path
 
 # Stub litellm before importing koder_agent to avoid optional dependency issues
@@ -24,10 +25,11 @@ def test_recover_partial_write_restores_last_known_good_state(tmp_path):
     runtime_db = tmp_path / "runtime.db"
     backup_db = tmp_path / "runtime.db.bak"
 
-    store = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    session_id = store.create_session("demo")
-    store.append_user_message(session_id, "hello")
-    store.close()
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as store:
+        session_id = store.create_session("demo")
+        store.append_user_message(session_id, "hello")
 
     backup_db.write_bytes(runtime_db.read_bytes())
     runtime_db.write_text("not a sqlite db", encoding="utf-8")
@@ -35,17 +37,20 @@ def test_recover_partial_write_restores_last_known_good_state(tmp_path):
     result = recover_partial_write(runtime_db, backup_db)
 
     assert result.recovered is True
-    reopened = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    assert reopened.read_messages(session_id)[0].content == "hello"
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as reopened:
+        assert reopened.read_messages(session_id)[0].content == "hello"
 
 
 def test_recover_partial_write_is_noop_when_primary_db_is_healthy(tmp_path):
     runtime_db = tmp_path / "runtime.db"
     backup_db = tmp_path / "runtime.db.bak"
 
-    store = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    store.create_session("demo")
-    store.close()
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as store:
+        store.create_session("demo")
 
     result = recover_partial_write(runtime_db, backup_db)
 
@@ -56,10 +61,11 @@ def test_create_backup_then_recover_round_trip(tmp_path):
     """create_backup must produce a .bak that recover_partial_write can restore from."""
     runtime_db = tmp_path / "runtime.db"
 
-    store = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    session_id = store.create_session("demo")
-    store.append_user_message(session_id, "hello")
-    store.close()
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as store:
+        session_id = store.create_session("demo")
+        store.append_user_message(session_id, "hello")
 
     # No explicit path -> uses the same <db>.bak convention recovery expects.
     backup_result = create_backup(runtime_db)
@@ -71,18 +77,21 @@ def test_create_backup_then_recover_round_trip(tmp_path):
     result = recover_partial_write(runtime_db)
 
     assert result.recovered is True
-    reopened = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    assert reopened.read_messages(session_id)[0].content == "hello"
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as reopened:
+        assert reopened.read_messages(session_id)[0].content == "hello"
 
 
 def test_create_backup_refuses_corrupt_source(tmp_path):
     """A corrupt runtime DB must never clobber an existing good backup."""
     runtime_db = tmp_path / "runtime.db"
 
-    store = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    session_id = store.create_session("demo")
-    store.append_user_message(session_id, "good state")
-    store.close()
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as store:
+        session_id = store.create_session("demo")
+        store.append_user_message(session_id, "good state")
 
     # Establish a known-good backup.
     assert create_backup(runtime_db).created is True
@@ -96,5 +105,7 @@ def test_create_backup_refuses_corrupt_source(tmp_path):
     # The good backup still restores the original content.
     recovery = recover_partial_write(runtime_db)
     assert recovery.recovered is True
-    reopened = TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
-    assert reopened.read_messages(session_id)[0].content == "good state"
+    with closing(
+        TranscriptStore(runtime_db_path=runtime_db, legacy_db_path=tmp_path / "legacy.db")
+    ) as reopened:
+        assert reopened.read_messages(session_id)[0].content == "good state"

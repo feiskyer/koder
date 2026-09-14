@@ -10,6 +10,12 @@ from pathlib import Path
 import pytest
 
 import koder_agent.tools.worktree as worktree_module
+from koder_agent.tools.todo import (
+    TodoRuntimeIdentity,
+    TodoStore,
+    reset_todo_context,
+    set_todo_context,
+)
 from koder_agent.tools.worktree import (
     WorktreeSession,
     _get_worktree_session,
@@ -47,11 +53,18 @@ def git_repo(tmp_path):
     return _init_git_repo(tmp_path / "repo")
 
 
-@pytest.fixture(autouse=True)
-def _clear_session():
+@pytest.fixture(autouse=True, params=["standalone", "runtime"])
+def _clear_session(request):
+    token = None
+    if request.param == "runtime":
+        token = set_todo_context(
+            TodoStore(TodoRuntimeIdentity("worktree-test", "main", request.node.nodeid))
+        )
     _set_worktree_session(None)
     yield
     _set_worktree_session(None)
+    if token is not None:
+        reset_todo_context(token)
 
 
 def _branch_exists(repo: Path, branch: str) -> bool:

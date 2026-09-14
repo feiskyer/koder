@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
+from koder_agent.harness.execution_context import get_execution_cwd
 from koder_agent.mcp.server_manager import MCPServerManager
 
 from .registry import ToolRegistry, ToolSpec, build_tool_result
@@ -32,7 +32,7 @@ def _server_description(transport_type: Any) -> str:
 async def invoke_list_mcp_resources(arguments: dict[str, Any]) -> dict[str, Any]:
     target_server = arguments.get("server")
     manager = MCPServerManager()
-    servers = await manager.list_servers(cwd=os.getcwd())
+    servers = await manager.list_servers(cwd=str(get_execution_cwd()))
     filtered = [server for server in servers if not target_server or server.name == target_server]
 
     if target_server and not filtered:
@@ -72,7 +72,7 @@ async def invoke_read_mcp_resource(arguments: dict[str, Any]) -> dict[str, Any]:
         )
 
     manager = MCPServerManager()
-    server = await manager.get_server(server_name, cwd=os.getcwd())
+    server = await manager.get_server(server_name, cwd=str(get_execution_cwd()))
     if server is None:
         return build_tool_result(
             "read_mcp_resource",

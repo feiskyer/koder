@@ -116,9 +116,9 @@ def _content_to_text(content: Any) -> str:
         for block in content:
             if isinstance(block, dict):
                 block_type = block.get("type")
-                if block_type in {"text", "output_text"}:
+                if block_type in {"text", "input_text", "output_text"}:
                     text_parts.append(str(block.get("text", "")))
-                elif block_type == "image_url":
+                elif block_type in {"image_url", "input_image"}:
                     text_parts.append("[image]")
                 elif block_type == "refusal":
                     text_parts.append(str(block.get("refusal", "")))
@@ -163,31 +163,27 @@ def _recent_plain_context_items(
 def _is_already_compacted_context(messages: list[dict], keep_recent: int) -> bool:
     if not messages:
         return False
-    first = _plain_context_message_from_item(messages[0])
-    if not first or not first.get("content", "").startswith(_COMPACTED_PREFIX):
-        return False
     # A previously-compacted context may carry a trailing run of preserved
-    # replayable tool items (item 4). Treat that tail as already-compacted so a
-    # re-compaction short-circuits instead of needlessly re-summarizing the
-    # plain head each pass. Everything outside the tail must be plain text.
+    # tool pairs. Recognize its conversational head independently of preserved
+    # system/developer instructions; those do not consume keep_recent slots.
     tail = _trailing_replayable_tool_items(messages)
     head = messages[: len(messages) - len(tail)] if tail else messages
-    plain_items = _recent_plain_context_items(head, None)
-    if len(plain_items) != len(head):
+    conversation = [item for item in head if item.get("role") not in {"system", "developer"}]
+    plain_items = _recent_plain_context_items(conversation, None)
+    if not plain_items or len(plain_items) != len(conversation):
         return False
-    return len(plain_items) <= keep_recent + 1
+    first = plain_items[0][1]
+    return first["content"].startswith(_COMPACTED_PREFIX) and len(plain_items) <= keep_recent + 1
 
 
 def _already_compacted_kept_messages(messages: list[dict]) -> list[dict]:
-    """Kept messages for an already-compacted context: plain head + tool tail.
+    """Preserve original item shapes when the history needs no compaction.
 
-    The plain head is normalized to ``{role, content}`` form; any preserved
-    trailing replayable tool items are kept verbatim so the tail stays
-    replayable and is never dropped.
+    The textual projection is only for recognizing the context, not for
+    replacing it: normalization here would erase images and typed-message
+    fields while reporting a no-op.
     """
-    tail = _trailing_replayable_tool_items(messages)
-    head = messages[: len(messages) - len(tail)] if tail else messages
-    return [message for _, message in _recent_plain_context_items(head, None)] + list(tail)
+    return list(messages)
 
 
 def _summary_message(summary: str) -> dict:
@@ -217,14 +213,14 @@ def _is_replayable_tool_item(item: Any) -> bool:
 
 
 def _trailing_replayable_tool_items(messages: list[dict]) -> list[dict]:
-    """Return the trailing contiguous run of replayable tool_call/result items.
+    """Return complete, ordered pairs from the trailing contiguous tool run.
 
     The kept tail must stay replayable, so any trailing ``function_call_output``
     is paired back to its originating ``function_call`` via ``call_id``. We walk
     backwards while items are replayable function_call / function_call_output
-    items and stop at the first non-tool item, then drop any leading
-    function_call_output whose matching function_call was not captured (so we
-    never emit an orphan output the SDK would reject).
+    items and stop at the first non-tool item. Outputs without an earlier call
+    and calls without a retained output are excluded from the replayed tail;
+    llm_compact_messages still includes those items in its summary source.
     """
     if not messages:
         return []
@@ -256,7 +252,10 @@ def _trailing_replayable_tool_items(messages: list[dict]) -> list[dict]:
             if call_id is not None and call_id in seen_call_ids:
                 trimmed.append(item)
             # else: leading orphan output whose call is outside the tail — skip.
-    return trimmed
+    # The ordered pass above only guarantees output -> call consistency.
+    # Apply the session's two-way contract as well: an unanswered call must be
+    # summarized, not replayed and then silently dropped by next-turn repair.
+    return replayable_session_items(trimmed)
 
 
 def _item_role(message: dict) -> str:
@@ -335,6 +334,8 @@ First, write an <analysis> section where you think through the conversation, ide
 
 Then, write a <summary> section with exactly these 9 numbered sections:
 
+Use the analysis and summary tags only as section delimiters. Do not nest or repeat them inside a section; escape them when quoting examples.
+
 1. **Primary Request and Intent**: What is the user's main goal or problem they're trying to solve?
 
 2. **Key Technical Concepts**: What frameworks, libraries, APIs, or technical patterns are central to this conversation?
@@ -366,7 +367,7 @@ def _strip_images_from_message(msg: dict) -> dict:
     stripped_content = []
     for block in msg["content"]:
         if isinstance(block, dict):
-            if block.get("type") == "image_url":
+            if block.get("type") in {"image_url", "input_image"}:
                 stripped_content.append({"type": "text", "text": "[image]"})
             else:
                 stripped_content.append(block)
@@ -421,6 +422,29 @@ def _format_message_for_summary(msg: dict) -> str:
         return f"tool result (id={msg['tool_call_id']}): {content}"
 
     return f"{role}: {content}"
+
+
+def _extract_compaction_summary(response: str) -> str:
+    """Accept a final summary, never analysis or ambiguous section markup."""
+    # Remove analysis before looking for a summary: examples inside the
+    # discarded analysis section are not the final answer.
+    content = re.sub(r"<analysis>.*?</analysis>", "", response, flags=re.DOTALL | re.IGNORECASE)
+    if re.search(r"</?analysis\b", content, re.IGNORECASE):
+        raise ValueError("Compaction summary contains incomplete analysis markup")
+
+    match = re.search(r"<summary>(.*?)</summary>", content, re.DOTALL | re.IGNORECASE)
+    if match:
+        summary = match.group(1).strip()
+        remainder = content[: match.start()] + content[match.end() :]
+    else:
+        # Untagged final summaries remain supported for compatible models.
+        summary = content.strip()
+        remainder = ""
+    if any(re.search(r"</?summary\b", part, re.IGNORECASE) for part in (summary, remainder)):
+        raise ValueError("Compaction summary markup is incomplete or ambiguous")
+    if not summary:
+        raise ValueError("Compaction summary is empty; original history must be preserved")
+    return summary
 
 
 async def llm_compact_messages(
@@ -523,13 +547,9 @@ async def llm_compact_messages(
             response_reserve=4_096,
         )
 
-        # Extract <summary> section, strip <analysis>
-        summary_match = re.search(r"<summary>(.*?)</summary>", response, re.DOTALL | re.IGNORECASE)
-        if summary_match:
-            summary = summary_match.group(1).strip()
-        else:
-            # If no tags, use the whole response
-            summary = response.strip()
+        # An API response is not itself proof of a usable final summary.
+        # Reject invalid output before authorizing a replacement of the source.
+        summary = _extract_compaction_summary(response)
 
         kept_messages = _keep_tail(to_keep)
         return CompactionResult(

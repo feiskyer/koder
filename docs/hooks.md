@@ -42,6 +42,11 @@ Set `"disableAllHooks": true` in user or project settings to disable everything 
 
 Each event maps to a list of groups. A group has an optional `matcher` and a list of hooks. Every hook receives the event payload as JSON on stdin.
 
+Command input is a complete JSON document, not an interactive input stream.
+Koder prepares it in a private temporary file so timeout and cancellation
+polling cannot interrupt delivery to slow readers. The input file is closed
+on success, failure, timeout, or cancellation; stdout and stderr remain pipes.
+
 ### Matchers
 
 `matcher` is a regular expression tested against the event's match value — usually the tool name (`run_shell`, `edit_file`), and for some events another identifier (agent type for `SubagentStart`/`SubagentStop`, `auto`/`manual` for compaction events, the watched file name for `FileChanged`). An empty matcher or `"*"` matches everything.
@@ -109,7 +114,23 @@ A `PermissionRequest` hook can resolve the approval itself by printing a decisio
 | `InstructionsLoaded` | When `AGENTS.md` is loaded at session start. Blocking skips the content. | `reason`, `file_path` |
 | `CwdChanged` | When the working directory changes (e.g. `/resume` restores a session's recorded directory). | `old_cwd`, `cwd` |
 | `FileChanged` | When a watched file changes (register paths via `watchPaths`, polled between turns). Matcher is the file name. | `file_path` |
-| `ConfigChange` | When runtime config is saved (e.g. `/brief`). Blocking rolls the file back. Matcher is `user_settings` or `project_settings`. | `source`, `file_path` |
+| `ConfigChange` | When runtime config is saved (e.g. `/brief`) or a settings bundle imports changed configuration files. A synchronous block triggers rollback. Matcher is `user_settings`, `project_settings`, or `local_settings`. | `source`, `file_path` |
+
+For `config import`, all selected entries are validated first. The complete
+candidate bundle is then published, and one `ConfigChange` event is dispatched
+per changed configuration file using the hook definitions captured **before**
+the import. User config, settings and keybindings match `user_settings`; project
+settings match `project_settings`, and project-local settings match `local_settings`.
+The `file_path` is the absolute destination path. Imported memories do not emit
+this event, and dry-run or unchanged imports execute no hooks.
+
+An imported hook definition or `disableAllHooks` cannot judge its own import or
+remove an existing veto. A blocking hook or raised exception rolls back the
+applied batch, preserving any detected newer external file and reporting
+incomplete rollback. The snapshot does not freeze arbitrary scripts referenced
+by hooks, extend project approvals to new hook content, or undo hook side effects.
+Existing async and once-only behavior is unchanged; async hooks do not veto
+configuration changes.
 
 ### Agents, teams, and worktrees
 

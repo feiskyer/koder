@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from koder_agent.harness.agents.teams.context import TeamToolContext, get_team_tool_context
 from koder_agent.harness.agents.teams.runtime import TEAM_LEAD_NAME
+from koder_agent.harness.agents.teams.tool_runtime import get_effective_team_context
 
 from .compat import function_tool
 
@@ -118,6 +119,8 @@ async def _send_message_impl(
     """
 
     context = get_team_tool_context()
+    if _agent_service is None and _team_service is None:
+        context = get_effective_team_context()
     if context is None and _team_service is not None and _team_name is not None:
         context = TeamToolContext(
             team_id=_team_name,
@@ -130,9 +133,9 @@ async def _send_message_impl(
 
     # Fall back to agent service routing
     if _agent_service is None:
-        from koder_agent.harness.agents.service import AgentService
+        from koder_agent.harness.agents.runtime_context import get_runtime_agent_service
 
-        _agent_service = AgentService()
+        _agent_service = get_runtime_agent_service()
 
     # Resolve recipient
     agent_id = _agent_service.resolve_agent_id(to)
@@ -144,7 +147,10 @@ async def _send_message_impl(
             }
         )
 
-    _agent_service.send(agent_id, message)
+    try:
+        _agent_service.send(agent_id, message)
+    except (KeyError, ValueError, RuntimeError, OSError) as exc:
+        return json.dumps({"status": "error", "error": str(exc)})
 
     # Detect stopped agents so callers know a resume/re-spawn may be needed
     try:
@@ -158,10 +164,13 @@ async def _send_message_impl(
         "routing": "agent_mailbox",
         "recipient": to,
         "agent_id": agent_id,
+        "delivery": "queued",
     }
-    if agent_state in {"completed", "failed", "cancelled"}:
+    if agent_state in {"completed", "failed", "cancelled", "delayed", "ready"}:
         response["agent_stopped"] = True
-        response["note"] = "Agent is stopped. Use agent_tool to resume or re-spawn."
+        response["note"] = (
+            "Message is queued. Use agent_tool(resume=agent_id) to continue this agent."
+        )
     return json.dumps(response)
 
 

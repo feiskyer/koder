@@ -327,6 +327,9 @@ async def test_unmanaged_agent_run_selects_silent_or_direct_hooks(
         def __init__(self, session_id):
             self.session_id = session_id
 
+        def close(self):
+            pass
+
         async def get_items(self):
             return []
 

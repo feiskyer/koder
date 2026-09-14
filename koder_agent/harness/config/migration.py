@@ -5,10 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
-from .backup import create_config_backup
-from .schema import RuntimeConfig
+from .service import RuntimeConfigService
 
 
 @dataclass(frozen=True)
@@ -26,22 +23,11 @@ def migrate_config_file(
 ) -> ConfigMigrationResult:
     """Rewrite the config file into the runtime schema after creating a backup."""
     path = Path(config_path)
-    backup_path = create_config_backup(path)
-
-    data = {}
-    if path.exists():
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-
-    runtime_config = RuntimeConfig(**data)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(
-            runtime_config.model_dump(exclude_none=False),
-            sort_keys=False,
-            allow_unicode=True,
-        ),
-        encoding="utf-8",
-    )
+    service = RuntimeConfigService(path)
+    runtime_config = service.load()
+    service.save(runtime_config, backup=True)
+    resolved_path = path.resolve()
+    backup_path = resolved_path.with_suffix(resolved_path.suffix + ".bak")
 
     # Explicitly do nothing to the legacy DB beyond accepting the path.
     if legacy_db_path is not None:

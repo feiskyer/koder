@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,13 +12,27 @@ from typing import Literal
 
 import yaml
 
-from .schema import RuntimeConfig
+from koder_agent.config.manager import _migrate_legacy_voice_fields
+from koder_agent.harness.hooks.runtime import dispatch_command_hooks, snapshot_command_hooks
+from koder_agent.utils.atomic_file import write_text_atomic
+
+from .schema import parse_runtime_config_source
+from .service import config_write_lock, read_config_text
 
 SettingsBundleScope = Literal["all", "user", "project"]
 
 BUNDLE_FORMAT = "koder-settings-bundle"
 BUNDLE_VERSION = 1
 MAX_BUNDLE_FILE_BYTES = 500 * 1024
+# ConfigChange matches the settings source, not the bundle role or path ancestry.
+# Memory documents are not configuration changes. Keybindings share user scope.
+_CONFIG_CHANGE_SOURCES = {
+    "user_config": "user_settings",
+    "user_settings": "user_settings",
+    "user_keybindings": "user_settings",
+    "project_settings": "project_settings",
+    "project_local_settings": "local_settings",
+}
 
 
 @dataclass(frozen=True)
@@ -68,10 +83,15 @@ def export_settings_bundle(
             file_scope=file_scope,
             path=path,
             relative_path=path.name,
+            root=(home_dir if file_scope == "user" else cwd_dir) / ".koder",
         )
 
     for role, file_scope, base in _known_directory_files(home_dir, cwd_dir):
         if not _scope_included(file_scope, scope) or not base.exists():
+            continue
+        root = (home_dir if file_scope == "user" else cwd_dir) / ".koder"
+        if _has_symlink(base, root):
+            skipped.append(f"{base}: symlink skipped")
             continue
         for path in sorted(base.rglob("*")):
             if path.is_dir():
@@ -88,6 +108,7 @@ def export_settings_bundle(
                 file_scope=file_scope,
                 path=path,
                 relative_path=relative_path,
+                root=root,
             )
 
     payload = {
@@ -97,8 +118,9 @@ def export_settings_bundle(
         "scope": scope,
         "files": files,
     }
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if target.exists():
+        target.chmod(0o600)
+    write_text_atomic(target, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return SettingsBundleExportResult(bundle_path=target, file_count=len(files), skipped=skipped)
 
 
@@ -116,7 +138,12 @@ def import_settings_bundle(
 
     source = Path(bundle_path).expanduser()
     payload = json.loads(source.read_text(encoding="utf-8"))
-    if payload.get("format") != BUNDLE_FORMAT or payload.get("version") != BUNDLE_VERSION:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("format") != BUNDLE_FORMAT
+        or payload.get("version") != BUNDLE_VERSION
+        or not isinstance(payload.get("files"), list)
+    ):
         raise ValueError("Unsupported Koder settings bundle format")
 
     home_dir = Path(home).expanduser() if home is not None else Path.home()
@@ -126,15 +153,33 @@ def import_settings_bundle(
     backups: list[Path] = []
     skipped: list[str] = []
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    roles = {
+        role: file_scope
+        for role, file_scope, _ in (
+            _known_direct_files(home_dir, cwd_dir) + _known_directory_files(home_dir, cwd_dir)
+        )
+    }
+    changes: list[tuple[Path, str, str | None]] = []
+    change_sources: dict[Path, str] = {}
+    targets: set[Path] = set()
 
-    for entry in payload.get("files", []):
+    # Validate the entire selected bundle before publishing any file or backup.
+    for entry in payload["files"]:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid settings bundle file entry")
         role = entry.get("role")
         file_scope = entry.get("scope")
-        if file_scope not in {"user", "project"} or not _scope_included(file_scope, scope):
+        if not isinstance(role, str) or role not in roles:
+            raise ValueError("Unknown settings bundle role")
+        if file_scope != roles[role]:
+            raise ValueError(f"Invalid scope for settings bundle role: {role}")
+        if not _scope_included(file_scope, scope):
             continue
         content = entry.get("content")
         if not isinstance(role, str) or not isinstance(content, str):
             raise ValueError("Invalid settings bundle file entry")
+        if len(content.encode("utf-8")) > MAX_BUNDLE_FILE_BYTES:
+            raise ValueError(f"Settings bundle entry exceeds size limit: {role}")
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if digest != entry.get("sha256"):
             raise ValueError(f"Checksum mismatch for bundle entry {role}")
@@ -142,23 +187,89 @@ def import_settings_bundle(
         target = _target_path_for_entry(role, entry.get("relative_path"), home_dir, cwd_dir)
         if target is None:
             raise ValueError(f"Unknown settings bundle role: {role}")
-        if target.is_symlink():
+        root = (home_dir if file_scope == "user" else cwd_dir) / ".koder"
+        if _has_symlink(target, root):
             raise ValueError(f"Refusing to import over symlink target: {target}")
-        existing = target.read_text(encoding="utf-8") if target.exists() else None
+        identity = target.resolve()
+        if identity in targets:
+            raise ValueError(f"Duplicate settings bundle target: {target}")
+        targets.add(identity)
+        existing = read_config_text(target)
         if existing == content:
             unchanged += 1
             continue
-        if dry_run:
-            written += 1
-            continue
-        if target.exists():
-            backup = _backup_path(target, stamp)
-            backup.parent.mkdir(parents=True, exist_ok=True)
-            backup.write_text(existing or "", encoding="utf-8")
-            backups.append(backup)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        changes.append((target, content, existing))
+        if role in _CONFIG_CHANGE_SOURCES:
+            change_sources[target] = _CONFIG_CHANGE_SOURCES[role]
         written += 1
+
+    if not dry_run:
+        with ExitStack() as locks:
+            # A stable lock order prevents opposite bundle orders deadlocking.
+            # No lock/backup is created until whole-bundle validation succeeds.
+            for target in sorted(target.resolve() for target, _, _ in changes):
+                locks.enter_context(config_write_lock(target))
+            for target, _, existing in changes:
+                if read_config_text(target) != existing:
+                    raise RuntimeError(f"Config changed during import; retry: {target}")
+            # Retain pre-import definitions (including disable flags and project
+            # trust payloads) before replacing any hook-bearing settings file.
+            hook_snapshot = (
+                locks.enter_context(
+                    snapshot_command_hooks(cwd=cwd_dir, home=home_dir if home is not None else None)
+                )
+                if change_sources
+                else None
+            )
+            applied: list[tuple[Path, str, str | None]] = []
+            try:
+                for target, content, existing in changes:
+                    if existing is not None:
+                        backup = _backup_path(target, stamp)
+                        if backup.is_symlink():
+                            raise ValueError(f"Refusing config backup symlink: {backup}")
+                        write_text_atomic(backup, existing)
+                        backups.append(backup)
+                    write_text_atomic(target, content)
+                    applied.append((target, content, existing))
+                # Match ordinary config saves: hooks inspect already-published
+                # candidates. Publish the whole bundle before any decision so
+                # each hook sees the same complete proposed configuration.
+                for target, change_source in change_sources.items():
+                    result = dispatch_command_hooks(
+                        cwd=cwd_dir,
+                        event_name="ConfigChange",
+                        match_value=change_source,
+                        payload={
+                            "event": "ConfigChange",
+                            "source": change_source,
+                            "file_path": str(target.resolve()),
+                        },
+                        snapshot=hook_snapshot,
+                    )
+                    if result.blocked:
+                        raise RuntimeError(result.block_reason or "Config change blocked by hook")
+                for target, content, _ in applied:
+                    if read_config_text(target) != content:
+                        raise RuntimeError(f"Config changed during ConfigChange hook: {target}")
+            except BaseException as failure:
+                rollback_errors = []
+                for target, content, existing in reversed(applied):
+                    try:
+                        if read_config_text(target) != content:
+                            raise RuntimeError("Newer external file preserved")
+                        if existing is None:
+                            target.unlink(missing_ok=True)
+                        else:
+                            write_text_atomic(target, existing)
+                    except BaseException:
+                        rollback_errors.append(str(target))
+                if rollback_errors:
+                    raise OSError(
+                        "Settings import failed and rollback was incomplete for: "
+                        + ", ".join(rollback_errors)
+                    ) from failure
+                raise
 
     return SettingsBundleImportResult(
         bundle_path=source,
@@ -200,10 +311,11 @@ def _append_file_entry(
     file_scope: str,
     path: Path,
     relative_path: str,
+    root: Path,
 ) -> None:
     if not path.exists():
         return
-    if path.is_symlink():
+    if _has_symlink(path, root):
         skipped.append(f"{path}: symlink skipped")
         return
     if path.stat().st_size > MAX_BUNDLE_FILE_BYTES:
@@ -262,10 +374,24 @@ def _safe_relative_path(value: str) -> Path:
 
 def _validate_content(role: str, content: str) -> None:
     if role == "user_config":
-        RuntimeConfig(**(yaml.safe_load(content) or {}))
+        try:
+            data = yaml.safe_load(content)
+        except yaml.YAMLError as error:
+            raise ValueError("Invalid YAML in settings bundle user_config") from error
+        parse_runtime_config_source(_migrate_legacy_voice_fields({} if data is None else data))
         return
     if role.endswith("settings") or role == "user_keybindings":
-        json.loads(content or "{}")
+        if not isinstance(json.loads(content), dict):
+            raise ValueError(f"Expected a JSON object for settings bundle role: {role}")
+
+
+def _has_symlink(path: Path, root: Path) -> bool:
+    """Check the file and all parents within the selected profile boundary."""
+    while path != root.parent:
+        if path.is_symlink():
+            return True
+        path = path.parent
+    return False
 
 
 def _backup_path(target: Path, stamp: str) -> Path:

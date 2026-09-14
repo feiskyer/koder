@@ -28,6 +28,7 @@ from koder_agent.mcp.oauth import (
     _secure_storage_capabilities,
     _SecureStorageCapabilities,
     _start_callback_server,
+    _stop_callback_server,
     _token_file,
     _validate_secure_storage_capabilities,
     clear_tokens,
@@ -828,13 +829,17 @@ class TestTokenPersistence:
 class TestCallbackServer:
     def test_start_callback_server_picks_free_port(self):
         server, port = _start_callback_server(None)
-        assert port > 0
-        server.shutdown()
+        try:
+            assert port > 0
+        finally:
+            _stop_callback_server(server)
 
     def test_start_callback_server_uses_specified_port(self):
         server, port = _start_callback_server(0)
-        assert port > 0
-        server.shutdown()
+        try:
+            assert port > 0
+        finally:
+            _stop_callback_server(server)
 
 
 # ---------------------------------------------------------------------------
@@ -1964,7 +1969,7 @@ class TestCallbackStateValidation:
             assert server.oauth_result.auth_code == "the-code"
             assert server.oauth_result.error is None
         finally:
-            server.shutdown()
+            _stop_callback_server(server)
 
     def test_wrong_state_rejected(self):
         server, port = _start_callback_server(None)
@@ -1975,14 +1980,17 @@ class TestCallbackStateValidation:
             try:
                 self._get(port, "/callback?code=evil-code&state=attacker-state")
             except urllib.error.HTTPError as exc:
-                assert exc.code == 400
+                try:
+                    assert exc.code == 400
+                finally:
+                    exc.close()
             else:  # pragma: no cover - defensive
                 raise AssertionError("wrong state should be rejected with HTTP 400")
             # The forged code must NOT be captured.
             assert server.oauth_result.auth_code is None
             assert server.oauth_result.error == "state_mismatch"
         finally:
-            server.shutdown()
+            _stop_callback_server(server)
 
     def test_missing_state_rejected(self):
         server, port = _start_callback_server(None)
@@ -1993,13 +2001,16 @@ class TestCallbackStateValidation:
             try:
                 self._get(port, "/callback?code=evil-code")
             except urllib.error.HTTPError as exc:
-                assert exc.code == 400
+                try:
+                    assert exc.code == 400
+                finally:
+                    exc.close()
             else:  # pragma: no cover - defensive
                 raise AssertionError("missing state should be rejected with HTTP 400")
             assert server.oauth_result.auth_code is None
             assert server.oauth_result.error == "state_mismatch"
         finally:
-            server.shutdown()
+            _stop_callback_server(server)
 
     def test_concurrent_flows_are_isolated(self):
         # Two live servers (two flows) must not share the code/state that the
@@ -2015,8 +2026,10 @@ class TestCallbackStateValidation:
             assert server_b.oauth_result.auth_code == "code-b"
             assert server_a.oauth_result is not server_b.oauth_result
         finally:
-            server_a.shutdown()
-            server_b.shutdown()
+            try:
+                _stop_callback_server(server_a)
+            finally:
+                _stop_callback_server(server_b)
 
     def test_wait_for_code_reads_per_flow_result(self):
         server, _port = _start_callback_server(None)
@@ -2025,7 +2038,7 @@ class TestCallbackStateValidation:
             code = asyncio.run(MCPOAuthFlow._wait_for_code(server, timeout=1))
             assert code == "captured"
         finally:
-            server.shutdown()
+            _stop_callback_server(server)
 
     def test_wait_for_code_raises_on_state_mismatch_error(self):
         server, _port = _start_callback_server(None)
@@ -2038,7 +2051,7 @@ class TestCallbackStateValidation:
             else:  # pragma: no cover - defensive
                 raise AssertionError("expected RuntimeError on state mismatch")
         finally:
-            server.shutdown()
+            _stop_callback_server(server)
 
     def test_callback_diagnostics_redact_code_and_state(self, caplog):
         caplog.set_level(logging.DEBUG, logger="koder_agent.mcp.oauth")
@@ -2051,7 +2064,7 @@ class TestCallbackStateValidation:
             )
             assert status == 200
         finally:
-            server.shutdown()
+            _stop_callback_server(server)
 
         diagnostics = caplog.text
         assert "super-secret-code" not in diagnostics

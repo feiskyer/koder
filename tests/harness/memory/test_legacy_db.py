@@ -1,6 +1,7 @@
 import sqlite3
 import sys
 import types
+from contextlib import closing
 from pathlib import Path
 
 # Stub litellm before importing koder_agent to avoid optional dependency issues
@@ -18,8 +19,8 @@ from koder_agent.harness.memory.transcript_store import TranscriptStore
 
 
 def test_legacy_db_access_is_read_only(tmp_path):
-    store = TranscriptStore.for_test(tmp_path)
-    assert store.legacy_db().is_read_only is True
+    with closing(TranscriptStore.for_test(tmp_path)) as store:
+        assert store.legacy_db().is_read_only is True
 
 
 def test_legacy_db_reports_preserved_tables(tmp_path):

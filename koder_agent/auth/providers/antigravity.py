@@ -18,7 +18,7 @@ from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import GenericStreamingChunk, ModelResponse, Usage
 
 from koder_agent.auth.base import OAuthProvider, OAuthResult, OAuthTokens
-from koder_agent.auth.client_integration import get_oauth_token
+from koder_agent.auth.client_integration import async_get_oauth_token
 from koder_agent.auth.constants import (
     ANTIGRAVITY_API_BASE,
     ANTIGRAVITY_AUTH_URL,
@@ -358,16 +358,16 @@ class AntigravityOAuthLLM(CustomLLM):
         self._last_request_message_count: int = 0
         self._last_request_model: Optional[str] = None
 
-    def _get_access_token(self) -> Optional[str]:
+    async def _get_access_token(self) -> Optional[str]:
         """Get OAuth access token for Antigravity."""
-        tokens = get_oauth_token(self.provider_id)
+        tokens = await async_get_oauth_token(self.provider_id)
         if tokens:
             return tokens.access_token
         return None
 
-    def _require_access_token(self) -> str:
+    async def _require_access_token(self) -> str:
         """Return a valid OAuth token or raise a helpful error."""
-        access_token = self._get_access_token()
+        access_token = await self._get_access_token()
         if not access_token:
             raise ValueError(
                 "No OAuth token available for Antigravity. "
@@ -760,7 +760,7 @@ class AntigravityOAuthLLM(CustomLLM):
         if self._managed_project_id and self._managed_project_profile == profile:
             return self._managed_project_id
 
-        tokens = get_oauth_token(self.provider_id)
+        tokens = await async_get_oauth_token(self.provider_id)
         if tokens:
             managed_project = (
                 tokens.extra.get("managed_project_id")
@@ -1060,7 +1060,7 @@ class AntigravityOAuthLLM(CustomLLM):
         **kwargs: Any,
     ) -> ModelResponse:
         """Async completion using Antigravity endpoint with endpoint fallback."""
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         project_id = await self._ensure_project_context(access_token, model=model)
@@ -1171,7 +1171,7 @@ class AntigravityOAuthLLM(CustomLLM):
             remap_function_call_args,
         )
 
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         project_id = await self._ensure_project_context(access_token, model=model)

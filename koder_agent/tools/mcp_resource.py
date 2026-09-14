@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
+from ..harness.execution_context import get_execution_cwd
 from ..mcp.server_manager import MCPServerManager
 from .compat import function_tool
 
@@ -24,7 +24,7 @@ async def list_mcp_resources(server: str = "") -> str:
     """
     try:
         manager = MCPServerManager()
-        servers = await manager.list_servers(cwd=os.getcwd())
+        servers = await manager.list_servers(cwd=str(get_execution_cwd()))
         filtered = [s for s in servers if not server or s.name == server]
 
         if server and not filtered:
@@ -59,7 +59,7 @@ async def read_mcp_resource(server_name: str, uri: str) -> str:
 
     try:
         manager = MCPServerManager()
-        server = await manager.get_server(server_name, cwd=os.getcwd())
+        server = await manager.get_server(server_name, cwd=str(get_execution_cwd()))
         if server is None:
             return f'Server "{server_name}" not found.'
 

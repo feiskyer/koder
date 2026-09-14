@@ -9,17 +9,22 @@ import numbers
 import os
 import sys
 import time
+from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime
 from typing import Dict, Optional
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.text import Text
 
 from koder_agent.auth.base import OAuthTokens
 from koder_agent.auth.callback_server import CallbackResult, run_oauth_flow
+from koder_agent.auth.client_integration import async_refresh_token
 from koder_agent.auth.constants import SUPPORTED_PROVIDERS, TOKEN_EXPIRY_BUFFER_MS
 from koder_agent.auth.providers import get_provider
-from koder_agent.auth.token_storage import get_token_storage
+from koder_agent.auth.token_storage import TokenStorage, get_token_storage
+from koder_agent.utils.async_tasks import await_owned_task, run_sync_owned
 
 # Env var used as a fallback source for headless token ingestion.
 AUTH_TOKEN_ENV = "KODER_AUTH_TOKEN"
@@ -98,8 +103,8 @@ async def handle_login(provider_id: str, timeout: float = 300) -> bool:
         tokens.models = models
         tokens.models_fetched_at = int(time.time() * 1000)
 
-        storage = get_token_storage()
-        storage.save(tokens)
+        storage = await run_sync_owned(get_token_storage)
+        await run_sync_owned(storage.save, tokens)
 
         email = tokens.email or "Unknown"
         description = PROVIDER_DESCRIPTIONS.get(provider_id, "")
@@ -172,40 +177,55 @@ def handle_token_login(provider_id: str, token: str) -> bool:
 
 
 async def handle_github_copilot_login(timeout: float = 300) -> bool:
-    """Force GitHub Copilot device-flow login through LiteLLM's authenticator."""
-    _ = timeout
-
+    """Run owned device login with the installed SDK's headers and cache paths."""
     console.print("\n[bold]Authenticating with github_copilot...[/bold]\n")
     try:
-        from litellm.llms.github_copilot.authenticator import Authenticator
+        from koder_agent.auth.github_copilot import login
 
-        def _login_and_refresh() -> tuple[str, dict]:
-            authenticator = Authenticator()
-            access_token = authenticator._login()
-            with open(authenticator.access_token_file, "w", encoding="utf-8") as file:
-                file.write(access_token)
-            api_key_info = authenticator._refresh_api_key()
-            with open(authenticator.api_key_file, "w", encoding="utf-8") as file:
-                json.dump(api_key_info, file)
-            return authenticator.token_dir, api_key_info
+        def show_device_code(uri: str, code: str) -> None:
+            console.print(Text(f"Please visit {uri} and enter code {code} to authenticate."))
 
-        token_dir, api_key_info = await asyncio.to_thread(_login_and_refresh)
-        endpoints = api_key_info.get("endpoints") or {}
-        api_endpoint = endpoints.get("api") or "default"
+        result = await login(timeout, on_device_code=show_device_code)
         console.print(
             Panel(
                 "[green]Successfully authenticated![/green]\n\n"
                 "Provider: github_copilot\n"
-                f"Token cache: {token_dir}\n"
-                f"API endpoint: {api_endpoint}",
+                f"Token cache: {result.token_dir}\n"
+                f"API endpoint: {result.api_endpoint}",
                 title="Authentication Complete",
                 border_style="green",
             )
         )
         return True
+    except TimeoutError:
+        console.print("[red]GitHub Copilot authentication timed out[/red]")
+        return False
     except Exception as exc:
         console.print(f"[red]GitHub Copilot authentication failed:[/red] {exc}")
         return False
+
+
+async def _read_manual_authorization_code(timeout: float) -> str:
+    """Own the async prompt until its input reader and background tasks stop."""
+    from prompt_toolkit import PromptSession
+
+    prompt = PromptSession(
+        enable_open_in_editor=False,
+        enable_system_prompt=False,
+        enable_suspend=False,
+    )
+    task = asyncio.create_task(prompt.prompt_async("Paste the authorization code: "))
+    async with asyncio.timeout(timeout):
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancel the prompt once, then shield/join its cleanup. Keeping this
+            # inside timeout also preserves a later caller cancellation instead
+            # of converting it into an ordinary timeout result.
+            task.cancel()
+            with suppress(Exception, asyncio.CancelledError):
+                await await_owned_task(task)
+            raise
 
 
 async def _handle_manual_code_flow(auth_url: str, timeout: float) -> CallbackResult:
@@ -219,12 +239,7 @@ async def _handle_manual_code_flow(auth_url: str, timeout: float) -> CallbackRes
         "[yellow]Copy the entire code and paste it below.[/yellow]\n"
     )
     try:
-        code = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None, lambda: input("Paste the authorization code: ")
-            ),
-            timeout=timeout,
-        )
+        code = await _read_manual_authorization_code(timeout)
         if not code or not code.strip():
             return CallbackResult(
                 success=False,
@@ -238,11 +253,61 @@ async def _handle_manual_code_flow(auth_url: str, timeout: float) -> CallbackRes
             error="timeout",
             error_description=f"No code entered within {timeout} seconds",
         )
+    except EOFError:
+        return CallbackResult(
+            success=False,
+            error="input_closed",
+            error_description="Input closed before an authorization code was provided",
+        )
+
+
+async def _tokens_for_display(
+    provider_id: str, tokens: OAuthTokens, storage: TokenStorage
+) -> tuple[OAuthTokens | None, str]:
+    """Refresh a display snapshot without publishing over logout or a newer login."""
+    if tokens.is_expired():
+        try:
+            tokens = await async_refresh_token(provider_id, tokens, storage=storage)
+        except Exception as exc:
+            logger.debug(
+                "Display token refresh failed for %s (%s)", provider_id, type(exc).__name__
+            )
+            tokens = None
+        if tokens is None:
+            return None, "unavailable"
+
+    if tokens.models and tokens.is_models_cache_valid():
+        return tokens, "cached"
+
+    try:
+        models, status = await get_provider(provider_id).list_models(tokens.access_token)
+        cached = replace(tokens, models=models, models_fetched_at=int(time.time() * 1000))
+        if await run_sync_owned(storage.save_if_current, tokens, cached):
+            return cached, "api" if status.get("source") == "api" else "cached"
+    except Exception as exc:
+        logger.debug("Display model refresh failed for %s (%s)", provider_id, type(exc).__name__)
+    # A lost CAS or request error cannot justify returning or re-saving an old
+    # account snapshot. Keep a newer cache, or show unavailability after logout.
+    try:
+        current = await run_sync_owned(storage.load, provider_id)
+    except Exception:
+        current = None
+    return current, "cached" if current is not None and current.models else "unavailable"
+
+
+def _print_credentials_unavailable(provider_id: str) -> None:
+    console.print(
+        Panel(
+            "Credentials unavailable: refresh failed or authentication changed.",
+            title=f"[bold]{provider_id}[/bold]",
+            border_style="yellow",
+        )
+    )
 
 
 async def handle_list() -> None:
-    storage = get_token_storage()
-    all_tokens = storage.get_all_tokens()
+    storage = await run_sync_owned(get_token_storage)
+    all_tokens = await run_sync_owned(storage.get_all_tokens)
     if not all_tokens:
         console.print(
             "\n[yellow]No OAuth providers configured.[/yellow]\n"
@@ -252,6 +317,10 @@ async def handle_list() -> None:
         return
 
     for provider_id, tokens in all_tokens.items():
+        tokens, source = await _tokens_for_display(provider_id, tokens, storage)
+        if tokens is None:
+            _print_credentials_unavailable(provider_id)
+            continue
         description = PROVIDER_DESCRIPTIONS.get(provider_id, "")
         account = tokens.email if tokens.email else None
         info = (
@@ -259,31 +328,7 @@ async def handle_list() -> None:
             if account
             else f"[bold]Type:[/bold] {description}\n"
         )
-        access_token = tokens.access_token
-        if tokens.is_expired():
-            try:
-                provider = get_provider(provider_id)
-                result = await provider.refresh_tokens(tokens.refresh_token)
-                if result.success and result.tokens:
-                    storage.save(result.tokens)
-                    tokens = result.tokens
-                    access_token = tokens.access_token
-            except Exception as exc:
-                info += f"\n[red]Token refresh failed: {exc}[/red]\n"
-
         models = tokens.models
-        source = "cached"
-        if not tokens.is_models_cache_valid() or not models:
-            try:
-                provider = get_provider(provider_id)
-                models, status = await provider.list_models(access_token)
-                source = status.get("source", "api")
-                tokens.models = models
-                tokens.models_fetched_at = int(time.time() * 1000)
-                storage.save(tokens)
-            except Exception:
-                source = "cached" if models else "unavailable"
-
         if models:
             source_label = "[green]API[/green]" if source == "api" else "[cyan]cached[/cyan]"
             info += f"\n[bold]Models ({len(models)}):[/bold] {source_label}\n"
@@ -307,8 +352,8 @@ async def handle_revoke(provider_id: str) -> bool:
         )
         return False
 
-    storage = get_token_storage()
-    tokens = storage.load(provider_id)
+    storage = await run_sync_owned(get_token_storage)
+    tokens = await run_sync_owned(storage.load, provider_id)
     if not tokens:
         console.print(f"[yellow]No tokens found for provider '{provider_id}'[/yellow]")
         return False
@@ -319,8 +364,14 @@ async def handle_revoke(provider_id: str) -> bool:
     except Exception:
         logger.debug("Failed to revoke token for provider %s", provider_id, exc_info=True)
 
-    storage.delete(provider_id)
-    console.print(f"[green]Tokens revoked for {provider_id}[/green]")
+    try:
+        deleted = await run_sync_owned(storage.delete, provider_id)
+    except Exception:
+        deleted = False
+    if not deleted:
+        console.print(f"[red]Unable to remove local tokens for {provider_id}[/red]")
+        return False
+    console.print(f"[green]Local tokens removed for {provider_id}[/green]")
     return True
 
 
@@ -331,16 +382,16 @@ async def handle_status(provider_id: Optional[str] = None) -> None:
         await _print_github_copilot_status()
         return
 
-    storage = get_token_storage()
+    storage = await run_sync_owned(get_token_storage)
     if provider_id:
-        tokens = storage.load(provider_id)
+        tokens = await run_sync_owned(storage.load, provider_id)
         if not tokens:
             console.print(f"[yellow]No tokens found for provider '{provider_id}'[/yellow]")
             return
         await _print_token_details(provider_id, tokens, storage)
         return
 
-    all_tokens = storage.get_all_tokens()
+    all_tokens = await run_sync_owned(storage.get_all_tokens)
     if not all_tokens:
         console.print("[yellow]No OAuth providers configured.[/yellow]")
         return
@@ -379,7 +430,6 @@ async def handle_status_json(provider_id: Optional[str] = None) -> None:
     if provider_id:
         provider_id = _normalize_provider_id(provider_id)
 
-    storage = get_token_storage()
     payload: dict[str, object]
 
     if provider_id == GITHUB_COPILOT_PROVIDER_ID:
@@ -387,8 +437,9 @@ async def handle_status_json(provider_id: Optional[str] = None) -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
+    storage = await run_sync_owned(get_token_storage)
     if provider_id:
-        tokens = storage.load(provider_id)
+        tokens = await run_sync_owned(storage.load, provider_id)
         if not tokens:
             payload = {"providers": [{"provider": provider_id, "status": "not_configured"}]}
         else:
@@ -396,23 +447,16 @@ async def handle_status_json(provider_id: Optional[str] = None) -> None:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
-    all_tokens = storage.get_all_tokens()
+    all_tokens = await run_sync_owned(storage.get_all_tokens)
     providers = [_build_token_status_dict(pid, tok) for pid, tok in all_tokens.items()]
     print(json.dumps({"providers": providers}, ensure_ascii=False, indent=2))
 
 
 async def _print_token_details(provider_id: str, tokens, storage) -> None:
-    access_token = tokens.access_token
-    if tokens.is_expired():
-        try:
-            provider = get_provider(provider_id)
-            result = await provider.refresh_tokens(tokens.refresh_token)
-            if result.success and result.tokens:
-                storage.save(result.tokens)
-                tokens = result.tokens
-                access_token = tokens.access_token
-        except Exception:
-            logger.debug("Failed to refresh expired tokens for %s", provider_id, exc_info=True)
+    tokens, source = await _tokens_for_display(provider_id, tokens, storage)
+    if tokens is None:
+        _print_credentials_unavailable(provider_id)
+        return
 
     if tokens.is_expired(0):
         status = "[red]EXPIRED[/red]"
@@ -432,23 +476,11 @@ async def _print_token_details(provider_id: str, tokens, storage) -> None:
         f"{account_line}"
         f"Expires: {expires.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Time left: {time_left_mins} minutes\n"
-        f"Access token: {tokens.access_token[:20]}...\n"
-        f"Refresh token: {tokens.refresh_token[:20]}..."
+        f"Access token: {'present' if tokens.access_token else 'missing'}\n"
+        f"Refresh token: {'present' if tokens.refresh_token else 'missing'}"
     )
 
     models = tokens.models
-    source = "cached"
-    if not tokens.is_models_cache_valid() or not models:
-        try:
-            provider = get_provider(provider_id)
-            models, status_info = await provider.list_models(access_token)
-            source = "api" if status_info.get("source") == "api" else "cached"
-            tokens.models = models
-            tokens.models_fetched_at = int(time.time() * 1000)
-            storage.save(tokens)
-        except Exception:
-            logger.debug("Failed to fetch models for %s", provider_id, exc_info=True)
-
     if models:
         source_label = "[green]API[/green]" if source == "api" else "[cyan]cached[/cyan]"
         info += f"\n\n[bold]Models ({len(models)}):[/bold] {source_label}\n"
@@ -556,7 +588,7 @@ async def handle_auth_subcommand(args) -> int:
                     "[red]No token provided via --token, stdin, or KODER_AUTH_TOKEN.[/red]"
                 )
                 return 1
-            success = handle_token_login(args.provider, token)
+            success = await run_sync_owned(handle_token_login, args.provider, token)
             return 0 if success else 1
         success = await handle_login(args.provider, timeout=args.timeout)
         return 0 if success else 1

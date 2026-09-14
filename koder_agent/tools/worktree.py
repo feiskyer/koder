@@ -9,11 +9,17 @@ import re
 import secrets
 import stat
 import subprocess
+import threading
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Literal, Optional
+from weakref import WeakKeyDictionary
+
+from koder_agent.harness.execution_context import get_execution_cwd
 
 from .compat import function_tool
+from .todo import TodoStore, get_todo_store_or_none
 
 _SEGMENT_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
 _REPOSITORY_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -122,16 +128,56 @@ class RepositoryIdentityError(RuntimeError):
     """The recorded owner can no longer be proven to be the same repository."""
 
 
-_session: WorktreeSession | None = None
+@dataclass
+class _WorktreeOwner:
+    session: WorktreeSession | None = None
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+
+# Reuse the runtime's existing lifetime/capability object, not its display labels.
+# Main session switches and background resumes retain their TodoStore; unrelated
+# schedulers (even with identical labels) cannot acquire each other's state.
+# Weak keys release bookkeeping with the runtime, never delete its Git work.
+_owners: WeakKeyDictionary[TodoStore, _WorktreeOwner] = WeakKeyDictionary()
+_owners_lock = threading.RLock()
+# Legacy direct callers / the single-client stdio MCP server have no runtime
+# scope. Keep their standalone workflow, separate from every scoped agent.
+_direct_owner = _WorktreeOwner()
+
+
+def _get_worktree_owner() -> _WorktreeOwner:
+    runtime = get_todo_store_or_none()
+    if runtime is None:
+        return _direct_owner
+    with _owners_lock:
+        owner = _owners.get(runtime)
+        if owner is None:
+            owner = _WorktreeOwner()
+            _owners[runtime] = owner
+        return owner
+
+
+def _serialized_worktree_operation(function):
+    """Serialize same-owner enter/exit, including calls from copied thread contexts."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with _get_worktree_owner().lock:
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def _get_worktree_session() -> WorktreeSession | None:
-    return _session
+    owner = _get_worktree_owner()
+    with owner.lock:
+        return owner.session
 
 
 def _set_worktree_session(session: WorktreeSession | None) -> None:
-    global _session
-    _session = session
+    owner = _get_worktree_owner()
+    with owner.lock:
+        owner.session = session
 
 
 def _git_failure_detail(error: BaseException) -> str:
@@ -532,6 +578,7 @@ class WorktreeLifecycle:
         approved_fd: int,
     ):
         self.session = session
+        self.owner = _get_worktree_owner()
         self.identity = identity
         self.root_fd = root_fd
         self.common_fd = common_fd
@@ -823,18 +870,17 @@ class WorktreeLifecycle:
 
     def reconcile(self, state: WorktreeState, *, creation_incomplete: bool = False) -> None:
         """Store exactly the retryable phase represented by current Git state."""
-        global _session
 
         if state.worktree_absent:
             if state.branch_exists is False:
-                _session = None
+                self.owner.session = None
                 return
             self.session.phase = "branch_cleanup_pending"
         elif creation_incomplete or not state.worktree_owned:
             self.session.phase = "worktree_cleanup_pending"
         else:
             self.session.phase = "active"
-        _session = self.session
+        self.owner.session = self.session
 
     def result(self, action: str) -> dict:
         return {
@@ -1226,16 +1272,17 @@ def _partial_creation_result(
     return result
 
 
+@_serialized_worktree_operation
 def enter_worktree(name: Optional[str] = None) -> str:
     """Create an isolated Git worktree for parallel development."""
-    global _session
 
-    if _session is not None:
+    current = _get_worktree_session()
+    if current is not None:
         return json.dumps(
             {
-                "message": f"Already in a worktree session at {_session.worktree_path}. "
+                "message": f"Already in a worktree session at {current.worktree_path}. "
                 "Exit the current worktree first.",
-                "session_state": _session.phase,
+                "session_state": current.phase,
             }
         )
 
@@ -1249,7 +1296,7 @@ def enter_worktree(name: Optional[str] = None) -> str:
         return json.dumps({"message": f"Invalid worktree name: {validation_error}"})
 
     try:
-        identity = _git_identity()
+        identity = _git_identity(get_execution_cwd())
     except OSError as error:
         return json.dumps(
             {
@@ -1273,7 +1320,7 @@ def enter_worktree(name: Optional[str] = None) -> str:
         )
 
     session = WorktreeSession(
-        original_cwd=str(Path.cwd()),
+        original_cwd=str(get_execution_cwd()),
         owner_root=str(identity.root),
         owner_common_dir=str(identity.common_dir),
         approved_root=str(approved_root),
@@ -1372,12 +1419,13 @@ def _cleanup_branch(
     discard_changes: bool,
     result: dict,
 ) -> str:
-    global _session
 
     lifecycle.reconcile(state)
     lifecycle.add_state(result, state)
     result["worktree_removed"] = state.worktree_absent
-    result["session_state"] = lifecycle.session.phase if _session is not None else None
+    result["session_state"] = (
+        lifecycle.session.phase if lifecycle.owner.session is not None else None
+    )
 
     if not state.worktree_absent:
         result.update(
@@ -1436,8 +1484,10 @@ def _cleanup_branch(
         {
             "worktree_removed": final_state.worktree_absent,
             "branch_deleted": branch_deleted,
-            "session_preserved": _session is not None,
-            "session_state": lifecycle.session.phase if _session is not None else None,
+            "session_preserved": lifecycle.owner.session is not None,
+            "session_state": (
+                lifecycle.session.phase if lifecycle.owner.session is not None else None
+            ),
         }
     )
 
@@ -1483,16 +1533,17 @@ def _cleanup_branch(
     return json.dumps(result)
 
 
+@_serialized_worktree_operation
 def exit_worktree(
     action: Literal["keep", "remove"],
     discard_changes: Optional[bool] = None,
 ) -> str:
     """Exit the recorded worktree session, optionally removing owned Git state."""
-    global _session
 
     if action not in ("keep", "remove"):
         return json.dumps({"error": f"Invalid action {action!r}. Expected 'keep' or 'remove'."})
-    if _session is None:
+    session = _get_worktree_session()
+    if session is None:
         return json.dumps(
             {
                 "message": "No active worktree session. This tool only operates on "
@@ -1500,9 +1551,8 @@ def exit_worktree(
             }
         )
 
-    session = _session
     if action == "keep":
-        _session = None
+        _set_worktree_session(None)
         return json.dumps(
             {
                 "action": action,
@@ -1547,7 +1597,6 @@ def exit_worktree(
 
 
 def _exit_with_lifecycle(lifecycle: WorktreeLifecycle, discard_changes: Optional[bool]) -> str:
-    global _session
 
     session = lifecycle.session
     result = lifecycle.result("remove")
@@ -1633,8 +1682,10 @@ def _exit_with_lifecycle(lifecycle: WorktreeLifecycle, discard_changes: Optional
         {
             "worktree_removed": final_state.worktree_absent,
             "branch_deleted": final_state.branch_exists is False,
-            "session_preserved": _session is not None,
-            "session_state": lifecycle.session.phase if _session is not None else None,
+            "session_preserved": lifecycle.owner.session is not None,
+            "session_state": (
+                lifecycle.session.phase if lifecycle.owner.session is not None else None
+            ),
         }
     )
     if failure is not None:

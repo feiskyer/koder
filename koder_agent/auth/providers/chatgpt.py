@@ -20,7 +20,7 @@ from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import GenericStreamingChunk, ModelResponse, Usage
 
 from koder_agent.auth.base import OAuthProvider, OAuthResult, OAuthTokens
-from koder_agent.auth.client_integration import get_oauth_token
+from koder_agent.auth.client_integration import async_get_oauth_token
 from koder_agent.auth.codex_prompts import CODEX_PROMPTS
 from koder_agent.auth.constants import (
     CHATGPT_CODEX_BASE,
@@ -226,16 +226,16 @@ class ChatGPTOAuthLLM(CustomLLM):
         self.provider_id = "chatgpt"
         self._account_id: Optional[str] = None
 
-    def _get_access_token(self) -> Optional[str]:
+    async def _get_access_token(self) -> Optional[str]:
         """Get OAuth access token for ChatGPT."""
-        tokens = get_oauth_token(self.provider_id)
+        tokens = await async_get_oauth_token(self.provider_id)
         if tokens:
             return tokens.access_token
         return None
 
-    def _require_access_token(self) -> str:
+    async def _require_access_token(self) -> str:
         """Return a valid OAuth token or raise a helpful error."""
-        access_token = self._get_access_token()
+        access_token = await self._get_access_token()
         if not access_token:
             raise ValueError(
                 "No OAuth token available for ChatGPT. "
@@ -855,7 +855,7 @@ class ChatGPTOAuthLLM(CustomLLM):
         **kwargs: Any,
     ) -> ModelResponse:
         """Async completion using ChatGPT Codex Backend API with OAuth."""
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         # Extract account ID from JWT
@@ -921,7 +921,7 @@ class ChatGPTOAuthLLM(CustomLLM):
         """Async streaming using ChatGPT Codex Backend API with OAuth."""
         from koder_agent.auth.tool_utils import extract_tool_calls_from_codex_response
 
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         # Extract account ID from JWT

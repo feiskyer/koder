@@ -3,6 +3,7 @@
 import json
 
 import pytest
+import pytest_asyncio
 
 from koder_agent.core.goal_runtime import GoalRuntime
 from koder_agent.core.goals import GoalStatus, GoalStore, GoalUpdate
@@ -18,9 +19,13 @@ from koder_agent.tools.goal import (
 SESSION = "session-tools"
 
 
-@pytest.fixture
-def store(tmp_path):
-    return GoalStore(db_path=str(tmp_path / "goals.db"))
+@pytest_asyncio.fixture
+async def store(tmp_path):
+    instance = GoalStore(db_path=str(tmp_path / "goals.db"))
+    try:
+        yield instance
+    finally:
+        await instance.close()
 
 
 @pytest.fixture

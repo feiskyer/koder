@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from koder_agent.harness.execution_context import execution_path
+
 
 @dataclass
 class _FileReadRecord:
@@ -34,7 +36,7 @@ class ReadFileState:
         self._records: dict[str, _FileReadRecord] = {}
 
     def _normalize(self, path: str) -> str:
-        return str(Path(path).resolve())
+        return str(execution_path(path).resolve())
 
     def record_read(
         self, path: str, *, content: Optional[str] = None, is_partial: bool = False

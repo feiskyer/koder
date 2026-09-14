@@ -270,7 +270,8 @@ def test_invalid_mode_when_enabled_falls_back_to_workspace_write():
 
 
 def test_invalid_mode_never_silently_becomes_danger_full_access():
-    policy = SandboxPolicy.from_config({"enabled": True, "mode": "totally-bogus"})
+    with pytest.warns(RuntimeWarning, match="invalid sandbox mode"):
+        policy = SandboxPolicy.from_config({"enabled": True, "mode": "totally-bogus"})
     assert policy.mode != "danger-full-access"
     assert policy.mode == "workspace-write"
 
@@ -310,7 +311,7 @@ def test_sandboxed_exec_path_uses_env_allowlist(monkeypatch, tmp_path):
     async def _fake_backend(ctx):
         captured["env"] = dict(ctx.env)
         return SandboxExecutionResult(
-            status="ok", exit_code=0, stdout="", stderr="", sandboxed=True
+            status="success", exit_code=0, stdout="", stderr="", sandboxed=True
         )
 
     # Force the sandboxed branch regardless of host platform: fabricate an

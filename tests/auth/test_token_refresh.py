@@ -177,7 +177,9 @@ class TestGetOAuthToken:
 
                 result = get_oauth_token("google")
 
-                mock_refresh.assert_called_once_with("google", expired_tokens)
+                mock_refresh.assert_called_once_with(
+                    "google", expired_tokens, storage=mock_storage.return_value
+                )
                 assert result.access_token == "new_access_token"
 
     def test_returns_none_on_refresh_failure(self, expired_tokens):
@@ -201,24 +203,20 @@ class TestSyncRefreshToken:
     ):
         """Test unsuccessful sync refresh logs no provider-supplied detail."""
         refresh_result = OAuthResult(success=False, error=_synthetic_failure_detail())
-        refresh_awaitable = object()
         mock_provider = MagicMock()
-        mock_provider.refresh_tokens.return_value = refresh_awaitable
-        mock_loop = MagicMock()
-        mock_loop.is_running.return_value = False
-        mock_loop.run_until_complete.return_value = refresh_result
+        mock_provider.refresh_tokens = AsyncMock(return_value=refresh_result)
+        storage = MagicMock()
+        storage.load.return_value = sensitive_expired_tokens
 
         with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
             with patch("koder_agent.auth.providers.get_provider", return_value=mock_provider):
-                with patch(
-                    "koder_agent.auth.client_integration.asyncio.get_event_loop",
-                    return_value=mock_loop,
-                ):
-                    result = _sync_refresh_token("  GoOgLe  ", sensitive_expired_tokens)
+                result = _sync_refresh_token(
+                    "  GoOgLe  ", sensitive_expired_tokens, storage=storage
+                )
 
         assert result is None
-        mock_provider.refresh_tokens.assert_called_once_with(SYNTHETIC_SECRET_CANARY)
-        mock_loop.run_until_complete.assert_called_once_with(refresh_awaitable)
+        mock_provider.refresh_tokens.assert_awaited_once_with(SYNTHETIC_SECRET_CANARY)
+        storage.save_if_current.assert_not_called()
         _assert_sanitized_refresh_log(
             caplog,
             "OAuth token refresh failed provider=google category=refresh_rejected",
@@ -228,24 +226,22 @@ class TestSyncRefreshToken:
         self, sensitive_expired_tokens, caplog
     ):
         """Test sync refresh exceptions omit exception text and traceback data."""
-        refresh_awaitable = object()
         mock_provider = MagicMock()
-        mock_provider.refresh_tokens.return_value = refresh_awaitable
-        mock_loop = MagicMock()
-        mock_loop.is_running.return_value = False
-        mock_loop.run_until_complete.side_effect = RuntimeError(_synthetic_failure_detail())
+        mock_provider.refresh_tokens = AsyncMock(
+            side_effect=RuntimeError(_synthetic_failure_detail())
+        )
+        storage = MagicMock()
+        storage.load.return_value = sensitive_expired_tokens
 
         with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
             with patch("koder_agent.auth.providers.get_provider", return_value=mock_provider):
-                with patch(
-                    "koder_agent.auth.client_integration.asyncio.get_event_loop",
-                    return_value=mock_loop,
-                ):
-                    result = _sync_refresh_token("  GoOgLe  ", sensitive_expired_tokens)
+                result = _sync_refresh_token(
+                    "  GoOgLe  ", sensitive_expired_tokens, storage=storage
+                )
 
         assert result is None
-        mock_provider.refresh_tokens.assert_called_once_with(SYNTHETIC_SECRET_CANARY)
-        mock_loop.run_until_complete.assert_called_once_with(refresh_awaitable)
+        mock_provider.refresh_tokens.assert_awaited_once_with(SYNTHETIC_SECRET_CANARY)
+        storage.save_if_current.assert_not_called()
         _assert_sanitized_refresh_log(
             caplog,
             "OAuth token refresh failed provider=google category=exception "
@@ -274,12 +270,16 @@ class TestAsyncRefreshToken:
 
             with patch("koder_agent.auth.client_integration.get_token_storage") as mock_storage:
                 mock_storage.return_value.save = MagicMock()
+                mock_storage.return_value.load.return_value = expired_tokens
 
                 result = await async_refresh_token("google", expired_tokens)
 
                 assert result is not None
                 assert result.access_token == "refreshed_token"
-                mock_storage.return_value.save.assert_called_once_with(refreshed)
+                mock_storage.return_value.save_if_current.assert_called_once_with(
+                    expired_tokens, refreshed
+                )
+                mock_storage.return_value.save.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_unsuccessful_result_logs_only_normalized_provider_and_category(
@@ -295,11 +295,12 @@ class TestAsyncRefreshToken:
                 mock_get.return_value = mock_provider
 
                 with patch("koder_agent.auth.client_integration.get_token_storage") as mock_storage:
+                    mock_storage.return_value.load.return_value = sensitive_expired_tokens
                     result = await async_refresh_token("  GoOgLe  ", sensitive_expired_tokens)
 
         assert result is None
         mock_provider.refresh_tokens.assert_awaited_once_with(SYNTHETIC_SECRET_CANARY)
-        mock_storage.assert_not_called()
+        mock_storage.return_value.save_if_current.assert_not_called()
         _assert_sanitized_refresh_log(
             caplog,
             "OAuth token refresh failed provider=google category=refresh_rejected",
@@ -317,11 +318,12 @@ class TestAsyncRefreshToken:
                 mock_get.return_value = mock_provider
 
                 with patch("koder_agent.auth.client_integration.get_token_storage") as mock_storage:
+                    mock_storage.return_value.load.return_value = sensitive_expired_tokens
                     result = await async_refresh_token("  GoOgLe  ", sensitive_expired_tokens)
 
         assert result is None
         mock_provider.refresh_tokens.assert_awaited_once_with(SYNTHETIC_SECRET_CANARY)
-        mock_storage.assert_not_called()
+        mock_storage.return_value.save_if_current.assert_not_called()
         _assert_sanitized_refresh_log(
             caplog,
             "OAuth token refresh failed provider=google category=exception "

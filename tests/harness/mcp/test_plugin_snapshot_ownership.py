@@ -14,6 +14,7 @@ import pytest
 
 import koder_agent.mcp as mcp_pkg
 from koder_agent.core.scheduler import AgentScheduler
+from koder_agent.harness.plugins.context import get_plugin_root
 from koder_agent.mcp.server_config import MCPServerConfig, MCPServerType
 
 
@@ -504,9 +505,10 @@ def test_cancelled_orphan_cleanup_retries_across_asyncio_run_boundaries():
 
 
 @pytest.mark.parametrize("failure_kind", ["cancel", "error"])
-def test_process_exit_retries_transient_orphan_cleanup_after_loop_shutdown(tmp_path, failure_kind):
+def test_process_exit_retries_transient_orphan_cleanup_after_loop_shutdown(
+    tmp_path, failure_kind, python_child_environment
+):
     marker = tmp_path / f"atexit-{failure_kind}.txt"
-    project_root = Path(__file__).resolve().parents[3]
     script = """
 import asyncio
 import gc
@@ -560,7 +562,8 @@ asyncio.run(abandon_before_loop_shutdown())
 
     result = subprocess.run(
         [sys.executable, "-c", script, str(marker), failure_kind],
-        cwd=project_root,
+        cwd=tmp_path,
+        env=python_child_environment,
         capture_output=True,
         text=True,
         timeout=30,
@@ -666,6 +669,7 @@ async def test_scheduler_retains_exact_returned_server_owner(monkeypatch):
     scheduler.instructions_override = None
     scheduler.instructions_append = None
     scheduler.tools = []
+    scheduler.plugin_root = get_plugin_root()
     scheduler._mcp_servers = []
     monkeypatch.setattr("koder_agent.core.scheduler.create_dev_agent", create_agent)
     monkeypatch.setattr("koder_agent.core.scheduler.get_model_name", lambda: "gpt-4o")
@@ -705,6 +709,7 @@ async def test_scheduler_partial_initialization_closes_unattached_agent_owner(mo
     scheduler.instructions_override = None
     scheduler.instructions_append = None
     scheduler.tools = []
+    scheduler.plugin_root = get_plugin_root()
     scheduler._mcp_servers = []
     monkeypatch.setattr("koder_agent.core.scheduler.create_dev_agent", create_agent)
     monkeypatch.setattr("koder_agent.core.scheduler.get_model_name", lambda: "gpt-4o")

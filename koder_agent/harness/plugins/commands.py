@@ -86,27 +86,24 @@ def _handle_list(lifecycle: PluginLifecycleService, *, json_output: bool = False
 
 def _handle_install(lifecycle: PluginLifecycleService, plugin_ref: str, scope: str) -> int:
     """Install a plugin from a local path or name@marketplace."""
-    # Check if it's a name@marketplace reference
-    if "@" in plugin_ref and not Path(plugin_ref).exists():
-        store = MarketplaceStore.default()
-        plugin = store.find_plugin(plugin_ref)
-        if plugin is None:
-            print(f"Error: plugin '{plugin_ref}' not found in any marketplace")
-            return 1
-        plugin_dir = Path(plugin.path)
-    elif Path(plugin_ref).is_dir():
+    origin = None
+    expected_name = None
+    if Path(plugin_ref).is_dir():
         plugin_dir = Path(plugin_ref).resolve()
     else:
-        # Try as a bare name across all marketplaces
         store = MarketplaceStore.default()
         plugin = store.find_plugin(plugin_ref)
         if plugin is not None:
             plugin_dir = Path(plugin.path)
+            origin = plugin.origin
+            expected_name = plugin.name
         else:
             print(f"Error: '{plugin_ref}' is not a directory and not found in any marketplace")
             return 1
 
-    result = lifecycle.install_from_dir(plugin_dir, scope=scope)
+    result = lifecycle.install_from_dir(
+        plugin_dir, scope=scope, origin=origin, expected_name=expected_name
+    )
     if result.success:
         print(f"Installed {result.plugin_name}")
     else:

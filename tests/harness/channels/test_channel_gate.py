@@ -4,6 +4,7 @@ import pytest
 
 from koder_agent.harness.channels.gate import (
     ChannelGateResult,
+    PluginChannelOrigin,
     find_channel_entry,
     gate_channel_server,
 )
@@ -31,13 +32,21 @@ class TestFindChannelEntry:
 
     def test_plugin_segment_match(self):
         entries = [ChannelEntryPlugin(name="slack", marketplace="anthropic")]
-        result = find_channel_entry("plugin:slack:some-suffix", entries)
+        result = find_channel_entry(
+            "plugin:slack:some-suffix",
+            entries,
+            plugin_origin=PluginChannelOrigin("slack", "anthropic"),
+        )
         assert result is not None
         assert result.name == "slack"
 
     def test_plugin_exact_two_segment(self):
         entries = [ChannelEntryPlugin(name="telegram", marketplace="official")]
-        result = find_channel_entry("plugin:telegram", entries)
+        result = find_channel_entry(
+            "plugin:telegram",
+            entries,
+            plugin_origin=PluginChannelOrigin("telegram", "official"),
+        )
         assert result is not None
 
     def test_plugin_no_match_wrong_name(self):
@@ -57,8 +66,34 @@ class TestFindChannelEntry:
             ChannelEntryPlugin(name="slack", marketplace="anthropic"),
         ]
         assert find_channel_entry("webhook", entries) is not None
-        assert find_channel_entry("plugin:slack", entries) is not None
+        assert (
+            find_channel_entry(
+                "plugin:slack",
+                entries,
+                plugin_origin=PluginChannelOrigin("slack", "anthropic"),
+            )
+            is not None
+        )
         assert find_channel_entry("plugin:webhook", entries) is None
+
+    def test_raw_plugin_server_key_matches_verified_discovery_origin(self):
+        entries = [ChannelEntryPlugin(name="slack", marketplace="anthropic")]
+        assert (
+            find_channel_entry(
+                "actual-transport-key",
+                entries,
+                plugin_origin=PluginChannelOrigin("slack", "anthropic"),
+            )
+            == entries[0]
+        )
+
+    @pytest.mark.parametrize(
+        "origin",
+        [None, PluginChannelOrigin("slack"), PluginChannelOrigin("slack", "other")],
+    )
+    def test_plugin_looking_server_name_does_not_verify_marketplace(self, origin):
+        entries = [ChannelEntryPlugin(name="slack", marketplace="anthropic")]
+        assert find_channel_entry("plugin:slack", entries, plugin_origin=origin) is None
 
 
 class TestGateChannelServer:
@@ -114,7 +149,11 @@ class TestGateChannelServer:
         class Caps:
             experimental = {"claude/channel": {}}
 
-        result = gate_channel_server("plugin:slack:runtime-id", capabilities=Caps())
+        result = gate_channel_server(
+            "plugin:slack:runtime-id",
+            capabilities=Caps(),
+            plugin_origin=PluginChannelOrigin("slack", "anthropic"),
+        )
         assert result.action == "register"
 
     def test_dict_capabilities(self):

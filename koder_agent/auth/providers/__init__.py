@@ -8,11 +8,12 @@ OAuth providers use different names than API key providers to avoid conflicts:
 """
 
 import logging
+import os
+import threading
 from typing import Optional
 
-import litellm
-
 from koder_agent.auth.base import OAuthProvider
+from koder_agent.auth.constants import SUPPORTED_PROVIDERS
 from koder_agent.auth.providers.antigravity import (
     AntigravityOAuthLLM,
     AntigravityOAuthProvider,
@@ -20,11 +21,24 @@ from koder_agent.auth.providers.antigravity import (
 from koder_agent.auth.providers.chatgpt import ChatGPTOAuthLLM, ChatGPTOAuthProvider
 from koder_agent.auth.providers.claude import ClaudeOAuthLLM, ClaudeOAuthProvider
 from koder_agent.auth.providers.google import GoogleOAuthLLM, GoogleOAuthProvider
+from koder_agent.litellm_cost_map import get_litellm
 
+litellm = get_litellm()
 logger = logging.getLogger(__name__)
 
 # OAuth provider identifiers - single source of truth
-OAUTH_PROVIDER_IDS = ("google", "claude", "chatgpt", "antigravity")
+OAUTH_PROVIDER_IDS = tuple(SUPPORTED_PROVIDERS)
+_REGISTRATION_LOCK = threading.RLock()
+_OWNED_HANDLERS_ATTRIBUTE = "_koder_oauth_handlers"
+
+
+def _reset_registration_lock_after_fork() -> None:
+    global _REGISTRATION_LOCK
+    _REGISTRATION_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_registration_lock_after_fork)
 
 __all__ = [
     # OAuth Providers
@@ -91,54 +105,112 @@ def get_provider(provider_id: str) -> OAuthProvider:
     return providers[provider_id]()
 
 
+def _merge_provider_ids(existing, *, field: str, owned_ids: tuple[str, ...]) -> list[str]:
+    if existing is None and field == "_custom_providers":
+        existing = []
+    if not isinstance(existing, list) or any(
+        not isinstance(name, str) or not name for name in existing
+    ):
+        raise ValueError(f"Invalid LiteLLM provider registry: {field}")
+    merged: list[str] = []
+    seen_owned: set[str] = set()
+    for name in existing:
+        if name not in owned_ids or name not in seen_owned:
+            merged.append(name)
+        if name in owned_ids:
+            seen_owned.add(name)
+    merged.extend(name for name in owned_ids if name not in seen_owned)
+    return merged
+
+
 def register_oauth_providers() -> None:
-    """Register all OAuth providers with LiteLLM.
+    """Explicit legacy SDK registration; Koder requests use private wire routes.
 
-    Call this function at startup to enable OAuth-based model access
-    with prefixes like 'google/', 'claude/', 'chatgpt/', 'antigravity/'.
-
-    Registration strategy:
-    1. Add to provider_list - allows get_llm_provider() to recognize the prefix
-    2. Add to _custom_providers - enables routing to custom handlers
-    3. Remove ChatGPT models from open_ai_chat_completion_models - prevents
-       the model name check from routing to OpenAI before custom handler
+    Only current handlers or identities previously installed by Koder may be
+    replaced for its reserved aliases. A conflicting handler fails before any
+    mutation. The ownership receipt is process-local coordination, not a trust
+    boundary against code that can modify the SDK's globals. Native SDK model
+    catalogs are never changed to force selection of a custom handler.
     """
-    # Register custom handlers
-    litellm.custom_provider_map = [
-        {"provider": "google", "custom_handler": _google_oauth_llm},
-        {"provider": "claude", "custom_handler": _claude_oauth_llm},
-        {"provider": "chatgpt", "custom_handler": _chatgpt_oauth_llm},
-        {"provider": "antigravity", "custom_handler": _antigravity_oauth_llm},
-    ]
+    _register_handler_mapping(_oauth_handlers(), ownership_attribute=_OWNED_HANDLERS_ATTRIBUTE)
 
-    # Add to provider_list for get_llm_provider() to recognize the prefix
-    for provider in OAUTH_PROVIDER_IDS:
-        if provider not in litellm.provider_list:
-            litellm.provider_list.append(provider)
 
-    # Add to _custom_providers for custom handler routing in acompletion()
-    existing_custom = list(litellm._custom_providers) if litellm._custom_providers else []
-    for provider in OAUTH_PROVIDER_IDS:
-        if provider not in existing_custom:
-            existing_custom.append(provider)
-    litellm._custom_providers = existing_custom
+def _oauth_handlers() -> dict:
+    return {
+        "google": _google_oauth_llm,
+        "claude": _claude_oauth_llm,
+        "chatgpt": _chatgpt_oauth_llm,
+        "antigravity": _antigravity_oauth_llm,
+    }
 
-    # Remove ChatGPT/Codex models from open_ai_chat_completion_models
-    # This prevents the model name check from catching these models
-    # and routing to OpenAI before our custom handler is checked
-    chatgpt_models = [
-        m for m in litellm.open_ai_chat_completion_models if "gpt-5" in m or "codex" in m.lower()
-    ]
-    for model in chatgpt_models:
-        if model in litellm.open_ai_chat_completion_models:
-            litellm.open_ai_chat_completion_models.remove(model)
 
-    logger.info(
-        "Registered OAuth providers with LiteLLM: %s. "
-        "Removed %d ChatGPT models from OpenAI routing.",
-        ", ".join(OAUTH_PROVIDER_IDS),
-        len(chatgpt_models),
-    )
+def _register_handler_mapping(handlers: dict, *, ownership_attribute: str) -> None:
+    """Publish one owned handler group without changing other SDK groups."""
+    with _REGISTRATION_LOCK:
+        owned_ids = tuple(handlers)
+        entries = litellm.custom_provider_map
+        if not isinstance(entries, list):
+            raise ValueError("Invalid LiteLLM provider registry: custom_provider_map")
+        previous = getattr(litellm, ownership_attribute, {})
+        if not isinstance(previous, dict):
+            previous = {}
+        merged_entries = []
+        seen_owned: set[str] = set()
+        for entry in entries:
+            if (
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("provider"), str)
+                or not entry["provider"]
+                or entry.get("custom_handler") is None
+            ):
+                raise ValueError("Invalid LiteLLM provider registry entry")
+            name = entry["provider"]
+            if name not in handlers:
+                merged_entries.append(entry)
+                continue
+            active = entry["custom_handler"]
+            if active is not handlers[name] and active is not previous.get(name):
+                raise ValueError(
+                    f"OAuth provider registration conflict for reserved prefix: {name}"
+                )
+            if name not in seen_owned:
+                merged_entries.append(
+                    entry
+                    if active is handlers[name]
+                    else {**entry, "custom_handler": handlers[name]}
+                )
+                seen_owned.add(name)
+        merged_entries.extend(
+            {"provider": name, "custom_handler": handler}
+            for name, handler in handlers.items()
+            if name not in seen_owned
+        )
+        provider_ids = _merge_provider_ids(
+            litellm.provider_list, field="provider_list", owned_ids=owned_ids
+        )
+        custom_ids = _merge_provider_ids(
+            litellm._custom_providers, field="_custom_providers", owned_ids=owned_ids
+        )
+        unchanged = (
+            len(entries) == len(merged_entries)
+            and all(old is new for old, new in zip(entries, merged_entries))
+            and litellm.provider_list == provider_ids
+            and litellm._custom_providers == custom_ids
+        )
+        if unchanged:
+            setattr(litellm, ownership_attribute, handlers)
+            return
+
+        # Publish only after validation. Retain public list identities for
+        # callers holding references to the SDK's registration containers.
+        entries[:] = merged_entries
+        litellm.provider_list[:] = provider_ids
+        if litellm._custom_providers is None:
+            litellm._custom_providers = custom_ids
+        else:
+            litellm._custom_providers[:] = custom_ids
+        setattr(litellm, ownership_attribute, handlers)
+        logger.info("Registered OAuth provider handlers with LiteLLM: %s", ", ".join(handlers))
 
 
 def get_oauth_model_prefix(provider: str) -> Optional[str]:

@@ -67,3 +67,27 @@ async def test_resolve_resume_value_ambiguous_title(monkeypatch):
     )
     resolved = await session_flow._resolve_resume_value("Dup")
     assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_resume_value_finds_metadata_free_history(tmp_path, monkeypatch):
+    from koder_agent.core.session import EnhancedSQLiteSession
+
+    home = tmp_path / "home"
+    (home / ".koder").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    session = EnhancedSQLiteSession("stored-without-title")
+    items = [{"role": "user", "content": "Resume the persisted conversation."}]
+    try:
+        await session.add_items(items)
+    finally:
+        session.close()
+
+    assert (
+        await session_flow._resolve_resume_value("stored-without-title") == "stored-without-title"
+    )
+    resumed = EnhancedSQLiteSession("stored-without-title")
+    try:
+        assert await resumed.get_items() == items
+    finally:
+        resumed.close()

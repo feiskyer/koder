@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agents import Agent, RunContextWrapper, RunHooks, Tool
 
-from ...tools.permission_context import GUARDED_TOOLS
-from ..hooks.runtime import _bounded_timeout, dispatch_command_hooks
+from ..hooks.command_process import HookCommandCancelledError, run_command
+from ..hooks.runtime import (
+    _bounded_timeout,
+    _cap_output,
+    _extract_block,
+    dispatch_command_hooks,
+    dispatch_command_hooks_async,
+)
 from .definitions import AgentDefinition
 
 if TYPE_CHECKING:
@@ -46,34 +55,76 @@ def _matching_rules(
     return matched
 
 
-def _run_command_hooks(rules: list[dict], payload: dict[str, Any], cwd: str | Path) -> None:
+def _run_command_hooks(
+    rules: list[dict],
+    payload: dict[str, Any],
+    cwd: str | Path,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> None:
+    """Run definition-local commands in order, stopping on cancellation or denial."""
     payload_text = json.dumps(payload)
     for rule in rules:
         hooks = rule.get("hooks") or []
         if not isinstance(hooks, list):
             continue
         for hook in hooks:
+            if cancel_event is not None and cancel_event.is_set():
+                raise HookCommandCancelledError()
             if not isinstance(hook, dict) or hook.get("type") != "command":
                 continue
             command = hook.get("command")
             if not isinstance(command, str) or not command.strip():
                 continue
-            # Bound the timeout (Fix 5 parity): this subagent frontmatter mini-runner
-            # must never inherit subprocess.run's default timeout=None, or a hanging
-            # PreToolUse/PostToolUse/Stop hook would freeze the subagent forever.
             try:
-                subprocess.run(
+                result = run_command(
                     command,
                     input=payload_text,
-                    text=True,
                     cwd=str(cwd),
                     shell=True,
-                    check=False,
-                    capture_output=True,
+                    env=os.environ.copy(),
                     timeout=_bounded_timeout(hook.get("timeout")),
+                    cancel_event=cancel_event,
                 )
-            except subprocess.TimeoutExpired:
-                logger.warning("Subagent frontmatter hook timed out: %s", command)
+            except subprocess.TimeoutExpired as exc:
+                raise PermissionError("Subagent frontmatter hook timed out (fail-closed)") from exc
+            block_reason = _extract_block(result.stdout)
+            if result.returncode == 2 or block_reason:
+                if result.returncode == 2:
+                    block_reason = result.stderr.strip() or block_reason or "Blocked by hook"
+                raise PermissionError(_cap_output(block_reason))
+
+
+async def _run_command_hooks_async(
+    rules: list[dict], payload: dict[str, Any], cwd: str | Path
+) -> None:
+    """Bridge task cancellation to the canonical command runner's stop signal.
+
+    Unlike settings dispatch this worker only runs cancellable local commands,
+    so join its cleanup before propagating cancellation. No HTTP/model worker
+    or project/skill scope is introduced for definition-local hooks.
+    """
+    if not rules:
+        return
+    cancellation = threading.Event()
+    task = asyncio.create_task(
+        asyncio.to_thread(_run_command_hooks, rules, payload, cwd, cancel_event=cancellation)
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        cancellation.set()
+        # A second cancel must not abandon the thread or its running process.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break  # Retrieve the worker outcome below; caller cancellation wins.
+        if not task.cancelled():
+            task.exception()
+        raise
 
 
 def dispatch_project_hook_event(
@@ -116,12 +167,14 @@ class SubagentLifecycleHooks(RunHooks):
         payload = {"event": "SubagentStart", "agent_type": self.agent_definition.agent_type}
         # Full hook runner: picks up project, local, user, and managed settings
         # (not just the project scope the old mini-runner read).
-        dispatch_command_hooks(
+        result = await dispatch_command_hooks_async(
             cwd=self.cwd,
             event_name="SubagentStart",
             match_value=self.agent_definition.agent_type,
             payload=payload,
         )
+        if result.blocked:
+            raise PermissionError(result.block_reason or "Blocked by SubagentStart hook")
 
     async def on_agent_end(self, context: RunContextWrapper, agent: Agent, output: Any) -> None:
         if self.wrapped_hooks:
@@ -132,20 +185,24 @@ class SubagentLifecycleHooks(RunHooks):
             "output": str(output),
             "stop_hook_active": getattr(self, "_stop_hook_active", False),
         }
-        dispatch_command_hooks(
+        result = await dispatch_command_hooks_async(
             cwd=self.cwd,
             event_name="SubagentStop",
             match_value=self.agent_definition.agent_type,
             payload=payload,
         )
+        if result.blocked:
+            raise PermissionError(result.block_reason or "Blocked by SubagentStop hook")
         # Agent frontmatter "Stop" rules remain a per-definition concern and
         # keep using the local mini-runner (they are not settings-backed).
         stop_rules = _matching_rules(
             self.frontmatter_hooks, "Stop", self.agent_definition.agent_type
         )
-        _run_command_hooks(stop_rules, payload, self.cwd)
+        await _run_command_hooks_async(stop_rules, payload, self.cwd)
 
     async def on_tool_start(self, context: RunContextWrapper, agent: Agent, tool: Tool) -> None:
+        from ...tools.permission_context import GUARDED_TOOLS
+
         # Permission check before forwarding. Guarded tools are re-evaluated with
         # their full arguments in Phase 2 (enforce_tool_permission in the compat
         # wrapper); a name-level arguments={} check here would deny the whole turn
@@ -156,11 +213,11 @@ class SubagentLifecycleHooks(RunHooks):
                 tool_name=tool.name,
                 arguments={},
             )
-            if not result.allowed and not result.requires_approval:
+            # These tools have no argument-level approval path and subagents
+            # cannot prompt: pending approval is not permission to proceed.
+            if not result.allowed or result.requires_approval:
                 logger.warning("Permission denied for tool %s: %s", tool.name, result.reason)
                 raise PermissionError(f"Permission denied for {tool.name}: {result.reason}")
-            if result.requires_approval:
-                logger.info("Tool %s requires approval: %s", tool.name, result.reason)
 
         if self.wrapped_hooks:
             await self.wrapped_hooks.on_tool_start(context, agent, tool)
@@ -170,7 +227,7 @@ class SubagentLifecycleHooks(RunHooks):
             "tool_name": tool.name,
         }
         rules = _matching_rules(self.frontmatter_hooks, "PreToolUse", tool.name)
-        _run_command_hooks(rules, payload, self.cwd)
+        await _run_command_hooks_async(rules, payload, self.cwd)
 
     async def on_tool_end(
         self,
@@ -188,4 +245,4 @@ class SubagentLifecycleHooks(RunHooks):
             "result": str(result),
         }
         rules = _matching_rules(self.frontmatter_hooks, "PostToolUse", tool.name)
-        _run_command_hooks(rules, payload, self.cwd)
+        await _run_command_hooks_async(rules, payload, self.cwd)

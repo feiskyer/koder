@@ -71,10 +71,13 @@ def _stage_skill(
     )
 
 
-def _claim_worker(root: str, candidate_id: str, start, results) -> None:
+def _claim_worker(root: str, candidate_id: str, ready, start, results) -> None:
     try:
-        start.wait()
-        record = CandidateStore(Path(root), kind="memory").claim(candidate_id)
+        store = CandidateStore(Path(root), kind="memory")
+        ready.set()
+        if not start.wait(30):
+            raise TimeoutError("candidate claim worker was not started")
+        record = store.claim(candidate_id)
         results.put(record.state if record else "missing")
     except Exception as exc:  # pragma: no cover - asserted via process result
         results.put(f"error:{type(exc).__name__}:{exc}")
@@ -84,20 +87,65 @@ def _approve_worker(
     root: str,
     candidate_id: str,
     skill_draft_dir: str,
+    ready,
     start,
     results,
 ) -> None:
     try:
-        start.wait()
+        store = CandidateStore(Path(root), kind="memory")
+        ready.set()
+        if not start.wait(30):
+            raise TimeoutError("candidate approval worker was not started")
         result = approve_candidate(
             candidate_id,
-            memory_store=CandidateStore(Path(root), kind="memory"),
+            memory_store=store,
             skill_store=None,
             skill_draft_dir=Path(skill_draft_dir),
         )
         results.put(result.status)
     except Exception as exc:  # pragma: no cover - asserted via process result
         results.put(f"error:{type(exc).__name__}:{exc}")
+
+
+def _run_candidate_race(target, arguments):
+    # The full suite has SQLite/executor threads: do not inherit their state
+    # through fork. Wait for both fresh interpreters before testing contention.
+    context = get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    readiness = [context.Event() for _ in range(2)]
+    processes = [
+        context.Process(target=target, args=(*arguments, ready, start, results))
+        for ready in readiness
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for ready in readiness:
+            assert ready.wait(10), "candidate worker did not finish startup"
+        start.set()
+        outcomes = [results.get(timeout=5) for _ in processes]
+        for process in processes:
+            process.join(timeout=5)
+        assert all(process.exitcode == 0 for process in processes)
+        return outcomes
+    finally:
+        unreaped = []
+        for process in processes:
+            if process.pid is not None:
+                if process.is_alive():
+                    process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=5)
+                if process.is_alive():
+                    unreaped.append(process.pid)
+                    continue
+            process.close()
+        results.close()
+        results.join_thread()
+        assert not unreaped, f"candidate workers did not stop: {unreaped}"
 
 
 def test_candidate_list_show_reject_and_restart(tmp_path: Path):
@@ -288,22 +336,9 @@ def test_candidate_payload_change_invalidates_candidate_id(tmp_path: Path):
 def test_concurrent_claim_is_serialized(tmp_path: Path):
     root = tmp_path / "memory-candidates"
     candidate = _stage_memory(CandidateStore(root, kind="memory"), tmp_path)
-    context = get_context("fork")
-    start = context.Event()
-    results = context.Queue()
-    processes = [
-        context.Process(target=_claim_worker, args=(str(root), candidate.id, start, results))
-        for _ in range(2)
-    ]
-    for process in processes:
-        process.start()
-    start.set()
-    states = [results.get(timeout=5) for _ in processes]
-    for process in processes:
-        process.join(timeout=5)
+    states = _run_candidate_race(_claim_worker, (str(root), candidate.id))
 
     assert states == ["approving", "approving"]
-    assert all(process.exitcode == 0 for process in processes)
     assert not (root / "pending" / f"{candidate.id}.json").exists()
     assert (root / "processing" / f"{candidate.id}.json").exists()
 
@@ -311,31 +346,11 @@ def test_concurrent_claim_is_serialized(tmp_path: Path):
 def test_concurrent_approval_creates_one_receipt_and_one_output(tmp_path: Path):
     root = tmp_path / "memory-candidates"
     candidate = _stage_memory(CandidateStore(root, kind="memory"), tmp_path)
-    context = get_context("fork")
-    start = context.Event()
-    results = context.Queue()
-    processes = [
-        context.Process(
-            target=_approve_worker,
-            args=(
-                str(root),
-                candidate.id,
-                str(tmp_path / "skill-drafts"),
-                start,
-                results,
-            ),
-        )
-        for _ in range(2)
-    ]
-    for process in processes:
-        process.start()
-    start.set()
-    statuses = [results.get(timeout=5) for _ in processes]
-    for process in processes:
-        process.join(timeout=5)
+    statuses = _run_candidate_race(
+        _approve_worker, (str(root), candidate.id, str(tmp_path / "skill-drafts"))
+    )
 
     assert sorted(statuses) == ["already-approved", "approved"]
-    assert all(process.exitcode == 0 for process in processes)
     assert len(list((_project_root(tmp_path) / ".koder" / "memory").glob("*.md"))) == 1
     assert len(list((root / "approved").glob("*.json"))) == 1
 

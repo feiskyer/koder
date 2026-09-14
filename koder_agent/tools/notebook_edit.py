@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import uuid
-from pathlib import Path
 from typing import Optional
+
+from koder_agent.harness.execution_context import execution_path
 
 from .compat import function_tool
 from .file import replace_read_file_contents, validate_read_file_for_edit
@@ -33,7 +34,7 @@ def notebook_edit(
         new_source: New cell source (required for replace/insert).
         cell_type: Cell type for insert: 'code' or 'markdown'. Defaults to 'code'.
     """
-    path = Path(notebook_path).expanduser().resolve()
+    path = execution_path(notebook_path).resolve()
     if not path.exists():
         return f"Error: notebook not found: {notebook_path}"
     if not path.suffix == ".ipynb":

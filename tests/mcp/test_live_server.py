@@ -199,14 +199,12 @@ def _configured_list_payload(
 
 @pytest.mark.asyncio
 async def test_old_function_tool_closure_calls_reconnected_server(monkeypatch):
+    from mcp.types import CallToolResult, TextContent
+
     class SDKServer(_Server):
         async def call_tool(self, *args, **kwargs):
             self.calls.append((args, kwargs))
-            return SimpleNamespace(
-                content=[SimpleNamespace(type="text", text=self.label)],
-                structuredContent=None,
-                isError=False,
-            )
+            return CallToolResult(content=[TextContent(type="text", text=self.label)])
 
     old = SDKServer("srv", "old")
     new = SDKServer("srv", "new")
@@ -1247,7 +1245,8 @@ async def test_concurrent_same_name_loads_create_independent_owners(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_cancelled_partial_load_closes_only_its_owner(monkeypatch):
+async def test_cancelled_partial_load_closes_only_its_owner(monkeypatch, cancellation_observer):
+    observe, cancellations = cancellation_observer
     other_owner, other_handle, other_manager, other_transport = _owned_runtime(
         "shared.name", "other-owner"
     )
@@ -1293,13 +1292,13 @@ async def test_cancelled_partial_load_closes_only_its_owner(monkeypatch):
         create_server,
     )
 
-    load_task = asyncio.create_task(mcp_pkg.load_mcp_servers())
+    load_task = asyncio.create_task(observe(mcp_pkg.load_mcp_servers()))
     await asyncio.wait_for(second_started.wait(), timeout=1)
     load_task.cancel("partial-owner-cancel")
-    with pytest.raises(asyncio.CancelledError) as cancelled:
+    with pytest.raises(asyncio.CancelledError):
         await load_task
 
-    assert cancelled.value.args == ("partial-owner-cancel",)
+    assert [error.args for error in cancellations] == [("partial-owner-cancel",)]
     assert first_runtime is not None
     first_transport = first_runtime[2]
     assert first_transport.cleanup_count == 1

@@ -11,6 +11,7 @@ import re
 import sys
 import threading
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
@@ -34,12 +35,19 @@ from koder_agent.harness.plugins.session_root import build_session_plugin_root, 
 from koder_agent.harness.session_env import load_session_env
 from koder_agent.harness.tools.shell_executor import execute_shell_command
 from koder_agent.litellm_cost_map import get_litellm_cost_map_debug_lines
+from koder_agent.utils.async_tasks import run_sync_owned
 from koder_agent.utils.client import get_model_name
 from koder_agent.utils.terminal_theme import get_adaptive_console
 
 logger = logging.getLogger(__name__)
 console = get_adaptive_console()
 DIRECT_COMMAND_PASSTHROUGHS = {"commit"}
+
+
+class _UnsuccessfulTurnError(RuntimeError):
+    def __init__(self, *, cancelled: bool):
+        self.cancelled = cancelled
+        super().__init__("Scheduled turn did not complete successfully")
 
 
 @dataclass(frozen=True)
@@ -57,6 +65,7 @@ class _SchedulerBuilder:
     plugin_root: Path | None = None
     cli_agents_json: Any = None
     wire_approver: Callable[[Any], None] | None = None
+    agent_service: Any = None
 
     def build(self, session_id: str, *, target: "_SessionSwitchTarget | None" = None):
         if target is None:
@@ -79,6 +88,8 @@ class _SchedulerBuilder:
             "approver": self.approver,
             "todo_store": todo_store,
             "project_root": project_root,
+            "plugin_root": self.plugin_root,
+            "agent_service": self.agent_service,
         }
         signature = inspect.signature(self.scheduler_type)
         if not any(
@@ -167,12 +178,22 @@ class _SchedulerState:
     def session_id(self) -> str:
         return self._scheduler.session.session_id
 
-    async def dispatch_handle(self, prompt: str, **kwargs) -> str:
+    async def dispatch_handle(self, prompt: str, *, require_success: bool = False, **kwargs) -> str:
         """Run one producer turn against the scheduler active after lock acquisition."""
         async with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("Scheduler state is closed")
-            return await self._scheduler.handle(prompt, **kwargs)
+            response = await self._scheduler.handle(prompt, **kwargs)
+            # Interactive callers render errors as text. Durable cron callers
+            # must not acknowledge that text as success and delete a one-shot job.
+            if require_success and (
+                getattr(self._scheduler, "_last_turn_errored", False)
+                or getattr(self._scheduler, "_last_turn_cancelled", False)
+            ):
+                raise _UnsuccessfulTurnError(
+                    cancelled=bool(getattr(self._scheduler, "_last_turn_cancelled", False))
+                )
+            return response
 
     async def dispatch_stream_json(self, prompt: str, **kwargs) -> str:
         """Run one stream-json turn under the shared lifecycle lock."""
@@ -338,8 +359,11 @@ class _SessionCleanupOwner:
         self.previous_simple = previous_simple
         self.pr_poller: Any = None
         self.channel_task: asyncio.Task[Any] | None = None
+        self.channel_inbox: Any = None
         self.unregister_channel_callback: Any = None
         self.cron_prompt_runner: Any = None
+        self.agent_service: Any = None
+        self.teammate_runner: Any = None
         self.skip_auto_dream = False
         self._task: asyncio.Task[None] | None = None
 
@@ -353,7 +377,10 @@ class _SessionCleanupOwner:
             await self._guard("PR status poller shutdown", self._stop_pr_poller)
             await self._guard("Channel callback unregister", self._unregister_channel_callback)
             await self._guard("Channel task cancellation", self._stop_channel_task)
+            await self._guard("Channel inbox finalization", self._close_channel_inbox)
             await self._guard("Cron prompt runner shutdown", self._stop_cron_runner)
+            await self._guard("Teammate runner shutdown", self._stop_teammates)
+            await self._guard("Agent service shutdown", self._stop_agents)
             await self._guard("SessionEnd hook dispatch", self._dispatch_session_end)
             await self._guard("AutoDream memory consolidation", self._run_auto_dream)
             await self._guard("Scheduler cleanup", self.scheduler_state.cleanup)
@@ -390,9 +417,22 @@ class _SessionCleanupOwner:
                 )
         self.channel_task = None
 
+    async def _close_channel_inbox(self) -> None:
+        if self.channel_inbox is not None:
+            await self.channel_inbox.aclose()
+            self.channel_inbox = None
+
     async def _stop_cron_runner(self) -> None:
         if self.cron_prompt_runner is not None:
             await self.cron_prompt_runner.stop()
+
+    async def _stop_teammates(self) -> None:
+        if self.teammate_runner is not None:
+            await self.teammate_runner.aclose()
+
+    async def _stop_agents(self) -> None:
+        if self.agent_service is not None:
+            await self.agent_service.aclose()
 
     def _dispatch_session_end(self) -> None:
         dispatch_command_hooks(
@@ -472,7 +512,7 @@ async def _close_session_probe(session: Any) -> None:
         return
 
     async def close_owned() -> None:
-        if asyncio.iscoroutinefunction(close):
+        if inspect.iscoroutinefunction(close):
             await close()
         else:
             error: list[BaseException] = []
@@ -1136,8 +1176,17 @@ async def _replay_stream_json_messages(*, scheduler, messages: list[dict]) -> No
         _write_json_line(replay_payload)
 
 
+def _turn_exit_code(scheduler) -> int:
+    """Snapshot turn status without interpreting the rendered response text."""
+    if getattr(scheduler, "_last_turn_cancelled", False) is True:
+        return 130
+    if getattr(scheduler, "_last_turn_errored", False) is True:
+        return 1
+    return 0
+
+
 async def _print_json_output(
-    *, scheduler, result: str, output_format: str, structured_output=None
+    *, scheduler, result: str, output_format: str, structured_output=None, exit_code: int = 0
 ) -> int:
     payload = {
         "output_format": output_format,
@@ -1150,10 +1199,13 @@ async def _print_json_output(
         payload["usage"] = usage_payload
     if structured_output is not None:
         payload["structured_output"] = structured_output
+    if exit_code:
+        payload["is_error"] = True
+        payload["exit_code"] = exit_code
     if output_format == "stream-json":
         payload["type"] = "result"
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    return 0
+    return exit_code
 
 
 AUTO_DREAM_SHUTDOWN_TIMEOUT_SECONDS = 30
@@ -1174,7 +1226,15 @@ async def run_harness_session_flow(
             sys.stdout.write(result + "\n")
         return 0
 
-    is_config_command = first_arg == "config"
+    from koder_agent.cli import _build_cli_parser
+
+    parser = _build_cli_parser(first_arg)
+    args = parser.parse_args(argv)
+    if getattr(args, "command", None) == "config":
+        from koder_agent.harness.config.commands import handle_config_subcommand
+
+        return await handle_config_subcommand(args)
+
     is_subcommand = first_arg in {
         "config",
         "auth",
@@ -1191,13 +1251,13 @@ async def run_harness_session_flow(
         from koder_agent.utils import setup_openai_client
 
         try:
-            setup_openai_client()
+            await run_sync_owned(setup_openai_client)
         except ValueError as exc:
             console.print(Panel(f"[red]{exc}[/red]", title="Error", border_style="red"))
             return 1
 
     config_manager = get_config_manager()
-    config = get_config() if not is_config_command else None
+    config = get_config()
     try:
         from koder_agent.harness.memory.auto_dream import (
             default_auto_dream_task_storage,
@@ -1208,10 +1268,6 @@ async def run_harness_session_flow(
     except Exception:
         logger.debug("AutoDream startup reconciliation failed", exc_info=True)
 
-    from koder_agent.cli import _build_cli_parser
-
-    parser = _build_cli_parser(first_arg)
-    args = parser.parse_args(argv)
     bare_mode = bool(getattr(args, "bare", False))
     previous_simple = os.environ.get("KODER_SIMPLE")
     if bare_mode:
@@ -1278,11 +1334,6 @@ async def run_harness_session_flow(
     system_prompt_append = "\n\n".join(segment.strip() for segment in append_segments if segment)
     if not system_prompt_append:
         system_prompt_append = None
-
-    if args.command == "config":
-        from koder_agent.harness.config.commands import handle_config_subcommand
-
-        return await handle_config_subcommand(args)
 
     if args.command == "auth":
         from koder_agent.harness.auth.commands import handle_auth_subcommand
@@ -1583,6 +1634,9 @@ async def run_harness_session_flow(
         approval_broker = getattr(queued_input, "approval_broker", None)
         active_scheduler.approver = build_interactive_approver(approval_broker=approval_broker)
 
+    from koder_agent.harness.agents.service import AgentService
+
+    app_agent_service = AgentService(permission_service=permission_service)
     scheduler_builder = _SchedulerBuilder(
         scheduler_type=AgentScheduler,
         streaming=streaming,
@@ -1595,6 +1649,7 @@ async def run_harness_session_flow(
         plugin_root=effective_plugin_root,
         cli_agents_json=cli_agents_json,
         wire_approver=_wire_interactive_approver,
+        agent_service=app_agent_service,
     )
     scheduler_state = _SchedulerState.create(scheduler_builder, args.session)
     scheduler = scheduler_state.scheduler
@@ -1603,6 +1658,7 @@ async def run_harness_session_flow(
         bare_mode=bare_mode,
         previous_simple=previous_simple,
     )
+    cleanup_owner.agent_service = app_agent_service
 
     # Wire channel messages into scheduler if channels are active.
     # The router is created eagerly here so the callback is ready BEFORE
@@ -1610,23 +1666,45 @@ async def run_harness_session_flow(
     # load_mcp_servers() will pick up the existing router from the handler.
     try:
         if channel_entries:
+            from koder_agent.harness.channels.inbox import (
+                ChannelInbox,
+                ChannelInboxRejectedError,
+                ChannelInboxStorageError,
+            )
             from koder_agent.harness.channels.notification import (
                 ChannelNotificationRouter,
                 wrap_channel_message,
             )
+            from koder_agent.harness.channels.state import get_channel_state
             from koder_agent.mcp.notifications import get_notification_handler
 
             _notif_handler = get_notification_handler()
             if _notif_handler.channel_router is None:
                 _notif_handler.set_channel_router(ChannelNotificationRouter())
 
-            _channel_queue: asyncio.Queue[str] = asyncio.Queue()
+            inbox = ChannelInbox()
+            cleanup_owner.channel_inbox = inbox
+            await inbox.open()
+            get_channel_state().inbox = inbox
 
             async def _on_channel_msg(server_name: str, content: str, meta: dict | None) -> None:
                 wrapped = wrap_channel_message(server_name, content, meta)
-                await _channel_queue.put(wrapped)
+                try:
+                    identifier = await inbox.put(server_name, wrapped)
+                except (ChannelInboxRejectedError, ChannelInboxStorageError) as exc:
+                    # Preserve every rejection in the counters/retained manifest
+                    # without turning a flood into an unbounded warning stream.
+                    rejected = inbox.rejected
+                    if rejected <= 1 or rejected & (rejected - 1) == 0:
+                        logger.warning(
+                            "Channel notification not accepted from '%s': %s (rejected=%d)",
+                            server_name,
+                            exc,
+                            rejected,
+                        )
+                    return
                 logging.getLogger(__name__).info(
-                    "Channel message queued from '%s' (%d bytes)", server_name, len(wrapped)
+                    "Channel message staged from '%s' (entry=%d)", server_name, identifier
                 )
 
             cleanup_owner.unregister_channel_callback = (
@@ -1637,13 +1715,46 @@ async def run_harness_session_flow(
                 """Background task that drains channel messages into the active scheduler."""
                 while True:
                     try:
-                        msg = await _channel_queue.get()
+                        message = await inbox.get()
+                    except ChannelInboxStorageError:
+                        logger.error(
+                            "Channel consumer stopped; inspect inbox at %s", inbox.directory
+                        )
+                        return
+                    if message is None:
+                        return
+                    outcome, reason = "completed", None
+                    interrupted = None
+                    try:
                         logging.getLogger(__name__).info("Processing channel message...")
-                        await scheduler_state.dispatch_handle(msg)
-                    except asyncio.CancelledError:
-                        break
+                        await scheduler_state.dispatch_handle(message.content, require_success=True)
+                    except asyncio.CancelledError as exc:
+                        task = asyncio.current_task()
+                        if task is None or task.cancelling():
+                            outcome, interrupted = "interrupted", exc
+                        else:
+                            outcome = "cancelled"
+                            # A downstream turn may be cancelled without the
+                            # runtime owner stopping this long-lived consumer.
+                            logger.info("Channel turn cancelled; continuing to listen")
+                    except _UnsuccessfulTurnError as exc:
+                        outcome = "cancelled" if exc.cancelled else "failed"
+                        reason = f"scheduler_{outcome}"
+                        logger.warning("Channel turn did not complete (%s)", outcome)
                     except Exception as exc:
+                        outcome, reason = "failed", type(exc).__name__
                         logging.getLogger(__name__).error("Channel message error: %s", exc)
+                    try:
+                        await inbox.finish(message.id, outcome, reason=reason)
+                    except ChannelInboxStorageError:
+                        logger.error(
+                            "Channel outcome not finalized; inbox retained at %s", inbox.directory
+                        )
+                        if interrupted is not None:
+                            raise interrupted
+                        return
+                    if interrupted is not None:
+                        raise interrupted
 
             # Bootstrap MCP servers eagerly so channels start receiving
             # immediately — don't wait for the first user prompt.
@@ -1660,7 +1771,9 @@ async def run_harness_session_flow(
             emit_console=getattr(args, "output_format", "text") == "text",
             permission_service=permission_service,
             mcp_owner_provider=lambda: getattr(scheduler_state.scheduler, "_mcp_servers", None),
+            agent_service=app_agent_service,
         )
+        cleanup_owner.teammate_runner = getattr(command_handler, "in_process_teammate_runner", None)
         if not bare_mode:
             session_start_source = "resume" if resume_value else "startup"
             session_start_result = dispatch_command_hooks(
@@ -1868,6 +1981,7 @@ async def run_harness_session_flow(
                                     scheduler=scheduler,
                                     result=str(exc),
                                     output_format=getattr(args, "output_format", "text"),
+                                    exit_code=1,
                                 )
                             print_reflowable(
                                 console,
@@ -1906,19 +2020,25 @@ async def run_harness_session_flow(
                     run_in_background = True
                 if not shell_command:
                     shell_result = "Usage: !<command>"
+                    exit_code = 1
                 else:
-                    shell_result = (
-                        await execute_shell_command(
-                            shell_command,
-                            run_in_background=run_in_background,
-                            session_id=scheduler.session.session_id,
-                        )
-                    ).output
+                    execution = await execute_shell_command(
+                        shell_command,
+                        run_in_background=run_in_background,
+                        session_id=scheduler.session.session_id,
+                    )
+                    shell_result = execution.output
+                    exit_code = execution.exit_code
+                    if exit_code is None or (exit_code == 0 and execution.status == "error"):
+                        exit_code = 1 if execution.status == "error" else 0
+                    elif exit_code < 0:
+                        exit_code = 128 - exit_code
                 if getattr(args, "output_format", "text") in {"json", "stream-json"}:
                     return await _print_json_output(
                         scheduler=scheduler,
                         result=shell_result,
                         output_format=getattr(args, "output_format", "text"),
+                        exit_code=exit_code,
                     )
                 print_reflowable(
                     console,
@@ -1928,7 +2048,7 @@ async def run_harness_session_flow(
                         border_style="green",
                     ),
                 )
-                return 0
+                return exit_code
             else:
                 if json_schema is not None:
                     prompt = _augment_prompt_for_json_schema(prompt, json_schema)
@@ -2032,20 +2152,27 @@ async def run_harness_session_flow(
                             },
                         )
                         raise
+                exit_code = _turn_exit_code(scheduler_state.scheduler)
                 structured_output = None
-                if json_schema is not None:
+                if json_schema is not None and exit_code == 0:
                     try:
                         structured_output = _extract_structured_output(response, json_schema)
                     except ValueError as exc:
-                        console.print(Panel(str(exc), title="Error", border_style="red"))
-                        return 1
+                        return await _print_json_output(
+                            scheduler=scheduler,
+                            result=str(exc),
+                            output_format="json",
+                            exit_code=1,
+                        )
                 if getattr(args, "output_format", "text") in {"json", "stream-json"}:
                     return await _print_json_output(
                         scheduler=scheduler,
                         result=response,
                         output_format=getattr(args, "output_format", "text"),
                         structured_output=structured_output,
+                        exit_code=exit_code,
                     )
+                return exit_code
         else:
             # Discover MCP resources for autocomplete (best-effort).
             # The agent/MCP servers may already be initialized (channels) or
@@ -2075,7 +2202,9 @@ async def run_harness_session_flow(
 
             from koder_agent.harness.cron.runtime import CronPromptRunner
 
-            cleanup_owner.cron_prompt_runner = CronPromptRunner(scheduler_state.dispatch_handle)
+            cleanup_owner.cron_prompt_runner = CronPromptRunner(
+                partial(scheduler_state.dispatch_handle, require_success=True)
+            )
             cleanup_owner.cron_prompt_runner.start()
 
             if args.debug:

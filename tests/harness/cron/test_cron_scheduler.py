@@ -93,6 +93,25 @@ def test_scheduler_deletes_one_shot_after_fire(tmp_path):
     assert len(storage.list_all()) == 0
 
 
+def test_scheduler_retains_one_shot_when_consumer_rejects_delivery(tmp_path):
+    storage = CronStorage(tmp_path / "crons.json")
+    job = storage.create(cron="* * * * *", prompt="retry me", recurring=False)
+    scheduler = CronScheduler(storage, on_job_fire=lambda _job: False)
+
+    asyncio.run(scheduler._tick())
+
+    assert storage.get(job["id"]) == job
+
+
+def test_scheduler_retains_one_shot_without_a_consumer(tmp_path):
+    storage = CronStorage(tmp_path / "crons.json")
+    job = storage.create(cron="* * * * *", prompt="undelivered", recurring=False)
+
+    asyncio.run(CronScheduler(storage)._tick())
+
+    assert storage.get(job["id"]) == job
+
+
 def test_scheduler_skips_invalid_job_and_continues(tmp_path):
     storage = CronStorage(tmp_path / "crons.json")
     fired = []

@@ -1,5 +1,9 @@
 """Tests for task persistence and extended models."""
 
+import json
+
+import pytest
+
 from koder_agent.harness.tasks.models import TaskRecord
 from koder_agent.harness.tasks.service import TaskService
 from koder_agent.harness.tasks.storage import TaskStorage
@@ -99,3 +103,57 @@ def test_task_service_in_memory_still_works():
     svc = TaskService.in_memory()
     task = svc.create_task("In-mem")
     assert task.title == "In-mem"
+
+
+@pytest.mark.parametrize("operation", ["get", "update", "delete"])
+@pytest.mark.parametrize("absolute", [False, True])
+def test_task_ids_cannot_target_files_outside_storage(tmp_path, operation, absolute):
+    storage = TaskStorage(tmp_path / "tasks")
+    outside = tmp_path / "outside.json"
+    task_id = str(outside.with_suffix("")) if absolute else "../outside"
+    original = json.dumps(TaskRecord.create(task_id=task_id, title="protected").to_dict())
+    outside.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="task ID"):
+        getattr(storage, operation)(task_id)
+
+    assert outside.read_text(encoding="utf-8") == original
+
+
+def test_task_record_cannot_redirect_an_update_to_another_id(tmp_path):
+    storage = TaskStorage(tmp_path / "tasks")
+    first = storage.create("first")
+    second = storage.create("second")
+    (storage.root / f"{first.id}.json").write_text(json.dumps(second.to_dict()), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ID.*storage path"):
+        storage.update(first.id, title="wrong target")
+
+    assert storage.get(second.id) == second
+
+
+def test_task_storage_rejects_symlink_targets(tmp_path):
+    storage = TaskStorage(tmp_path / "tasks")
+    outside = tmp_path / "outside.json"
+    original = json.dumps(TaskRecord.create(task_id="1", title="protected").to_dict())
+    outside.write_text(original, encoding="utf-8")
+    (storage.root / "1.json").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        storage.update("1", title="wrong target")
+
+    assert outside.read_text(encoding="utf-8") == original
+
+
+def test_failed_task_update_keeps_previous_snapshot(tmp_path, monkeypatch):
+    storage = TaskStorage(tmp_path / "tasks")
+    task = storage.create("original")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr("koder_agent.utils.atomic_file.os.replace", fail)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        storage.update(task.id, title="replacement")
+
+    assert storage.get(task.id) == task

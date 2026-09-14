@@ -43,7 +43,7 @@ def _spy_subprocess_run(monkeypatch):
         calls.append(kwargs)
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("koder_agent.harness.hooks.runtime.run_command", fake_run)
     return calls
 
 
@@ -261,7 +261,10 @@ class TestPreToolHookTimeoutFailsClosed:
         """A PreToolUse hook that times out must block the tool call (exit 2)."""
         from unittest.mock import patch
 
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 5)):
+        with patch(
+            "koder_agent.harness.hooks.runtime.run_command",
+            side_effect=subprocess.TimeoutExpired("cmd", 5),
+        ):
             code, stdout, stderr = _run_command_hook(
                 command="sleep 100",
                 payload_text="{}",
@@ -298,11 +301,11 @@ class TestPreToolHookTimeoutFailsClosed:
             encoding="utf-8",
         )
 
-        # Make subprocess.run raise TimeoutExpired
+        # Make the owned command runner raise TimeoutExpired.
         def _timeout_run(*args, **kwargs):
             raise subprocess.TimeoutExpired("sleep 100", 1)
 
-        monkeypatch.setattr(subprocess, "run", _timeout_run)
+        monkeypatch.setattr("koder_agent.harness.hooks.runtime.run_command", _timeout_run)
 
         result = dispatch_command_hooks(
             cwd=project,

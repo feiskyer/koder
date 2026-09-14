@@ -8,7 +8,9 @@ import json as _json
 import logging
 import os
 import signal
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, List, Optional
 
 from agents.mcp import (
@@ -23,6 +25,7 @@ from agents.mcp import (
 )
 from mcp.client.session import ClientSession, ElicitationFnT
 
+from .connection import MCPConnection
 from .lifecycle import cleanup_mcp_servers
 from .limits import get_timeout_seconds
 from .reconnection import (
@@ -46,15 +49,97 @@ def _get_elicitation_callback() -> ElicitationFnT:
     return get_elicitation_handler()
 
 
-class ChannelAwareMCPServerStdio(MCPServerStdio):
-    """MCPServerStdio that intercepts channel notifications.
+class _ElicitationMixin:
+    """Wire elicitation before negotiation and retain same-task scope ownership."""
 
-    Overrides ``connect()`` to wrap the read stream with a
-    ``ChannelInterceptingStream`` that captures
-    ``notifications/claude/channel`` and
-    ``notifications/claude/channel/permission`` before they reach
-    the SDK's ``ServerNotification`` validator.
-    """
+    @asynccontextmanager
+    async def _session_streams(self):
+        async with self.create_streams() as transport:
+            read, write, *rest = transport
+            self._get_session_id = rest[0] if rest and callable(rest[0]) else None
+            callback = getattr(self, "_channel_callback", None)
+            if callback is not None:
+                from koder_agent.harness.channels.interceptor import ChannelInterceptingStream
+
+                read = ChannelInterceptingStream(
+                    read,
+                    on_notification=callback,
+                    server_name=self._channel_server_name,
+                )
+                self._channel_read = read
+            try:
+                yield read, write
+            finally:
+                if callback is not None:
+                    read.bind_session(None)
+                    self._channel_read = None
+
+    def _bind_channel_session(self, session):
+        stream = getattr(self, "_channel_read", None)
+        if stream is not None:
+            stream.bind_session(session)
+
+    @asynccontextmanager
+    async def _connected_session(self):
+        import mcp
+
+        timeout = self.client_session_timeout_seconds or None
+        client_class = getattr(mcp, "Client", None)
+        if client_class is not None:
+            # MCP 2 owns negotiation in its public Client API and expects
+            # numeric seconds. Do not copy the MCP 1 ClientSession constructor.
+            async with client_class(
+                self._session_streams(),
+                mode="auto",
+                cache=None,
+                read_timeout_seconds=timeout,
+                elicitation_callback=_get_elicitation_callback(),
+                message_handler=self.message_handler,
+            ) as client:
+                self._bind_channel_session(client.session)
+                result = client.session.initialize_result
+                if result is None:
+                    # Modern discovery has capabilities but no legacy InitializeResult.
+                    result = SimpleNamespace(capabilities=client.server_capabilities)
+                yield client.session, result
+        else:
+            # Compatibility with installs that still use the supported MCP 1 API.
+            async with AsyncExitStack() as stack:
+                read, write = await stack.enter_async_context(self._session_streams())
+                session = await stack.enter_async_context(
+                    ClientSession(
+                        read,
+                        write,
+                        read_timeout_seconds=timedelta(seconds=timeout) if timeout else None,
+                        elicitation_callback=_get_elicitation_callback(),
+                        message_handler=self.message_handler,
+                    )
+                )
+                result = await session.initialize()
+                self._bind_channel_session(session)
+                yield session, result
+
+    async def connect(self) -> None:  # type: ignore[override]
+        connection = getattr(self, "_koder_connection", None)
+        if connection is None:
+            self._koder_connection = connection = MCPConnection(self._connected_session)
+        try:
+            self.session, self.server_initialize_result = await connection.connect()
+        except Exception:
+            logger.error("Error connecting MCP server with elicitation", exc_info=True)
+            raise
+
+    async def cleanup(self) -> None:
+        connection = getattr(self, "_koder_connection", None)
+        if connection is not None:
+            await connection.close()
+            self.session = None
+        else:
+            await super().cleanup()
+
+
+class ChannelAwareMCPServerStdio(_ElicitationMixin, MCPServerStdio):
+    """Owned MCP connection intercepting channel notifications before validation."""
 
     def __init__(
         self,
@@ -66,95 +151,6 @@ class ChannelAwareMCPServerStdio(MCPServerStdio):
         super().__init__(*args, **kwargs)
         self._channel_callback = channel_callback
         self._channel_server_name = channel_server_name
-
-    async def connect(self) -> None:
-        """Connect with channel notification interception."""
-        if self._channel_callback is None:
-            return await super().connect()
-
-        from koder_agent.harness.channels.interceptor import ChannelInterceptingStream
-
-        connection_succeeded = False
-        try:
-            transport = await self.exit_stack.enter_async_context(self.create_streams())
-            read, write, *_ = transport
-
-            # Wrap the read stream to intercept channel notifications
-            intercepted_read = ChannelInterceptingStream(
-                read,
-                on_notification=self._channel_callback,
-                server_name=self._channel_server_name,
-            )
-
-            session = await self.exit_stack.enter_async_context(
-                ClientSession(
-                    intercepted_read,
-                    write,
-                    (
-                        timedelta(seconds=self.client_session_timeout_seconds)
-                        if self.client_session_timeout_seconds
-                        else None
-                    ),
-                    elicitation_callback=_get_elicitation_callback(),
-                    message_handler=self.message_handler,
-                )
-            )
-            server_result = await session.initialize()
-            self.server_initialize_result = server_result
-            self.session = session
-            connection_succeeded = True
-        except Exception as e:
-            logger.error(f"Error connecting channel-aware MCP server: {e}")
-            if not connection_succeeded:
-                try:
-                    await self.cleanup()
-                except Exception:
-                    logger.debug("MCP server cleanup failed after connection error", exc_info=True)
-            raise
-
-
-class _ElicitationMixin:
-    """Mixin that overrides ``connect()`` to pass the elicitation callback.
-
-    The SDK's ``_MCPServerWithClientSession.connect()`` creates a
-    ``ClientSession`` without ``elicitation_callback``.  This mixin replaces
-    ``connect()`` so the callback is wired in before ``session.initialize()``
-    advertises client capabilities.
-    """
-
-    async def connect(self) -> None:  # type: ignore[override]
-        connection_succeeded = False
-        try:
-            transport = await self.exit_stack.enter_async_context(  # type: ignore[attr-defined]
-                self.create_streams()  # type: ignore[attr-defined]
-            )
-            read, write, *_ = transport
-
-            session = await self.exit_stack.enter_async_context(  # type: ignore[attr-defined]
-                ClientSession(
-                    read,
-                    write,
-                    (
-                        timedelta(seconds=self.client_session_timeout_seconds)  # type: ignore[attr-defined]
-                        if self.client_session_timeout_seconds  # type: ignore[attr-defined]
-                        else None
-                    ),
-                    elicitation_callback=_get_elicitation_callback(),
-                    message_handler=self.message_handler,  # type: ignore[attr-defined]
-                )
-            )
-            server_result = await session.initialize()
-            self.server_initialize_result = server_result  # type: ignore[attr-defined]
-            self.session = session  # type: ignore[attr-defined]
-            connection_succeeded = True
-        except Exception as e:
-            logger.error(f"Error connecting MCP server with elicitation: {e}")
-            if not connection_succeeded:
-                try:
-                    await self.cleanup()  # type: ignore[attr-defined]
-                except Exception:
-                    logger.debug("MCP elicitation server cleanup failed", exc_info=True)
-            raise
 
 
 class ElicitationAwareStdio(_ElicitationMixin, MCPServerStdio):

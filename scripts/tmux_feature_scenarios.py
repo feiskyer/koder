@@ -8,20 +8,23 @@ import glob
 import json
 import os
 import re
-import shlex
 import shutil
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = PROJECT_ROOT / "tests" / "e2e" / "tui_feature_scenarios.json"
+CLI_STARTUP_TIMEOUT_SECONDS = 60.0
 VALIDATION_LEVELS = {"smoke", "workflow", "acceptance"}
 RAW_HEX_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{2})(?:\s+[0-9a-fA-F]{2})*$")
 TURN_ASSERTION_KEYS = (
@@ -60,13 +63,13 @@ def _run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None 
 
 
 def _tmux(
-    *args: str, check: bool = False, timeout: float = 30.0
+    *args: str, check: bool = False, timeout: float = 30.0, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     tmux = shutil.which("tmux")
     if tmux is None:
         raise RuntimeError("tmux is not available")
     return subprocess.run(
-        [tmux, *args], text=True, capture_output=True, check=check, timeout=timeout
+        [tmux, *args], text=True, capture_output=True, check=check, timeout=timeout, env=env
     )
 
 
@@ -292,7 +295,14 @@ def validate_manifest(manifest: dict[str, Any], *, strict_acceptance: bool = Fal
                 continue
             if not isinstance(item.get("path"), str) or not item["path"].strip():
                 errors.append(f"{ref.suite}/{ref.name}: prelaunch_file {index} needs a path")
-            if not isinstance(item.get("content"), str):
+            if "source" in item:
+                try:
+                    _prelaunch_source(item["source"])
+                    if "content" in item:
+                        raise ValueError("choose source or content, not both")
+                except (TypeError, ValueError) as exc:
+                    errors.append(f"{ref.suite}/{ref.name}: prelaunch_file {index}: {exc}")
+            elif not isinstance(item.get("content"), str):
                 errors.append(f"{ref.suite}/{ref.name}: prelaunch_file {index} needs content")
         teammate_mode = payload.get("teammate_mode", "tmux")
         if teammate_mode not in {"auto", "in-process", "tmux"}:
@@ -322,6 +332,8 @@ def validate_manifest(manifest: dict[str, Any], *, strict_acceptance: bool = Fal
                 scenario_name = fake_openai.get("scenario")
                 if scenario_name is not None and scenario_name not in {
                     "single",
+                    "git_query_mutation",
+                    "sed_query_mutation",
                     "sandbox_shell_tool",
                     "streaming_subagent_tool",
                     "streaming_tool_error",
@@ -478,6 +490,21 @@ def _expand_scenario_text(value: str, *, home: Path, repo: Path) -> str:
         value.replace("$HOME", str(home))
         .replace("$REPO", str(repo))
         .replace("$RUNTIME_VERSION", resolve_runtime_version())
+        .replace(
+            "$RUNTIME_PYTHON_PATTERN",
+            re.escape(str(Path(sysconfig.get_path("scripts")) / "python"))
+            + r"(?:3(?:\.\d+)?)?"
+            + (r"\.exe" if os.name == "nt" else "")
+            + r"(?=\s|$)",
+        )
+        .replace("$RUNTIME_PYTHON_RESOLVED", str(Path(sys.executable).resolve()))
+        .replace("$RUNTIME_PYTHON", sys.executable)
+        .replace(
+            "$RUNTIME_CLI",
+            str(
+                Path(sysconfig.get_path("scripts")) / ("koder.exe" if os.name == "nt" else "koder")
+            ),
+        )
     )
 
 
@@ -622,7 +649,7 @@ def _run_post_assertions(scenario: ScenarioRef, *, home: Path, repo: Path) -> li
                 failures.append(f"post_assertion {index}: expected database to exist: {path}")
                 continue
             try:
-                with sqlite3.connect(path) as conn:
+                with closing(sqlite3.connect(path)) as conn, conn:
                     rows = conn.execute(query).fetchall()
             except sqlite3.Error as exc:
                 failures.append(f"post_assertion {index}: sqlite query failed for {path}: {exc}")
@@ -684,11 +711,24 @@ def _prepare_workspace(root: Path) -> tuple[Path, Path]:
     return home, repo
 
 
+def _prelaunch_source(source: str) -> Path:
+    """Only repository fixture paths may seed the disposable workspace."""
+    if not isinstance(source, str) or not source or Path(source).is_absolute():
+        raise ValueError("source must be a repository-relative fixture path")
+    path = (PROJECT_ROOT / source).resolve()
+    if not path.is_relative_to(PROJECT_ROOT / "tests/fixtures") or not path.is_file():
+        raise ValueError("source must be an existing file inside tests/fixtures")
+    return path
+
+
 def _write_prelaunch_files(scenario: ScenarioRef, *, home: Path, repo: Path) -> None:
     for item in scenario.payload.get("prelaunch_files", []):
         path = _expand_scenario_path(item["path"], home=home, repo=repo)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(item["content"], encoding="utf-8")
+        if "source" in item:
+            shutil.copyfile(_prelaunch_source(item["source"]), path)
+        else:
+            path.write_text(item["content"], encoding="utf-8")
 
 
 def _start_fake_openai(
@@ -736,19 +776,25 @@ def _start_fake_openai(
         stderr=subprocess.DEVNULL,
     )
 
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        if ready_file.exists():
-            ready_text = ready_file.read_text(encoding="utf-8").strip()
-            if ready_text.startswith("ready http"):
-                return proc, ready_text.removeprefix("ready ")
-        if proc.poll() is not None:
-            raise RuntimeError(f"fake OpenAI provider exited for {scenario.suite}/{scenario.name}")
-        time.sleep(0.1)
-    proc.terminate()
-    raise RuntimeError(
-        f"fake OpenAI provider did not become ready for {scenario.suite}/{scenario.name}"
-    )
+    try:
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if ready_file.exists():
+                ready_text = ready_file.read_text(encoding="utf-8").strip()
+                if ready_text.startswith("ready http"):
+                    return proc, ready_text.removeprefix("ready ")
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"fake OpenAI provider exited for {scenario.suite}/{scenario.name}"
+                )
+            time.sleep(0.1)
+        raise RuntimeError(
+            f"fake OpenAI provider did not become ready for {scenario.suite}/{scenario.name}"
+        )
+    except BaseException:
+        # The caller cannot own this child until startup returns successfully.
+        _stop_fake_openai(proc)
+        raise
 
 
 def _stop_fake_openai(proc: subprocess.Popen | None) -> None:
@@ -783,11 +829,21 @@ def _launch_session(
     fake_openai_url: str | None,
 ) -> str:
     session = f"koder-scenario-{scenario.suite[:3]}-{scenario.name[:18]}-{uuid.uuid4().hex[:6]}"
+    import_paths = [
+        *os.environ.get("PYTHONPATH", "").split(os.pathsep),
+        str(PROJECT_ROOT),
+    ]
     env_assignments = {
         "HOME": str(home),
-        "PYTHONPATH": str(PROJECT_ROOT),
+        "PYTHONPATH": os.pathsep.join(dict.fromkeys(filter(None, import_paths))),
+        "KODER_SCENARIO_SOURCE_ROOT": str(PROJECT_ROOT),
         "KODER_MODEL": "gpt-4.1",
     }
+    if sys.prefix != sys.base_prefix:
+        # tmux may have a long-lived server with a stale environment. Pass the
+        # test interpreter explicitly so isolated homes cannot select/rebuild .venv.
+        env_assignments["UV_PROJECT_ENVIRONMENT"] = sys.prefix
+        env_assignments["UV_PYTHON"] = sys.executable
     env_assignments.update(
         {
             key: _expand_scenario_env_value(
@@ -799,16 +855,27 @@ def _launch_session(
             for key, value in scenario.payload.get("env", {}).items()
         }
     )
-    env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env_assignments.items())
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is not available")
+    environment_args = [
+        argument for key, value in env_assignments.items() for argument in ("-e", f"{key}={value}")
+    ]
     teammate_mode = scenario.payload.get("teammate_mode", "tmux")
-    extra_cli_args = " ".join(shlex.quote(arg) for arg in scenario.payload.get("cli_args", []))
-    launch = (
-        f"cd {shlex.quote(str(repo))} && "
-        f"{env_prefix} "
-        f"uv --project {shlex.quote(str(PROJECT_ROOT))} run --no-sync koder "
-        f"--teammate-mode {shlex.quote(teammate_mode)}"
-        f"{(' ' + extra_cli_args) if extra_cli_args else ''}"
-    )
+    # Multiple arguments make tmux exec uv directly. A shell command string can
+    # source personal startup files before HOME is applied and reinterpret args.
+    launch = [
+        uv,
+        "--project",
+        str(PROJECT_ROOT),
+        "run",
+        "--no-sync",
+        "--no-env-file",
+        "koder",
+        "--teammate-mode",
+        teammate_mode,
+        *scenario.payload.get("cli_args", []),
+    ]
     result = _tmux(
         "new-session",
         "-d",
@@ -818,19 +885,36 @@ def _launch_session(
         "160",
         "-y",
         "48",
-        launch,
+        "-c",
+        str(repo),
+        *environment_args,
+        *launch,
         check=False,
         timeout=20,
+        # tmux uses an unattached new-session client's PATH when spawning.
+        # Match the requested pane environment rather than losing fixture bins.
+        env={**os.environ, **env_assignments},
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip())
-    startup = _wait_for_prompt(session, timeout=20.0)
-    if not _session_exists(session):
-        raise RuntimeError(
-            f"koder session exited before prompt for {scenario.suite}/{scenario.name}"
-        )
-    if "| ⚡ Koder |" not in startup or "│>" not in startup:
-        raise RuntimeError(f"koder prompt did not appear for {scenario.suite}/{scenario.name}")
+        # tmux may echo environment assignments in stderr; keep only safe status.
+        raise subprocess.CalledProcessError(result.returncode, ["tmux", "new-session"])
+    try:
+        # Cold SDK imports can be delayed on a busy test host. Readiness remains
+        # mandatory; a larger finite startup budget is not a passing assertion.
+        startup = _wait_for_prompt(session, timeout=CLI_STARTUP_TIMEOUT_SECONDS)
+        if not _session_exists(session):
+            raise RuntimeError(
+                f"koder session exited before prompt for {scenario.suite}/{scenario.name}"
+            )
+        if "| ⚡ Koder |" not in startup or "│>" not in startup:
+            raise RuntimeError(
+                f"koder prompt did not appear for {scenario.suite}/{scenario.name} "
+                f"within {CLI_STARTUP_TIMEOUT_SECONDS:g}s"
+            )
+    except BaseException:
+        # run_scenario cannot own this session until this function returns.
+        _tmux("kill-session", "-t", session, timeout=5)
+        raise
     return session
 
 
@@ -883,9 +967,9 @@ def _kill_tmux_pane_matching(session: str, marker: str) -> str | None:
 
 
 def _wait_for_prompt(session: str, timeout: float) -> str:
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if not _session_exists(session):
             return last
         last = _capture(session)
@@ -896,8 +980,36 @@ def _wait_for_prompt(session: str, timeout: float) -> str:
 
 
 def _send(session: str, text: str) -> None:
-    _tmux("send-keys", "-t", session, "-l", text, timeout=10)
-    time.sleep(0.3)
+    # Prompt-toolkit enables this mode when its input application is active.
+    # A painted frame alone can still belong to the command that just finished.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        state = _tmux("display-message", "-p", "-t", session, "#{bracket_paste_flag}", timeout=5)
+        if state.returncode == 0 and state.stdout.strip() == "1":
+            break
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("terminal input reader did not become ready")
+
+    # Deliver long/multiline commands as one input event, not hundreds of
+    # independent keystrokes racing completion callbacks and redraws.
+    buffer_name = f"scenario-input-{uuid.uuid4().hex}"
+    _tmux("set-buffer", "-b", buffer_name, "--", text, check=True, timeout=10)
+    try:
+        _tmux(
+            "paste-buffer",
+            "-p",
+            "-d",
+            "-b",
+            buffer_name,
+            "-t",
+            session,
+            check=True,
+            timeout=10,
+        )
+    except BaseException:
+        _tmux("delete-buffer", "-b", buffer_name, timeout=5)
+        raise
     _tmux("send-keys", "-t", session, "Enter", timeout=10)
 
 
@@ -928,6 +1040,15 @@ def _dispatch_turn_input_actions(session: str, turn: dict[str, Any]) -> None:
         _send_raw_hex(session, turn["raw_hex"])
     if turn.get("keys"):
         _send_key_sequence(session, turn["keys"])
+
+
+def _turn_assertion_timeout(turn: dict[str, Any]) -> float:
+    if "timeout" in turn:
+        return float(turn["timeout"])
+    command = turn.get("send")
+    # Shell fixtures may start a fresh interpreter and SDK. Keep explicit
+    # streaming/input timing contracts unchanged.
+    return 45.0 if isinstance(command, str) and command.startswith("!") else 12.0
 
 
 def _resize_window(session: str, *, width: int, height: int) -> None:
@@ -977,6 +1098,7 @@ def _wait_for_assertions(
                 return True, last
         elif exists:
             last = _capture_for_turn(session, turn)
+            assertion_text = _without_prompt_input(last) if turn.get("send") else last
             expect_all = _expected_strings(turn.get("expect_all", []), home=home, repo=repo)
             expect_any = _expected_strings(turn.get("expect_any", []), home=home, repo=repo)
             expect_regex = _expected_strings(turn.get("expect_regex", []), home=home, repo=repo)
@@ -984,9 +1106,9 @@ def _wait_for_assertions(
             expect_bottom_all = _expected_strings(
                 turn.get("expect_bottom_all", []), home=home, repo=repo
             )
-            all_ok = all(item in last for item in expect_all)
-            any_ok = True if not expect_any else any(item in last for item in expect_any)
-            regex_ok = all(re.search(pattern, last) for pattern in expect_regex)
+            all_ok = all(item in assertion_text for item in expect_all)
+            any_ok = True if not expect_any else any(item in assertion_text for item in expect_any)
+            regex_ok = all(re.search(pattern, assertion_text) for pattern in expect_regex)
             not_ok = all(item not in last for item in expect_not)
             bottom_ok = _bottom_assertions_pass(
                 last,
@@ -1002,17 +1124,86 @@ def _wait_for_assertions(
     return False, last
 
 
+def _without_prompt_input(capture: str) -> str:
+    """Do not accept a command's echoed source as evidence that it executed.
+
+    Keep frame markers for layout assertions. Negative/privacy checks and
+    explicit input/key assertions still inspect the original capture.
+    """
+    lines = []
+    in_input = False
+    for line in capture.splitlines():
+        if line.startswith("┌") and "| ⚡ Koder |" in line:
+            in_input = True
+            lines.append(line)
+        elif in_input and line.startswith("└"):
+            in_input = False
+            lines.append(line)
+        elif in_input:
+            if line.startswith("│>"):
+                lines.append("│>")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _bind_fake_provider_url(scenario: ScenarioRef, url: str | None) -> ScenarioRef:
+    if url is None:
+        return scenario
+
+    def bind(value):
+        if isinstance(value, str):
+            return value.replace("$FAKE_OPENAI_URL", url)
+        if isinstance(value, list):
+            return [bind(item) for item in value]
+        if isinstance(value, dict):
+            return {key: bind(item) for key, item in value.items()}
+        return value
+
+    return ScenarioRef(scenario.suite, scenario.name, bind(scenario.payload))
+
+
+def _scenario_error_text(error: Exception) -> str:
+    """Keep subprocess command arguments and captured output out of receipts."""
+    if isinstance(error, subprocess.TimeoutExpired):
+        detail = f"subprocess timed out after {error.timeout} seconds"
+    elif isinstance(error, subprocess.CalledProcessError):
+        detail = f"subprocess exited with status {error.returncode}"
+    else:
+        detail = str(error)
+    return f"{type(error).__name__}: {detail}"
+
+
 def run_scenario(scenario: ScenarioRef, *, output_dir: Path) -> bool:
     output_dir.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="koder-scenario-") as tmp:
-        home, repo = _prepare_workspace(Path(tmp))
-        _write_prelaunch_files(scenario, home=home, repo=repo)
+    error_path = output_dir / f"{scenario.suite}-{scenario.name}-error.txt"
+    errors: list[str] = []
+    ok = True
+
+    def record_error(phase: str, error: Exception) -> None:
+        nonlocal ok
+        ok = False
+        message = f"{phase}: {_scenario_error_text(error)}"
+        errors.append(message)
+        print(f"FAIL {scenario.suite}/{scenario.name}: {message}", file=sys.stderr)
+
+    workspace = None
+    phase = "workspace_setup"
+    try:
+        workspace = tempfile.TemporaryDirectory(prefix="koder-scenario-")
+        home: Path | None = None
+        repo: Path | None = None
         fake_openai_proc: subprocess.Popen | None = None
         fake_openai_url: str | None = None
         session: str | None = None
-        ok = True
         try:
+            home, repo = _prepare_workspace(Path(workspace.name))
+            phase = "prelaunch"
+            _write_prelaunch_files(scenario, home=home, repo=repo)
+            phase = "provider_startup"
             fake_openai_proc, fake_openai_url = _start_fake_openai(scenario, home=home, repo=repo)
+            scenario = _bind_fake_provider_url(scenario, fake_openai_url)
+            phase = "cli_startup"
             session = _launch_session(
                 home,
                 repo,
@@ -1020,6 +1211,7 @@ def run_scenario(scenario: ScenarioRef, *, output_dir: Path) -> bool:
                 fake_openai_url=fake_openai_url,
             )
             for index, turn in enumerate(scenario.payload["turns"], start=1):
+                phase = f"turn_{index}"
                 _dispatch_turn_input_actions(session, turn)
                 if turn.get("resize"):
                     resize = turn["resize"]
@@ -1044,7 +1236,7 @@ def run_scenario(scenario: ScenarioRef, *, output_dir: Path) -> bool:
                     turn,
                     home=home,
                     repo=repo,
-                    timeout=float(turn.get("timeout", 12.0)),
+                    timeout=_turn_assertion_timeout(turn),
                 )
                 capture = output_dir / f"{scenario.suite}-{scenario.name}-turn-{index}.txt"
                 capture.write_text(output, encoding="utf-8")
@@ -1075,6 +1267,7 @@ def run_scenario(scenario: ScenarioRef, *, output_dir: Path) -> bool:
                     break
                 time.sleep(0.8)
             if ok:
+                phase = "post_assertions"
                 post_failures = _run_post_assertions(scenario, home=home, repo=repo)
                 if post_failures:
                     post_capture = output_dir / f"{scenario.suite}-{scenario.name}-post.txt"
@@ -1082,17 +1275,50 @@ def run_scenario(scenario: ScenarioRef, *, output_dir: Path) -> bool:
                     for failure in post_failures:
                         print(f"FAIL {scenario.suite}/{scenario.name}: {failure}", file=sys.stderr)
                     ok = False
+        except Exception as error:
+            record_error(phase, error)
         finally:
+            # Each resource gets its cleanup attempt even if another one fails.
+            cleanup_actions = []
             if session is not None:
-                _tmux("kill-session", "-t", session, timeout=5)
-            _stop_fake_openai(fake_openai_proc)
-            _copy_fake_openai_log(
-                scenario,
-                home=home,
-                repo=repo,
-                output_dir=output_dir,
-            )
-        return ok
+                cleanup_actions.append(
+                    ("tmux_cleanup", partial(_tmux, "kill-session", "-t", session, timeout=5))
+                )
+            if fake_openai_proc is not None:
+                cleanup_actions.append(
+                    ("provider_cleanup", partial(_stop_fake_openai, fake_openai_proc))
+                )
+            if home is not None and repo is not None:
+                cleanup_actions.append(
+                    (
+                        "provider_log",
+                        partial(
+                            _copy_fake_openai_log,
+                            scenario,
+                            home=home,
+                            repo=repo,
+                            output_dir=output_dir,
+                        ),
+                    )
+                )
+            for cleanup_phase, cleanup in cleanup_actions:
+                try:
+                    cleanup()
+                except Exception as error:
+                    record_error(cleanup_phase, error)
+    except Exception as error:
+        record_error(phase, error)
+    finally:
+        if workspace is not None:
+            try:
+                workspace.cleanup()
+            except Exception as error:
+                record_error("workspace_cleanup", error)
+    if errors:
+        error_path.write_text("\n".join(errors) + "\n", encoding="utf-8")
+    else:
+        error_path.unlink(missing_ok=True)
+    return ok
 
 
 def select_scenarios(

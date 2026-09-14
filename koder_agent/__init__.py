@@ -1,18 +1,11 @@
 """Koder Agent - An advanced AI coding assistant and interactive CLI tool."""
 
-import importlib
-
-from .litellm_cost_map import (
-    configure_litellm_local_model_cost_map,
-    install_vendored_litellm_model_cost_map,
-)
+from .litellm_cost_map import configure_litellm_local_model_cost_map
+from .version import resolve_package_version_info
 
 configure_litellm_local_model_cost_map()
 
-_litellm = importlib.import_module("litellm")
-install_vendored_litellm_model_cost_map(_litellm)
-
-__version__ = "0.5.2"
+__version__ = resolve_package_version_info()[0]
 
 
 def main(*args, **kwargs):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
-from pathlib import Path
+from contextlib import closing
 
 from scripts import tmux_feature_scenarios as scenarios
 from scripts.fake_openai_chat_server import _Handler as FakeOpenAIHandler
@@ -134,11 +134,12 @@ def test_multiline_input_scenario_covers_idle_and_queued_shift_enter():
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19092/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "multiline-input-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19092,
+        "port": 0,
         "response": "multiline final response",
         "log_file": "$HOME/fake-openai-multiline-input.log",
         "ready_file": "$HOME/fake-openai-multiline-input.ready",
@@ -366,7 +367,9 @@ def test_schedule_scenario_is_acceptance_backed_by_cron_registry_flow():
         "expect_all": ["No scheduled tasks", "cron_create", "/loop"],
     }
     create_turn = scenario["turns"][2]
-    assert create_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python -c')
+    assert create_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python -c'
+    )
     assert "cron_create" in create_turn["send"]
     assert "schedule-create-ok" not in create_turn["send"]
     assert create_turn["expect_all"] == ["schedule-create-ok", "Invalid cron expression"]
@@ -477,11 +480,19 @@ def test_compact_scenario_is_acceptance_backed_by_persisted_session_rewrite():
     scenario = manifest["slash_commands"]["compact"]
 
     assert scenario["validation_level"] == "acceptance"
-    assert scenario["env"] == {"KODER_API_KEY": "", "OPENAI_API_KEY": ""}
+    assert scenario["env"] == {
+        "KODER_API_KEY": "scenario-key",
+        "OPENAI_API_KEY": "",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
+    }
+    assert scenario["fake_openai"]["port"] == 0
+    assert scenario["fake_openai"]["response"] == "Compacted 2 earlier messages"
     assert scenario["acceptance_criteria"]
     assert scenario["acceptance_artifacts"]
     seed_turn = scenario["turns"][0]
-    assert seed_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python -c')
+    assert seed_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python -c'
+    )
     assert "compact older user" in seed_turn["send"]
     assert "compact kept assistant" in seed_turn["send"]
     assert "compact-fixture" not in seed_turn["send"]
@@ -557,7 +568,7 @@ def test_diff_scenario_is_acceptance_backed_by_git_and_conversation_edits():
     assert scenario["validation_level"] == "acceptance"
     assert scenario["acceptance_criteria"]
     assert scenario["acceptance_artifacts"]
-    assert scenario["turns"][0]["send"].startswith('!uv --project "$PYTHONPATH"')
+    assert scenario["turns"][0]["send"].startswith('!uv --project "$KODER_SCENARIO_SOURCE_ROOT"')
     assert "diff-fixture" in scenario["turns"][0]["expect_all"]
     dirty_turn = scenario["turns"][1]
     assert dirty_turn["send"] == "/diff"
@@ -710,7 +721,7 @@ def test_doctor_scenario_is_acceptance_backed_by_runtime_diagnostic_matrix():
     assert {
         "cwd:",
         "python:",
-        "installation_type: development",
+        "invoked_binary: $RUNTIME_CLI",
         "invoked_binary:",
         "config_path:",
         "model: gpt-4.1",
@@ -722,6 +733,8 @@ def test_doctor_scenario_is_acceptance_backed_by_runtime_diagnostic_matrix():
         "ripgrep_path:",
     } <= set(doctor_turn["expect_all"])
     assert "cwd: .*/repo" in doctor_turn["expect_regex"]
+    assert "installation_type: (development|local|unknown)" in doctor_turn["expect_regex"]
+    assert "python: $RUNTIME_PYTHON_PATTERN" in doctor_turn["expect_regex"]
     assert "ripgrep_working: (true|false)" in doctor_turn["expect_regex"]
     shell_turn = scenario["turns"][1]
     assert shell_turn["send"].startswith('!test "$(basename "$PWD")" = repo')
@@ -753,31 +766,38 @@ def test_mcp_scenario_is_acceptance_backed_by_project_config_round_trip():
         "expect_all": ["Usage: /mcp"],
     }
     add_turn = scenario["turns"][2]
-    assert add_turn["send"].startswith(
-        '!uv --project "$PYTHONPATH" run --no-sync koder mcp add-json'
+    assert (
+        'uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync koder mcp add-json'
+        in (add_turn["send"])
     )
+    assert "Path(sys.executable).resolve()" in add_turn["send"]
     assert "scenario-mcp" in add_turn["send"]
     assert "--scope project" in add_turn["send"]
     assert add_turn["expect_all"] == ["Added MCP server: scenario-mcp"]
     assert scenario["turns"][3] == {
         "send": "/mcp",
-        "expect_all": ["scenario-mcp", "[project]", "stdio", "python -m scenario_server"],
+        "expect_all": [
+            "scenario-mcp",
+            "[project]",
+            "stdio",
+            "$RUNTIME_PYTHON_RESOLVED -m scenario_server",
+        ],
     }
     get_turn = scenario["turns"][4]
     assert get_turn["send"] == (
-        '!uv --project "$PYTHONPATH" run --no-sync koder mcp get scenario-mcp --scope project'
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync koder mcp get scenario-mcp --scope project'
     )
     assert {
         '"name": "scenario-mcp"',
         '"transport_type": "stdio"',
-        '"command": "python"',
+        '"command": "$RUNTIME_PYTHON_RESOLVED"',
         '"env_vars": {',
         '"SCENARIO": "1"',
         '"scope": "project"',
     } <= set(get_turn["expect_all"])
     assert scenario["turns"][5] == {"send": "/doctor", "expect_all": ["mcp_servers: 1"]}
     assert scenario["turns"][6] == {
-        "send": '!uv --project "$PYTHONPATH" run --no-sync koder mcp remove scenario-mcp --scope project',
+        "send": '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync koder mcp remove scenario-mcp --scope project',
         "expect_all": ["Removed MCP server: scenario-mcp"],
     }
     assert scenario["turns"][7] == {
@@ -906,7 +926,9 @@ def test_ctx_viz_scenario_is_acceptance_backed_by_seeded_transcript_and_files():
         ],
     }
     seed_turn = scenario["turns"][1]
-    assert seed_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python')
+    assert seed_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python'
+    )
     assert "ctx viz user prompt" in seed_turn["send"]
     assert "ctx viz assistant answer" in seed_turn["send"]
     assert "docs/runtime-notes.md" in seed_turn["send"]
@@ -941,10 +963,12 @@ def test_context_scenario_is_acceptance_backed_by_exact_token_categories():
     assert scenario["acceptance_artifacts"]
     fresh_turn = scenario["turns"][0]
     assert fresh_turn["send"] == "/context"
-    assert "**Model:** litellm/openai/gpt-4.1" in fresh_turn["expect_all"]
+    assert "**Model:** gpt-4.1" in fresh_turn["expect_all"]
     assert "| Instructions | 9 |" in fresh_turn["expect_all"]
     seed_turn = scenario["turns"][1]
-    assert seed_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python')
+    assert seed_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python'
+    )
     assert "ctx viz user prompt" in seed_turn["send"]
     assert "ctx viz assistant answer" in seed_turn["send"]
     assert "docs/runtime-notes.md" in seed_turn["send"]
@@ -1507,24 +1531,25 @@ def test_onboarding_scenario_is_acceptance_backed_by_real_state_transitions():
     assert scenario["validation_level"] == "acceptance"
     assert scenario["acceptance_criteria"]
     assert scenario["acceptance_artifacts"]
-    first_turn = scenario["turns"][0]
+    assert scenario["turns"][0]["send"] == "/env unset KODER_API_KEY"
+    first_turn = scenario["turns"][1]
     assert first_turn["send"] == "/onboarding"
     assert "Configure API key: Set KODER_API_KEY" in first_turn["expect_all"]
     assert "Completed: API key=✗, Model=✓, Workspace=✓" in first_turn["expect_all"]
-    assert scenario["turns"][1] == {
+    assert scenario["turns"][2] == {
         "send": "/env KODER_API_KEY=scenario-onboarding-key",
         "expect_all": ["env: set KODER_API_KEY for this session."],
     }
-    assert scenario["turns"][2] == {
+    assert scenario["turns"][3] == {
         "send": "/onboarding",
         "expect_all": ["✓ Setup complete! All configuration is in place."],
     }
-    assert scenario["turns"][4]["send"] == "/onboarding"
+    assert scenario["turns"][5]["send"] == "/onboarding"
     assert (
         "Trust workspace: Initialize .koder/ directory in your project"
-        in scenario["turns"][4]["expect_all"]
+        in scenario["turns"][5]["expect_all"]
     )
-    assert "Completed: API key=✓, Model=✓, Workspace=✗" in scenario["turns"][4]["expect_all"]
+    assert "Completed: API key=✓, Model=✓, Workspace=✗" in scenario["turns"][5]["expect_all"]
     assert scenario["turns"][-1] == {
         "send": "/env unset KODER_API_KEY",
         "expect_all": ["env: removed KODER_API_KEY from this session."],
@@ -1545,6 +1570,7 @@ def test_onboarding_session_env_startup_scenario_is_hermetic_and_selected_provid
     assert scenario["validation_level"] == "acceptance"
     assert scenario["cli_args"] == ["--session", session_id]
     assert scenario["env"] == {
+        "KODER_CONTEXT_WINDOW": "128000",
         "KODER_API_KEY": "",
         "OPENAI_API_KEY": "synthetic-unrelated-openai-key",
         "ANTHROPIC_API_KEY": "",
@@ -1600,7 +1626,7 @@ def test_debug_tool_call_scenario_is_acceptance_backed_by_seeded_records_and_red
         "expect_all": ["debug-tool-call: no recorded tool calls in this session"],
     }
     assert any(
-        turn.get("send", "").startswith('!uv --project "$PYTHONPATH"')
+        turn.get("send", "").startswith('!uv --project "$KODER_SCENARIO_SOURCE_ROOT"')
         and "debug-tool-fixture" in turn.get("expect_all", [])
         and "debug-secret-value-12345" in turn.get("expect_not", [])
         for turn in scenario["turns"]
@@ -1647,7 +1673,7 @@ def test_export_scenario_is_acceptance_backed_by_json_markdown_files_and_edges()
     assert scenario["acceptance_artifacts"]
     assert scenario["turns"][0] == {"send": "/session", "expect_all": ["session_id:"]}
     assert any(
-        turn.get("send", "").startswith('!uv --project "$PYTHONPATH"')
+        turn.get("send", "").startswith('!uv --project "$KODER_SCENARIO_SOURCE_ROOT"')
         and "export-fixture" in turn.get("expect_all", [])
         for turn in scenario["turns"]
     )
@@ -1699,11 +1725,11 @@ def test_btw_scenario_is_acceptance_backed_by_fake_provider_and_session_context(
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
-        "KODER_BASE_URL": "http://127.0.0.1:19081/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "btw-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19081,
+        "port": 0,
         "response": "btw-fixture-answer: check migration coverage.",
         "log_file": "$HOME/fake-openai-btw.log",
         "ready_file": "$HOME/fake-openai-btw.ready",
@@ -1716,7 +1742,7 @@ def test_btw_scenario_is_acceptance_backed_by_fake_provider_and_session_context(
     }
     assert scenario["turns"][1] == {
         "send": '!test -f "$HOME/fake-openai-btw.ready" && cat "$HOME/fake-openai-btw.ready"',
-        "expect_all": ["ready http://127.0.0.1:19081/v1"],
+        "expect_all": ["ready $FAKE_OPENAI_URL"],
     }
     assert "btw seeded user context: retry validation checklist" in scenario["turns"][2]["send"]
     assert scenario["turns"][3] == {
@@ -1753,11 +1779,11 @@ def test_torch_scenario_is_acceptance_backed_by_fake_provider_prompt_shape():
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
-        "KODER_BASE_URL": "http://127.0.0.1:19082/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "torch-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19082,
+        "port": 0,
         "response": "torch-fixture-plan: inspect koder_agent/core/usage_tracker.py and search for context token accounting.",
         "log_file": "$HOME/fake-openai-torch.log",
         "ready_file": "$HOME/fake-openai-torch.ready",
@@ -1770,7 +1796,7 @@ def test_torch_scenario_is_acceptance_backed_by_fake_provider_prompt_shape():
     }
     assert scenario["turns"][1] == {
         "send": '!test -f "$HOME/fake-openai-torch.ready" && cat "$HOME/fake-openai-torch.ready"',
-        "expect_all": ["ready http://127.0.0.1:19082/v1"],
+        "expect_all": ["ready $FAKE_OPENAI_URL"],
     }
     assert scenario["turns"][2] == {
         "send": "/torch context token accounting",
@@ -1810,11 +1836,11 @@ def test_ultraplan_scenario_is_acceptance_backed_by_fake_provider_and_no_writes(
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
-        "KODER_BASE_URL": "http://127.0.0.1:19083/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "ultraplan-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19083,
+        "port": 0,
         "response": "ultraplan-fixture-plan: update koder_agent/core/usage_tracker.py, add tests, and run tmux validation.",
         "log_file": "$HOME/fake-openai-ultraplan.log",
         "ready_file": "$HOME/fake-openai-ultraplan.ready",
@@ -1830,10 +1856,10 @@ def test_ultraplan_scenario_is_acceptance_backed_by_fake_provider_and_no_writes(
     }
     assert scenario["turns"][1] == {
         "send": '!test -f "$HOME/fake-openai-ultraplan.ready" && cat "$HOME/fake-openai-ultraplan.ready"',
-        "expect_all": ["ready http://127.0.0.1:19083/v1"],
+        "expect_all": ["ready $FAKE_OPENAI_URL"],
     }
     assert scenario["turns"][2] == {
-        "send": "!git status --short > ultraplan-status-before.txt && cat ultraplan-status-before.txt",
+        "send": '!git status --short > "$HOME/ultraplan-status-before.txt" && cat "$HOME/ultraplan-status-before.txt"',
         "expect_all": ["M sample.txt"],
     }
     assert scenario["turns"][3] == {
@@ -1862,7 +1888,7 @@ def test_ultraplan_scenario_is_acceptance_backed_by_fake_provider_and_no_writes(
             ]
         },
         {"file_not_contains": ["$HOME/fake-openai-ultraplan.log", "ultraplan-secret-token"]},
-        {"file_contains": ["$REPO/ultraplan-status-after.txt", "M sample.txt"]},
+        {"file_contains": ["$HOME/ultraplan-status-after.txt", "M sample.txt"]},
     ]
 
 
@@ -1875,7 +1901,7 @@ def test_files_scenario_is_acceptance_backed_by_seeded_context_and_missing_edge(
     assert scenario["acceptance_artifacts"]
     assert scenario["turns"][0] == {"send": "/files", "expect_all": ["No files in context"]}
     assert any(
-        turn.get("send", "").startswith('!uv --project "$PYTHONPATH"')
+        turn.get("send", "").startswith('!uv --project "$KODER_SCENARIO_SOURCE_ROOT"')
         and "files-fixture" in turn.get("expect_all", [])
         for turn in scenario["turns"]
     )
@@ -1917,8 +1943,8 @@ def test_cost_scenario_is_acceptance_backed_by_usage_snapshots_and_model_costs()
         ],
     }
     assert scenario["turns"][1]["send"] == (
-        '!uv --project "$PYTHONPATH" run --no-sync python '
-        '"$PYTHONPATH/scripts/seed_tmux_usage_fixture.py" known'
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python '
+        '"$KODER_SCENARIO_SOURCE_ROOT/scripts/seed_tmux_usage_fixture.py" known'
     )
     assert scenario["turns"][1]["expect_all"] == ["known-usage-fixture"]
     assert scenario["turns"][2] == {
@@ -1977,8 +2003,8 @@ def test_usage_scenario_is_acceptance_backed_by_persisted_usage_and_clear_edge()
         "rate_limit_status: unknown",
     } <= set(scenario["turns"][0]["expect_all"])
     assert scenario["turns"][1]["send"] == (
-        '!uv --project "$PYTHONPATH" run --no-sync python '
-        '"$PYTHONPATH/scripts/seed_tmux_usage_fixture.py" known'
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python '
+        '"$KODER_SCENARIO_SOURCE_ROOT/scripts/seed_tmux_usage_fixture.py" known'
     )
     assert scenario["turns"][1]["expect_all"] == ["known-usage-fixture"]
     assert {
@@ -2033,7 +2059,7 @@ def test_insights_scenario_is_acceptance_backed_by_seeded_session_analytics():
         ],
     }
     assert any(
-        turn.get("send", "").startswith('!uv --project "$PYTHONPATH"')
+        turn.get("send", "").startswith('!uv --project "$KODER_SCENARIO_SOURCE_ROOT"')
         and "insights-fixture-ok" in turn.get("expect_all", [])
         for turn in scenario["turns"]
     )
@@ -2119,7 +2145,9 @@ def test_thinkback_scenario_is_acceptance_backed_by_seeded_local_session():
         "expect_all": ["Session renamed to: thinkback-fixture"],
     }
     seed_turn = scenario["turns"][2]
-    assert seed_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python')
+    assert seed_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python'
+    )
     assert "thinkback user prompt one" in seed_turn["send"]
     assert "thinkback assistant answer two" in seed_turn["send"]
     assert "thinkback tool output one" in seed_turn["send"]
@@ -2168,7 +2196,9 @@ def test_thinkback_play_scenario_is_acceptance_backed_by_seeded_replay():
         "expect_all": ["Usage: /thinkback-play [recent-turn-count]"],
     }
     seed_turn = scenario["turns"][2]
-    assert seed_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python')
+    assert seed_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python'
+    )
     assert "play user first" in seed_turn["send"]
     assert "play assistant second" in seed_turn["send"]
     assert "play tool third" in seed_turn["send"]
@@ -2206,12 +2236,11 @@ def test_version_scenario_is_acceptance_backed_by_cli_version_contract():
     assert scenario["turns"][0] == {
         "send": "/version",
         "expect_all": [
-            "version:",
+            "version: $RUNTIME_VERSION",
             "package: koder",
-            "source:",
+            "source: installed-package",
             "build_time: scenario-build",
-            "cli_banner:",
-            "(Koder)",
+            "cli_banner: $RUNTIME_VERSION (Koder)",
         ],
         "expect_not": ["python:"],
     }
@@ -2220,11 +2249,16 @@ def test_version_scenario_is_acceptance_backed_by_cli_version_contract():
         for turn in scenario["turns"]
     )
     assert scenario["turns"][-1] == {
-        "send": "!uv run koder --version",
+        "send": (
+            '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync --no-env-file koder --version '
+            "| tee version-proof.txt && printf '%s%s\\n' 'version-cli-' 'finished'"
+        ),
         "capture": "visible",
-        "expect_all": ["(Koder)"],
+        "expect_all": ["$RUNTIME_VERSION (Koder)", "version-cli-finished"],
     }
-    assert "post_assertions" not in scenario
+    assert scenario["post_assertions"] == [
+        {"file_contains": ["$REPO/version-proof.txt", "$RUNTIME_VERSION (Koder)"]}
+    ]
 
 
 def test_project_agent_detail_scenario_is_acceptance_backed_by_lifecycle_assertions():
@@ -3165,11 +3199,11 @@ def test_slash_completion_scenario_is_acceptance_backed_by_filtered_menu():
     first_turn = scenario["turns"][0]
     assert first_turn["type"] == "/sta"
     assert first_turn["capture"] == "visible"
-    assert {"/stats", "/status", "/statusline"} <= set(first_turn["expect_all"])
+    assert {"/status", "/statusline"} <= set(first_turn["expect_all"])
     assert "/help" in first_turn["expect_not"]
     assert any(turn.get("resize") == {"width": 72, "height": 13} for turn in scenario["turns"])
     assert scenario["turns"][-1]["keys"] == ["Enter"]
-    assert "## Stats" in scenario["turns"][-1]["expect_all"]
+    assert "Runtime slash commands" in scenario["turns"][-1]["expect_all"]
 
 
 def test_terminal_resize_reflow_scenario_is_acceptance_backed_by_prompt_survival():
@@ -3733,12 +3767,12 @@ def test_review_scenario_is_acceptance_backed_by_fake_gh_and_provider():
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
-        "KODER_BASE_URL": "http://127.0.0.1:19084/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "review-secret-token",
         "PATH": "$REPO/bin:$PATH",
     }
     assert scenario["fake_openai"] == {
-        "port": 19084,
+        "port": 0,
         "response": "review-fixture-finding: verify the changed diff path and add regression coverage.",
         "log_file": "$HOME/fake-openai-review.log",
         "ready_file": "$HOME/fake-openai-review.ready",
@@ -3796,11 +3830,11 @@ def test_security_review_scenario_is_acceptance_backed_by_fake_provider_and_clea
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
-        "KODER_BASE_URL": "http://127.0.0.1:19085/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "security-review-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19085,
+        "port": 0,
         "response": "# Security Review\n\nNo high-confidence security findings.",
         "log_file": "$HOME/fake-openai-security-review.log",
         "ready_file": "$HOME/fake-openai-security-review.ready",
@@ -3847,11 +3881,11 @@ def test_advisor_scenario_is_acceptance_backed_by_fake_provider_and_no_context_e
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
-        "KODER_BASE_URL": "http://127.0.0.1:19086/v1",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "OPENAI_API_KEY": "advisor-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19086,
+        "port": 0,
         "response": "# Advisor Review\n\n## Assessment\nadvisor-fixture: add regression coverage.",
         "log_file": "$HOME/fake-openai-advisor.log",
         "ready_file": "$HOME/fake-openai-advisor.ready",
@@ -3860,7 +3894,7 @@ def test_advisor_scenario_is_acceptance_backed_by_fake_provider_and_no_context_e
     assert scenario["acceptance_artifacts"]
     assert scenario["turns"][0] == {
         "send": '!test -f "$HOME/fake-openai-advisor.ready" && cat "$HOME/fake-openai-advisor.ready"',
-        "expect_all": ["ready http://127.0.0.1:19086/v1"],
+        "expect_all": ["ready $FAKE_OPENAI_URL"],
     }
     assert "advisor seeded user request: review validation plan" in scenario["turns"][1]["send"]
     assert scenario["turns"][2] == {
@@ -4029,7 +4063,9 @@ def test_rewind_scenario_is_acceptance_backed_by_prompt_restore_and_db_trim():
     assert scenario["acceptance_criteria"]
     assert scenario["acceptance_artifacts"]
     seed_turn = scenario["turns"][0]
-    assert seed_turn["send"].startswith('!uv --project "$PYTHONPATH" run --no-sync python -c')
+    assert seed_turn["send"].startswith(
+        '!uv --project "$KODER_SCENARIO_SOURCE_ROOT" run --no-sync python -c'
+    )
     assert "first prompt" in seed_turn["send"]
     assert "second prompt" in seed_turn["send"]
     assert "rewind-seed" not in seed_turn["send"]
@@ -4183,6 +4219,33 @@ def test_prelaunch_files_are_checked():
     assert any("prelaunch_file 1 needs content" in error for error in errors)
 
 
+def test_prelaunch_source_is_copied_from_repository(tmp_path):
+    home, repo = tmp_path / "home", tmp_path / "repo"
+    home.mkdir()
+    repo.mkdir()
+    ref = scenarios.ScenarioRef(
+        "features",
+        "mcp-fixture",
+        {
+            "prelaunch_files": [
+                {"path": "$REPO/peer.py", "source": "tests/fixtures/mcp_stdio_server.py"}
+            ]
+        },
+    )
+    scenarios._write_prelaunch_files(ref, home=home, repo=repo)
+    assert (repo / "peer.py").read_bytes() == (
+        scenarios.PROJECT_ROOT / "tests/fixtures/mcp_stdio_server.py"
+    ).read_bytes()
+
+
+def test_prelaunch_source_cannot_escape_repository():
+    import pytest
+
+    for path in ("/etc/passwd", "../outside.py", "AGENTS.md", ""):
+        with pytest.raises(ValueError):
+            scenarios._prelaunch_source(path)
+
+
 def test_fake_openai_fixture_is_checked():
     manifest = copy.deepcopy(_load_manifest(DEFAULT_MANIFEST))
     manifest["slash_commands"]["btw"]["fake_openai"] = {
@@ -4270,11 +4333,12 @@ def test_fixed_bottom_queued_input_scenario_uses_streaming_tool_fixture():
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19090/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "fixed-bottom-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19090,
+        "port": 0,
         "response": "final answer after queued input",
         "log_file": "$HOME/fake-openai-fixed-bottom-queue.log",
         "ready_file": "$HOME/fake-openai-fixed-bottom-queue.ready",
@@ -4379,11 +4443,12 @@ def test_fixed_bottom_error_history_scenario_uses_failing_stream_fixture():
     assert scenario["validation_level"] == "acceptance"
     assert scenario["env"] == {
         "KODER_MODEL": "openai/koder-fixture",
-        "KODER_BASE_URL": "http://127.0.0.1:19093/v1",
+        "KODER_CONTEXT_WINDOW": "128000",
+        "KODER_BASE_URL": "$FAKE_OPENAI_URL",
         "KODER_API_KEY": "fixed-bottom-error-secret-token",
     }
     assert scenario["fake_openai"] == {
-        "port": 19093,
+        "port": 0,
         "response": "fixture stream failure",
         "log_file": "$HOME/fake-openai-fixed-bottom-error.log",
         "ready_file": "$HOME/fake-openai-fixed-bottom-error.ready",
@@ -4413,7 +4478,7 @@ def test_fixed_bottom_idle_tip_scenario_checks_tip_with_prompt():
 
     assert scenario["validation_level"] == "acceptance"
     assert scenario["fake_openai"] == {
-        "port": 19091,
+        "port": 0,
         "response": "final answer after queued input",
         "log_file": "$HOME/fake-openai-fixed-bottom-tip.log",
         "ready_file": "$HOME/fake-openai-fixed-bottom-tip.ready",
@@ -4585,7 +4650,7 @@ def test_post_assertions_check_sqlite_state(tmp_path):
     database = home / ".koder" / "koder.db"
     database.parent.mkdir(parents=True)
     repo.mkdir()
-    with sqlite3.connect(database) as conn:
+    with closing(sqlite3.connect(database)) as conn, conn:
         conn.execute("create table session_metadata(session_id text, title text)")
         conn.execute("insert into session_metadata values (?, ?)", ("s1", "feature-session"))
     scenario = scenarios.ScenarioRef(
@@ -4683,7 +4748,9 @@ def test_kill_tmux_pane_matching_skips_leader_and_kills_worker(monkeypatch):
 
 
 def test_legacy_slash_shell_test_delegates_to_scenario_runner():
-    script = Path("tests/e2e/test_all_slash_commands.sh").read_text(encoding="utf-8")
+    script = (scenarios.PROJECT_ROOT / "tests/e2e/test_all_slash_commands.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert "tmux_feature_scenarios.py" in script
     assert "Testing all 119 commands" not in script

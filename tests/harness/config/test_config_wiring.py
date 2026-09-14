@@ -32,6 +32,33 @@ from koder_agent.harness.config.service import RuntimeConfigService
 from koder_agent.harness.permissions.modes import PermissionMode
 from koder_agent.harness.permissions.service import PermissionService
 
+
+def _isolate_brief_agent_factory(monkeypatch, tmp_path):
+    """Build the real agent without depending on a developer's provider setup."""
+    monkeypatch.chdir(tmp_path)
+    config = RuntimeConfigService(tmp_path / "config.yaml").load()
+    config.harness.brief_mode_enabled = False
+    monkeypatch.setattr("koder_agent.agentic.agent.get_config", lambda: config)
+    monkeypatch.setattr(
+        "koder_agent.agentic.agent.get_model_client_snapshot",
+        lambda _override: {
+            "model_name": "gpt-4.1",
+            "api_key": "synthetic-test-key",
+            "base_url": None,
+            "native_openai": False,
+            "litellm_kwargs": {
+                "model": "openai/gpt-4.1",
+                "api_key": "synthetic-test-key",
+                "base_url": None,
+                "extra_headers": {},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "koder_agent.agentic.agent.load_active_output_style_body", lambda _cwd: None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Bug 1 regression: permission_mode must flow from config to PermissionService
 # ---------------------------------------------------------------------------
@@ -171,6 +198,7 @@ class TestBriefModeWiring:
     @pytest.mark.asyncio
     async def test_brief_mode_injects_into_system_prompt(self, monkeypatch, tmp_path):
         """When brief mode is enabled, system prompt must contain brief instructions."""
+        _isolate_brief_agent_factory(monkeypatch, tmp_path)
         monkeypatch.setenv("KODER_BRIEF", "1")
         # Mock heavy dependencies to isolate prompt construction
         monkeypatch.setattr(
@@ -188,6 +216,7 @@ class TestBriefModeWiring:
     @pytest.mark.asyncio
     async def test_brief_mode_disabled_no_injection(self, monkeypatch, tmp_path):
         """When brief mode is disabled, system prompt must NOT contain brief instructions."""
+        _isolate_brief_agent_factory(monkeypatch, tmp_path)
         monkeypatch.delenv("KODER_BRIEF", raising=False)
         # Ensure config also has it disabled
         config_path = tmp_path / "config.yaml"

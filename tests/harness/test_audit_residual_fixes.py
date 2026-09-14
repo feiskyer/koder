@@ -228,11 +228,16 @@ class TestMcpRuntimeReconnectWiring:
             patch("koder_agent.core.scheduler.get_all_tools", return_value=[]),
             patch("koder_agent.core.scheduler.get_display_hooks"),
             patch("koder_agent.core.scheduler.ApprovalHooks"),
-            patch("koder_agent.core.scheduler.EnhancedSQLiteSession"),
+            patch("koder_agent.core.scheduler.EnhancedSQLiteSession") as session_type,
             patch("koder_agent.mcp.get_reconnection_managers", return_value={"srv": mgr}),
         ):
+            session_type.return_value.db_path = ":memory:"
+            session_type.return_value.session_id = "test"
             scheduler = AgentScheduler(session_id="test")
-            await scheduler._reconnect_unhealthy_mcp_servers()
+            try:
+                await scheduler._reconnect_unhealthy_mcp_servers()
+            finally:
+                await scheduler.cleanup()
 
         assert mgr.calls == 1
 
@@ -251,12 +256,17 @@ class TestMcpRuntimeReconnectWiring:
             patch("koder_agent.core.scheduler.get_all_tools", return_value=[]),
             patch("koder_agent.core.scheduler.get_display_hooks"),
             patch("koder_agent.core.scheduler.ApprovalHooks"),
-            patch("koder_agent.core.scheduler.EnhancedSQLiteSession"),
+            patch("koder_agent.core.scheduler.EnhancedSQLiteSession") as session_type,
             patch("koder_agent.mcp.get_reconnection_managers", return_value={"srv": _BadMgr()}),
         ):
+            session_type.return_value.db_path = ":memory:"
+            session_type.return_value.session_id = "test"
             scheduler = AgentScheduler(session_id="test")
-            # Must not raise.
-            await scheduler._reconnect_unhealthy_mcp_servers()
+            try:
+                # Must not raise.
+                await scheduler._reconnect_unhealthy_mcp_servers()
+            finally:
+                await scheduler.cleanup()
 
     @pytest.mark.asyncio
     async def test_turn_invokes_reconnect_probe(self):
@@ -269,8 +279,10 @@ class TestMcpRuntimeReconnectWiring:
             patch("koder_agent.core.scheduler.get_all_tools", return_value=[]),
             patch("koder_agent.core.scheduler.get_display_hooks"),
             patch("koder_agent.core.scheduler.ApprovalHooks"),
-            patch("koder_agent.core.scheduler.EnhancedSQLiteSession"),
+            patch("koder_agent.core.scheduler.EnhancedSQLiteSession") as session_type,
         ):
+            session_type.return_value.db_path = ":memory:"
+            session_type.return_value.session_id = "test"
             scheduler = AgentScheduler(session_id="test")
             scheduler._ensure_agent_initialized = AsyncMock()
             scheduler._reconnect_unhealthy_mcp_servers = AsyncMock()
@@ -279,9 +291,12 @@ class TestMcpRuntimeReconnectWiring:
             scheduler._repair_unreplayable_session_items = AsyncMock(
                 side_effect=RuntimeError("stop here")
             )
-            with pytest.raises(RuntimeError, match="stop here"):
-                await scheduler._run_turn_unlocked("hi", render_output=False)
-            scheduler._reconnect_unhealthy_mcp_servers.assert_awaited_once()
+            try:
+                with pytest.raises(RuntimeError, match="stop here"):
+                    await scheduler._run_turn_unlocked("hi", render_output=False)
+                scheduler._reconnect_unhealthy_mcp_servers.assert_awaited_once()
+            finally:
+                await scheduler.cleanup()
 
 
 # ---------------------------------------------------------------------------

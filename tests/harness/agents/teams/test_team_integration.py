@@ -1,7 +1,6 @@
 """Integration tests for tmux backend and permission bridge wired into team system."""
 
 import asyncio
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -130,10 +129,9 @@ class TestBackwardCompatibility:
         assert resolve_teammate_execution_mode("in-process") == "in-process"
         assert resolve_teammate_execution_mode("tmux") == "tmux"
 
-    def test_team_service_works_without_backend(self):
+    def test_team_service_works_without_backend(self, tmp_path):
         """TeamService should work without explicit backend parameter."""
-        root = Path(__file__).parent / ".tmp-integration-test"
-        service = TeamService.for_test(root=root)
+        service = TeamService.for_test(root=tmp_path)
         team_id = service.create_team("test-team")
         assert team_id is not None
         service.delete_team(team_id)

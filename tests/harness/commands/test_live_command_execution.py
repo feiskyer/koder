@@ -3,10 +3,12 @@ import json
 import os
 import sqlite3
 import subprocess
+from contextlib import ExitStack, closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
 from agents.models.chatcmpl_converter import Converter
 
 from koder_agent.config import reset_config_manager
@@ -20,6 +22,19 @@ from koder_agent.harness.permissions.modes import PermissionMode
 from koder_agent.harness.permissions.service import PermissionService
 from koder_agent.harness.plugins.lifecycle import PluginLifecycleService
 from koder_agent.harness.tasks.service import TaskService
+
+
+@pytest.fixture
+def session_factory():
+    """Own only Sessions explicitly created by these tests, not production probes."""
+    with ExitStack() as cleanup:
+
+        def create(*args, **kwargs):
+            session = EnhancedSQLiteSession(*args, **kwargs)
+            cleanup.callback(session.close)
+            return session
+
+        yield create
 
 
 def _run(command: str, *, handler: HarnessInteractiveCommandHandler) -> str:
@@ -39,9 +54,11 @@ class _ResettableScheduler(SimpleNamespace):
         self._agent_initialized = False
 
 
-def test_live_color_command_sets_resets_and_persists_session_color(tmp_path, monkeypatch):
+def test_live_color_command_sets_resets_and_persists_session_color(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("color-session")
+    session = session_factory("color-session")
     scheduler = SimpleNamespace(session=session)
     handler = HarnessInteractiveCommandHandler(emit_console=False)
 
@@ -58,7 +75,7 @@ def test_live_color_command_sets_resets_and_persists_session_color(tmp_path, mon
 
     assert set_output == "Session color set to: red"
     assert asyncio.run(session.get_color()) == "red"
-    assert asyncio.run(EnhancedSQLiteSession("color-session").get_color()) == "red"
+    assert asyncio.run(session_factory("color-session").get_color()) == "red"
     assert "color: red" in session_output
     assert "color: red" in style_output
 
@@ -67,7 +84,7 @@ def test_live_color_command_sets_resets_and_persists_session_color(tmp_path, mon
 
     assert reset_output == "Session color reset to default"
     assert asyncio.run(session.get_color()) is None
-    assert asyncio.run(EnhancedSQLiteSession("color-session").get_color()) is None
+    assert asyncio.run(session_factory("color-session").get_color()) is None
     assert "color: default" in style_output
 
 
@@ -130,9 +147,11 @@ def test_theme_command_persists_valid_theme_and_rejects_invalid_theme(tmp_path, 
     assert "theme: adaptive" in reset_output
 
 
-def test_output_style_resets_all_style_controls_and_persists_state(tmp_path, monkeypatch):
+def test_output_style_resets_all_style_controls_and_persists_state(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("output-style-session")
+    session = session_factory("output-style-session")
     scheduler = SimpleNamespace(session=session)
     handler = HarnessInteractiveCommandHandler(emit_console=False)
 
@@ -210,13 +229,15 @@ def test_version_command_reports_runtime_source_build_and_cli_banner(monkeypatch
     assert "python:" not in output
 
 
-def test_live_resume_resolves_existing_sessions_and_rejects_missing_targets(tmp_path, monkeypatch):
+def test_live_resume_resolves_existing_sessions_and_rejects_missing_targets(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path))
     handler = HarnessInteractiveCommandHandler(emit_console=False)
-    current = EnhancedSQLiteSession("resume-current")
-    target = EnhancedSQLiteSession("resume-target")
-    duplicate_one = EnhancedSQLiteSession("resume-duplicate-one")
-    duplicate_two = EnhancedSQLiteSession("resume-duplicate-two")
+    current = session_factory("resume-current")
+    target = session_factory("resume-target")
+    duplicate_one = session_factory("resume-duplicate-one")
+    duplicate_two = session_factory("resume-duplicate-two")
     asyncio.run(target.set_title("resume-title"))
     asyncio.run(duplicate_one.set_title("duplicate-title"))
     asyncio.run(duplicate_two.set_title("duplicate-title"))
@@ -233,14 +254,14 @@ def test_live_resume_resolves_existing_sessions_and_rejects_missing_targets(tmp_
     assert "Found 2 sessions matching duplicate-title" in duplicate
 
 
-def test_live_backfill_sessions_migrates_legacy_ctx_rows(tmp_path, monkeypatch):
+def test_live_backfill_sessions_migrates_legacy_ctx_rows(tmp_path, monkeypatch, session_factory):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("backfill-current")
+    session = session_factory("backfill-current")
     scheduler = SimpleNamespace(session=session)
     handler = HarnessInteractiveCommandHandler(emit_console=False)
     db_path = Path(session.db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute("create table ctx (sid text primary key, msgs text, title text)")
         conn.execute(
             "insert into ctx values (?, ?, ?)",
@@ -262,8 +283,8 @@ def test_live_backfill_sessions_migrates_legacy_ctx_rows(tmp_path, monkeypatch):
     assert "legacy-title" in first
     assert "migrated: 0" in second
     assert resume_output == "session_switch:legacy-session"
-    assert asyncio.run(EnhancedSQLiteSession("legacy-session").get_title()) == "legacy-title"
-    with sqlite3.connect(db_path) as conn:
+    assert asyncio.run(session_factory("legacy-session").get_title()) == "legacy-title"
+    with closing(sqlite3.connect(db_path)) as conn:
         assert conn.execute("select migrated_sessions from migration_status").fetchone()[0] == 1
 
 
@@ -317,8 +338,8 @@ def test_live_branch_command_reports_dirty_state_and_creates_branches(tmp_path, 
     assert "action: switched" in switched_output
 
 
-def test_live_rewind_help_is_available_without_history(tmp_path):
-    session = EnhancedSQLiteSession("rewind-help-session", db_path=str(tmp_path / "koder.db"))
+def test_live_rewind_help_is_available_without_history(tmp_path, session_factory):
+    session = session_factory("rewind-help-session", db_path=str(tmp_path / "koder.db"))
     scheduler = SimpleNamespace(session=session)
     handler = HarnessInteractiveCommandHandler(emit_console=False)
 
@@ -329,8 +350,8 @@ def test_live_rewind_help_is_available_without_history(tmp_path):
     assert "both" in help_output
 
 
-def test_live_rewind_lists_trim_counts_and_reports_removed_items(tmp_path):
-    session = EnhancedSQLiteSession("rewind-count-session", db_path=str(tmp_path / "koder.db"))
+def test_live_rewind_lists_trim_counts_and_reports_removed_items(tmp_path, session_factory):
+    session = session_factory("rewind-count-session", db_path=str(tmp_path / "koder.db"))
     asyncio.run(
         session.add_items(
             [
@@ -357,9 +378,7 @@ def test_live_rewind_lists_trim_counts_and_reports_removed_items(tmp_path):
     assert "Removed transcript items: 2" in result
     assert "Restored input: second prompt" in result
     remaining = asyncio.run(
-        EnhancedSQLiteSession(
-            "rewind-count-session", db_path=str(tmp_path / "koder.db")
-        ).get_items()
+        session_factory("rewind-count-session", db_path=str(tmp_path / "koder.db")).get_items()
     )
     assert remaining == [
         {"role": "user", "content": "first prompt"},
@@ -671,9 +690,9 @@ def test_help_command_uses_registry_descriptions_without_execute_placeholders():
     assert missing_output == "help: unknown command /nope\nUse /help to list commands."
 
 
-def test_local_semantic_gap_commands_are_runtime_backed(tmp_path, monkeypatch):
+def test_local_semantic_gap_commands_are_runtime_backed(tmp_path, monkeypatch, session_factory):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("semantic-gap-session", db_path=str(tmp_path / "koder.db"))
+    session = session_factory("semantic-gap-session", db_path=str(tmp_path / "koder.db"))
     asyncio.run(
         session.add_items(
             [
@@ -728,9 +747,9 @@ def test_local_semantic_gap_commands_are_runtime_backed(tmp_path, monkeypatch):
     assert "diff_evidence:" in bughunter_output
 
 
-def test_insights_command_reports_session_counts(tmp_path, monkeypatch):
+def test_insights_command_reports_session_counts(tmp_path, monkeypatch, session_factory):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("insights-session", db_path=str(tmp_path / "koder.db"))
+    session = session_factory("insights-session", db_path=str(tmp_path / "koder.db"))
     asyncio.run(
         session.add_items(
             [
@@ -999,10 +1018,12 @@ def test_bughunter_reports_diff_evidence_and_clean_edge(tmp_path, monkeypatch):
     assert "diff_evidence:\nnone" in clean_output
 
 
-def test_debug_tool_call_redacts_sensitive_arguments_and_outputs(tmp_path, monkeypatch):
+def test_debug_tool_call_redacts_sensitive_arguments_and_outputs(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OPENAI_API_KEY", "debug-secret-value-12345")
-    session = EnhancedSQLiteSession("debug-tool-session")
+    session = session_factory("debug-tool-session")
     asyncio.run(
         session.add_items(
             [
@@ -1059,14 +1080,16 @@ def test_debug_tool_call_redacts_sensitive_arguments_and_outputs(tmp_path, monke
     assert "debug-secret-value-12345" not in output_detail
 
 
-def test_local_setup_and_diagnostic_gap_commands_are_runtime_backed(tmp_path, monkeypatch):
+def test_local_setup_and_diagnostic_gap_commands_are_runtime_backed(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "AGENTS.md").write_text("# Fixture\n", encoding="utf-8")
     monkeypatch.chdir(repo)
 
-    session = EnhancedSQLiteSession("setup-gap-session", db_path=str(tmp_path / "koder.db"))
+    session = session_factory("setup-gap-session", db_path=str(tmp_path / "koder.db"))
     scheduler = SimpleNamespace(session=session)
     handler = HarnessInteractiveCommandHandler(emit_console=False)
 
@@ -1138,7 +1161,9 @@ def test_init_command_generates_local_agents_md_and_refuses_overwrite(tmp_path, 
     assert agents_md.read_text(encoding="utf-8") == content
 
 
-def test_advisor_command_runs_local_review_with_current_session_and_repo(tmp_path, monkeypatch):
+def test_advisor_command_runs_local_review_with_current_session_and_repo(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path))
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1170,7 +1195,7 @@ def test_advisor_command_runs_local_review_with_current_session_and_repo(tmp_pat
     tracked.write_text("def auth(user_input):\n    return user_input\n", encoding="utf-8")
     monkeypatch.chdir(repo)
 
-    session = EnhancedSQLiteSession("advisor-live-session", db_path=str(tmp_path / "koder.db"))
+    session = session_factory("advisor-live-session", db_path=str(tmp_path / "koder.db"))
     asyncio.run(
         session.add_items(
             [
@@ -1227,9 +1252,11 @@ def test_buddy_command_hatches_and_pets_companion(tmp_path, monkeypatch):
     assert pet.startswith("buddy: pet")
 
 
-def test_ctx_viz_command_reports_session_snapshot_when_scheduler_present(tmp_path, monkeypatch):
+def test_ctx_viz_command_reports_session_snapshot_when_scheduler_present(
+    tmp_path, monkeypatch, session_factory
+):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("ctx-viz-session", db_path=str(tmp_path / "koder.db"))
+    session = session_factory("ctx-viz-session", db_path=str(tmp_path / "koder.db"))
     asyncio.run(
         session.add_items(
             [
@@ -1303,9 +1330,9 @@ def test_sandbox_command_reports_managed_policy_lock(tmp_path, monkeypatch):
     assert "policy_locked: true" in toggle_output
 
 
-def test_env_command_persists_session_scoped_variables(tmp_path, monkeypatch):
+def test_env_command_persists_session_scoped_variables(tmp_path, monkeypatch, session_factory):
     monkeypatch.setenv("HOME", str(tmp_path))
-    session = EnhancedSQLiteSession("env-session")
+    session = session_factory("env-session")
     scheduler = SimpleNamespace(session=session)
     handler = HarnessInteractiveCommandHandler(emit_console=False)
 
@@ -1462,8 +1489,10 @@ def test_statusline_command_uses_setup_agent_for_natural_language_requests(monke
     assert captured["prompt"] == "show model name and context percentage"
 
 
-def test_btw_command_uses_session_context_without_mutating_history(tmp_path, monkeypatch):
-    session = EnhancedSQLiteSession("btw-session", db_path=str(tmp_path / "koder.db"))
+def test_btw_command_uses_session_context_without_mutating_history(
+    tmp_path, monkeypatch, session_factory
+):
+    session = session_factory("btw-session", db_path=str(tmp_path / "koder.db"))
     asyncio.run(
         session.add_items(
             [
@@ -2312,6 +2341,10 @@ def test_peers_mailbox_and_task_lifecycle_commands(tmp_path):
     consume_output = _run("/peers inbox task-team worker-a --consume", handler=handler)
     history_output = _run("/peers history task-team", handler=handler)
     create_task_output = _run("/peers task create task-team check mailbox", handler=handler)
+    rejected_claim = _run("/peers task claim task-team 1 worker-a", handler=handler)
+    assert "success: False" in rejected_claim
+    assert "inactive_member" in rejected_claim
+    team_service.add_member("task-team", "worker-a", name="worker-a")
     claim_output = _run("/peers task claim task-team 1 worker-a", handler=handler)
     task_list_output = _run("/peers task list task-team", handler=handler)
     complete_output = _run("/peers task complete task-team 1", handler=handler)

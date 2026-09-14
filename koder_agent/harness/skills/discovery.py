@@ -8,8 +8,9 @@ def discover_skills_for_paths(paths: list[str], known_dirs: set[str]) -> list[Pa
     """
     Scan file paths for new skill directories not already in known_dirs.
 
-    Walks up parent directories from each file path looking for .koder/skills/
-    directories. Returns only directories not already tracked in known_dirs.
+    Walks from a directory (or a file's parent) up to the nearest repository,
+    home, or filesystem root, inclusive. Preserves input and nearest-first
+    discovery order. Returns only directories not already tracked in known_dirs.
 
     Args:
         paths: List of file paths to scan
@@ -21,23 +22,26 @@ def discover_skills_for_paths(paths: list[str], known_dirs: set[str]) -> list[Pa
     if not paths:
         return []
 
-    discovered = set()
+    discovered = []
     # Normalize known_dirs to resolved paths for comparison
-    known_resolved = {str(Path(d).resolve()) for d in known_dirs}
+    known_resolved = {Path(d).resolve() for d in known_dirs}
+    home = Path.home().resolve()
 
     for file_path in paths:
         path = Path(file_path).resolve()
-
-        # Walk up parent directories
-        for parent in [path.parent] + list(path.parents):
+        parent = path if path.is_dir() else path.parent
+        while True:
             skills_dir = parent / ".koder" / "skills"
-            if skills_dir.exists() and skills_dir.is_dir():
+            if skills_dir.is_dir():
                 skills_dir_resolved = skills_dir.resolve()
-                skills_dir_str = str(skills_dir_resolved)
-                if skills_dir_str not in known_resolved and skills_dir_resolved not in discovered:
-                    discovered.add(skills_dir_resolved)
+                if skills_dir_resolved not in known_resolved:
+                    discovered.append(skills_dir_resolved)
+                    known_resolved.add(skills_dir_resolved)
+            if parent == home or parent.parent == parent or (parent / ".git").exists():
+                break
+            parent = parent.parent
 
-    return list(discovered)
+    return discovered
 
 
 def activate_conditional_skills(skills: dict[str, object], file_path: str) -> list[str]:

@@ -6,6 +6,8 @@ token exchange, refresh, and revocation functionality.
 
 import base64
 import hashlib
+import math
+import numbers
 import secrets
 import time
 from abc import ABC, abstractmethod
@@ -67,16 +69,53 @@ class OAuthTokens:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OAuthTokens":
-        """Create from dictionary."""
+        """Validate a serialized record before it becomes runtime credentials.
+
+        Optional legacy nulls have explicit empty defaults. Reject malformed
+        types without including credential values in an exception message.
+        """
+        provider = data["provider"]
+        access_token = data["access_token"]
+        expires_at = data["expires_at"]
+        refresh_token = data.get("refresh_token")
+        refresh_token = "" if refresh_token is None else refresh_token
+        models = data.get("models")
+        models = [] if models is None else models
+        extra = data.get("extra")
+        extra = {} if extra is None else extra
+        email = data.get("email")
+        models_fetched_at = data.get("models_fetched_at")
+        for name, value in (("provider", provider), ("access_token", access_token)):
+            if not isinstance(value, str) or not value.strip():
+                raise TypeError(f"OAuth {name} must be a nonempty string")
+        if not isinstance(refresh_token, str):
+            raise TypeError("OAuth refresh_token must be a string")
+        if email is not None and not isinstance(email, str):
+            raise TypeError("OAuth email must be a string or null")
+        if not isinstance(models, list) or any(not isinstance(model, str) for model in models):
+            raise TypeError("OAuth models must be a list of strings")
+        if not isinstance(extra, dict):
+            raise TypeError("OAuth extra must be an object")
+        for name, value in (("expires_at", expires_at), ("models_fetched_at", models_fetched_at)):
+            if name == "models_fetched_at" and value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, numbers.Real):
+                raise TypeError(f"OAuth {name} must be a finite numeric timestamp")
+            try:
+                finite = math.isfinite(value)
+            except (OverflowError, ValueError):
+                finite = False
+            if not finite:
+                raise TypeError(f"OAuth {name} must be a finite numeric timestamp")
         return cls(
-            provider=data["provider"],
-            access_token=data["access_token"],
-            refresh_token=data["refresh_token"],
-            expires_at=data["expires_at"],
-            email=data.get("email"),
-            extra=data.get("extra", {}),
-            models=data.get("models", []),
-            models_fetched_at=data.get("models_fetched_at"),
+            provider=provider,
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            email=email,
+            extra=extra,
+            models=models,
+            models_fetched_at=models_fetched_at,
         )
 
 

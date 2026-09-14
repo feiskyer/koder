@@ -10,7 +10,7 @@ Use `uv tool install` for a clean command-line install:
 uv tool install koder
 ```
 
-Koder requires Python 3.10 or newer.
+Koder requires Python 3.11 or newer.
 
 For local development from this repository:
 
@@ -50,6 +50,23 @@ koder auth login antigravity
 koder auth list
 ```
 
+For the manual authorization-code flow, paste the entire displayed code,
+including any state suffix. A supplied state suffix must match the current
+login request; a mismatch is rejected before token exchange. Codes without a
+suffix retain the local-verifier compatibility path. Empty or closed input fails authentication.
+Timeout and cancellation release the input reader before the flow returns;
+they do not leave a background `input()` consuming later terminal input.
+
+GitHub Copilot device login also honors `--timeout`. It polls asynchronously,
+respects device-code expiry and slow-down responses, and rejects non-positive
+or non-finite deadlines. Cancellation during HTTP work closes the owned clients
+and does not start a background cache writer. The existing LiteLLM cache paths
+and file formats are retained.
+
+Once final cache publication has begun, cancellation waits for the file work
+to finish; the login may already have taken effect. Each cache file is replaced
+atomically, but the two files are not one transaction across process failure.
+
 After login, use the provider prefix in `KODER_MODEL`, for example `google/gemini-3-pro-preview`, `claude/claude-opus-4-5-20250514`, or `chatgpt/gpt-5.2`.
 
 See [Configuration Guide](configuration.md) for the full provider matrix.
@@ -63,6 +80,23 @@ Koder can be used in three common ways:
 | Interactive TUI | `koder` | You want normal coding work with streamed output, slash commands, shell mode, file mentions, and resume. |
 | Single prompt | `koder "summarize the current git diff"` | You know the task and want one recorded turn from your shell. |
 | Print mode | `koder --print "summarize"` | You want script-friendly output for automation or logs. |
+
+### Automation Results
+
+Main-agent prompts in single-prompt and print mode exit with `0` on success,
+`1` on a reported execution/preflight failure, and `130` on a reported
+cancellation. Returned failures in JSON or JSONL result records include
+`"is_error": true` and a numeric `exit_code`; successful result records keep their
+existing shape. Use these statuses rather than matching words in `result`.
+
+Foreground `!` shell commands preserve the child exit code (or `128 + signal`
+when terminated by a signal). Permission rejection and an empty shell command
+return `1`. A background launch returning `0` means it was accepted, not that
+the background work has finished.
+
+When a response fails `--json-schema` validation, print mode returns a JSON error
+record and exits with `1`. A failed or cancelled model turn is not validated as
+successful structured output, so its original diagnostic remains available.
 
 ## Start A Session
 

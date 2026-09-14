@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
+from agents.tool_context import ToolContext
 from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -74,28 +76,54 @@ def _build_tool_list() -> tuple[list[types.Tool], dict[str, Any]]:
 
 def create_mcp_server() -> Server:
     """Create and configure the MCP ``Server`` instance."""
-    server = Server("koder", version=_get_koder_version())
     mcp_tools, tool_map = _build_tool_list()
 
-    @server.list_tools()
     async def handle_list_tools() -> list[types.Tool]:
         return mcp_tools
 
-    @server.call_tool()
-    async def handle_call_tool(
-        name: str, arguments: dict[str, Any] | None
-    ) -> list[types.TextContent]:
+    async def handle_call_tool(name: str, arguments: dict[str, Any] | None) -> types.CallToolResult:
         koder_tool = tool_map.get(name)
         if koder_tool is None:
-            raise ValueError(f"Unknown tool: {name}")
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=f"Unknown tool: {name}")],
+                isError=True,
+            )
 
         try:
-            result = await koder_tool.on_invoke_tool(None, json.dumps(arguments or {}))
-            return [types.TextContent(type="text", text=str(result))]
+            raw_arguments = json.dumps(arguments or {})
+            context = ToolContext(
+                context=None,
+                tool_name=name,
+                tool_call_id=f"mcp-{uuid.uuid4().hex}",
+                tool_arguments=raw_arguments,
+            )
+            result = await koder_tool.on_invoke_tool(context, raw_arguments)
+            return types.CallToolResult(content=[types.TextContent(type="text", text=str(result))])
         except Exception as exc:
             logger.exception("Tool %s raised an error", name)
-            raise ValueError(f"Tool error: {exc}") from exc
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=f"Tool error: {exc}")],
+                isError=True,
+            )
 
+    if not hasattr(Server, "list_tools"):
+        # MCP 2 uses constructor-based registration and parsed request params.
+        async def on_list_tools(_context, _params):
+            return types.ListToolsResult(tools=mcp_tools)
+
+        async def on_call_tool(_context, params):
+            return await handle_call_tool(params.name, params.arguments)
+
+        return Server(
+            "koder",
+            version=_get_koder_version(),
+            on_list_tools=on_list_tools,
+            on_call_tool=on_call_tool,
+        )
+
+    server = Server("koder", version=_get_koder_version())
+    server.list_tools()(handle_list_tools)
+    server.call_tool()(handle_call_tool)
     return server
 
 

@@ -39,6 +39,19 @@ Inspect available skills:
 
 Invoke a manual skill by its command name when the skill exposes one, or ask Koder to use it in plain language.
 
+Subsequent `get_skill` calls refresh the merged cache when discovered skill files
+are added, removed, renamed or edited. The cache tracks each file's path,
+identity, size and timestamps, so a newer unrelated skill cannot hide those
+changes. Nested reference documents are not skill definitions and do not trigger
+this cache refresh. This is a filesystem-change check, not a content hash or an
+atomic snapshot of concurrent edits.
+
+Refreshing discovery does not recall instructions or restrictions already
+activated in an ongoing invocation. Later invocations load the current policy.
+The `paths` frontmatter field is retained as metadata; the runtime does not
+currently use it to automatically load a skill or activate its hooks or tool
+restrictions. Explicit/model-selected skill loading remains the activation path.
+
 ## Verifier Skills
 
 Use `/init-verifiers` to create project-local verifier skills:
@@ -64,6 +77,12 @@ koder plugin validate ./my-plugin
 koder plugin marketplace list
 ```
 
+Installing `name@marketplace` records the selected catalog and its source
+fingerprint alongside the installed plugin. That record survives enable/disable,
+upgrades and rollback; a direct local replacement does not inherit it. Repository
+caches are source-specific and are only updated when their configured Git origin
+matches the requested repository.
+
 Inside the TUI:
 
 ```bash
@@ -73,6 +92,11 @@ Inside the TUI:
 ```
 
 Use `--plugin-dir` for a session-only plugin directory while developing a plugin locally.
+
+The session overlay is bound to its scheduler: model-time skills, agent
+definitions, hooks and MCP discovery use the same directory as command discovery.
+Concurrent runtimes keep distinct roots, and a local override does not inherit
+the installed copy's marketplace authorization.
 
 ## MCP Servers
 
@@ -95,6 +119,23 @@ Repository-controlled MCP definitions, including inline `mcpServers` in project 
 
 See [Configuration Guide](configuration.md) for the YAML config format.
 
+### MCP form requests
+
+Connected servers can request a non-sensitive form. Koder supports text,
+integer, number, boolean, enum and string-array answers, and checks the submitted
+content against the requested JSON Schema before returning it. Arrays stay
+arrays; invalid enum input does not silently choose the first option.
+Invalid/unsupported responses are cancelled, including invalid hook-provided
+answers. Schema references cannot fetch remote documents.
+
+Form readers and hook dispatch are asynchronous. Concurrent form requests on
+the event loop share the terminal one at a time. EOF and Ctrl+C dismiss a form;
+task cancellation stops and joins its reader before propagating. Without an
+interactive terminal, an unanswered request is cancelled without consuming
+stdin. Configured `Elicitation` hooks can still provide schema-valid answers.
+Decline/cancel responses contain no submitted data. Unsupported URL-mode
+requests return `decline` without opening a browser.
+
 ## Channels
 
 Channels are MCP or plugin-backed session integrations enabled at startup:
@@ -112,7 +153,94 @@ Inspect active channel entries:
 /channels help
 ```
 
-`/channels` is read-only. It reports active entries and the supported startup forms.
+`/channels` is read-only. It reports active entries, the supported startup forms,
+and the current inbox's delivery counts, capacity, rejection count and path.
+
+Channel notifications are admitted only after the initialized server has been
+published, advertises the required capability, and remains enabled for the
+session. Events from retired connections or closed owners are discarded;
+ordinary non-channel MCP operations remain available.
+
+### Bounded channel delivery
+
+Admitted notifications are staged as private JSON files under
+`~/.koder/channel-inbox/run-*/`. Each running Koder instance owns a separate
+directory; it does not load another run's retained messages. Waiting payloads
+stay on disk, while memory holds only bounded entry descriptors. File I/O runs
+off the event loop and is joined before cancellation returns.
+
+The defaults are:
+
+| Setting | Environment variable | Default |
+| --- | --- | --- |
+| Retained message count | `KODER_CHANNEL_MAX_PENDING_MESSAGES` | 4,096 |
+| Retained serialized JSON bytes | `KODER_CHANNEL_MAX_PENDING_BYTES` | 64 MiB |
+| Single serialized JSON record | `KODER_CHANNEL_MAX_MESSAGE_BYTES` | 1 MiB |
+
+Limits must be positive integers; the single-record limit must not exceed the
+total byte limit. Reservations waiting for disk I/O and pending, running, failed,
+cancelled and interrupted records
+all occupy capacity until successfully handled. Filesystem allocation overhead,
+temporary staging and the final metadata manifest are additional to the JSON
+byte count. These limits bound the retained inbox, not the underlying MCP
+transport's decoding of an incoming frame.
+
+Capacity is reserved before waiting for the disk lock, so concurrent connections
+cannot accumulate unbounded staging buffers. Reserved admissions remain owned
+through receiver cancellation and are joined before inbox closure.
+
+Admission waits for local file publication, **not for the model to consume a
+message or free a queue slot**. This matters because channel notifications share
+the MCP receive path with ordinary responses. A full inbox rejects new work
+explicitly: warnings are rate-limited, but the rejection count and reasons remain
+available in status and the retained manifest. Storage failures stop further
+admission and are reported; they do not trigger an unbounded admission-task queue.
+Local disk latency still contributes to receive latency.
+
+The delivery states are visible in filenames and the retained manifest:
+
+- `pending`: staged but not handed to a turn.
+- `running`: handed off; a crash can leave its final outcome uncertain.
+- `failed` / `cancelled`: a turn did not complete successfully, including failures
+  rendered by the scheduler as text rather than raised as exceptions.
+- `interrupted`: runtime shutdown interrupted an in-flight delivery.
+
+Successfully handled records are removed. On orderly shutdown the runtime first
+unregisters admission, then cancels and joins its consumer and file operations.
+Unfinished records are retained with `manifest.json`, and the directory is
+reported. An entirely successful inbox is removed. Records contain the full
+incoming content in plaintext; new directories/files use private POSIX modes,
+not encryption or an operating-system sandbox.
+
+Retained messages are **not automatically replayed**. Review them explicitly
+before choosing to retry, since an interrupted turn may already have performed
+external actions. A staging log entry is not an acknowledgement that model work
+finished. The inbox preserves ordinary runtime/shutdown outcomes; it is not an
+exactly-once, crash-recovery or power-loss transaction across model actions.
+Retained archives across separate runs are not a global disk quota.
+
+Messages still target the conversation active when the consumer dispatches them,
+rather than pinning the conversation that happened to be active on receipt.
+
+The `plugin:team-chat@local` form requires an installer-owned receipt from the
+registered `local` marketplace. Its stored source fingerprint must still match
+the current registration. Legacy/local installations, malformed receipts and
+removed or rebound marketplace names do not silently gain this authorization.
+Reinstall from the registered marketplace to establish provenance, or use
+`server:<actual MCP name>` to explicitly enable that installed server.
+
+A plugin manifest or a `plugin:` prefix in a server name cannot establish this
+receipt. It identifies the configured installation source, not a publisher code
+signature or an operating-system security boundary.
+
+### Capability boundary
+
+Channel delivery does not enable remote tool approval. The permission-relay
+ID/callback helpers are standalone and have no production approval consumer;
+they do not authenticate a sender. Their registrations reject duplicate pending
+IDs and keep old unsubscribe handles from retiring new requests, but those
+properties alone are not an authorization protocol. Model tool calls still
+use the normal permission service and configured approval path.
 
 ## Magic Docs
 

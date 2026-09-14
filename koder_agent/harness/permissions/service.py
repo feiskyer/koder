@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..execution_context import (
+    execution_workspace_root,
+    get_execution_cwd,
+    scoped_execution_cwd,
+)
 from ..sandbox.enforcement import (
     autoapproval_blockers,
     backend_capability_digest,
@@ -30,10 +35,10 @@ from .rules import (
 )
 from .shell_classifier import (
     WRITE_REDIRECTION_PATTERN,
-    _tokenize_segments,
     classify_shell_command,
     normalize_segment_for_rule,
 )
+from .shell_segments import parse_shell_segments
 from .tool_arguments import (
     ToolArgumentError,
     extract_canonical_tool_target,
@@ -65,6 +70,13 @@ _COMMAND_SUBSTITUTION_MARKERS = ("$(", "`", "<(", ">(", "${")
 
 def _contains_command_substitution(command: str) -> bool:
     return any(marker in command for marker in _COMMAND_SUBSTITUTION_MARKERS)
+
+
+@dataclass(frozen=True)
+class _ShellRuleTarget:
+    raw: str
+    allow_normalized: str | None
+    deny_normalized: str | None
 
 
 @dataclass
@@ -230,41 +242,56 @@ class PermissionService:
     def _match_rule(self, tool_name: str, behavior: str, target: str | None) -> str | None:
         if not target:
             return None
+        targets = [target]
+        if tool_name in {"read_file", *FILE_WRITE_TOOLS}:
+            try:
+                path = Path(target).expanduser()
+                if not path.is_absolute():
+                    path = (scoped_execution_cwd() or self.workspace_root) / path
+                targets.append(str(path.resolve()))
+            except (OSError, RuntimeError, ValueError):
+                # Invalid paths are still rejected by the path/tool validators.
+                pass
         for rule_content in self.rules.get(tool_name, {}).get(behavior, []):
-            if match_permission_rule(parse_permission_rule(rule_content), target):
+            rule = parse_permission_rule(rule_content)
+            if any(match_permission_rule(rule, candidate) for candidate in targets):
                 return rule_content
         return None
 
+    def _path_workspace_root(self) -> Path:
+        # Sharing policy must not share cwd: concurrent agents keep the current
+        # permission rules, but authorize paths against their own workspace.
+        scoped = execution_workspace_root()
+        return scoped if scoped is not None else self.workspace_root
+
     @staticmethod
-    def _shell_segment_targets(command: str) -> list[tuple[str, str | None]] | None:
+    def _shell_segment_targets(command: str) -> list[_ShellRuleTarget] | None:
         """Split a shell command into per-segment rule targets.
 
-        Returns one ``(raw, normalized)`` pair per segment (using the same
-        quote-aware tokenizer as the classifier) so allow/deny rules are matched
+        Returns raw and separate allow/deny projections per segment, using the
+        classifier's quote-aware tokenizer, so allow/deny rules are matched
         against each command in a chain individually. This prevents an
         ``echo:*`` allow rule from matching ``echo hi; rm -rf ~`` and an
         ``rm:*`` deny rule from being skipped in ``ls && rm -rf x``.
 
-        ``raw`` is the whitespace-joined segment exactly as written (leading
-        ``VAR=val`` assignments and safe runner wrappers preserved). ``normalized``
-        is the effective inner command after stripping those leading assignments
-        and known command-runner wrappers (``env``/``timeout``/``nice``/...),
-        reusing the Wave-1 runner resolver; it is ``None`` when nothing was
-        stripped or the segment resolves to nothing concrete. Rule matching tries
-        both forms so a prefix rule like ``npm test:*`` generalizes across
-        ``FOO=bar npm test`` and ``env npm test --watch``.
-
-        Returns ``None`` when the command cannot be parsed (unbalanced quotes),
-        so callers fall back to whole-string matching + static classification.
+        Allow normalization preserves executable paths; conservative deny
+        normalization can additionally recognize basenames. Both reuse the
+        canonical runner resolver. Parsing failure returns ``None``: raw deny
+        rules can still veto, but no automatic allow is inferred.
         """
         if not command or not command.strip():
             return None
         try:
-            segments = _tokenize_segments(command)
+            segments = parse_shell_segments(command)
         except ValueError:
             return None
-        targets: list[tuple[str, str | None]] = [
-            (" ".join(tokens), normalize_segment_for_rule(tokens)) for tokens in segments if tokens
+        targets = [
+            _ShellRuleTarget(
+                raw=segment.raw,
+                allow_normalized=normalize_segment_for_rule(list(segment.tokens)),
+                deny_normalized=normalize_segment_for_rule(list(segment.tokens), for_deny=True),
+            )
+            for segment in segments
         ]
         return targets or None
 
@@ -282,25 +309,24 @@ class PermissionService:
         to the static classifier (see ``evaluate_tool_call``).
         """
         segment_targets = self._shell_segment_targets(command)
-        if segment_targets is None or len(segment_targets) <= 1:
-            # Single segment (or unparseable): keep the whole original command
-            # string as the raw form so quoting/spacing is preserved exactly, and
-            # normalize it too so a wrapped single command (``env npm test``) can
-            # still match a prefix allow rule. Single-segment raw behavior is
-            # identical to the pre-fix whole-string matching.
-            if target:
-                normalized = self._normalize_shell_target(command)
-                segment_targets = [(target, normalized)]
-            else:
-                segment_targets = []
+        parsed = segment_targets is not None
+        if segment_targets is None:
+            segment_targets = [_ShellRuleTarget(target, None, None)] if target else []
+        elif len(segment_targets) == 1 and target:
+            # Retain original quoting/spacing for the raw single-command match,
+            # using the already-computed projections rather than parsing again.
+            original = segment_targets[0]
+            segment_targets = [
+                _ShellRuleTarget(target, original.allow_normalized, original.deny_normalized)
+            ]
 
         # Deny takes precedence: any segment whose RAW or NORMALIZED form matches
         # a deny rule denies the whole command. Matching the normalized form too
         # only makes deny STRICTER — a wrapper (``env rm -rf x``) can never
         # smuggle its inner command past an ``rm`` deny.
-        for raw_segment, normalized_segment in segment_targets:
-            deny_rule = self._match_rule(tool_name, "deny", raw_segment) or self._match_rule(
-                tool_name, "deny", normalized_segment
+        for segment in segment_targets:
+            deny_rule = self._match_rule(tool_name, "deny", segment.raw) or self._match_rule(
+                tool_name, "deny", segment.deny_normalized
             )
             if deny_rule:
                 self.denial_log.record(tool_name, f"Denied by rule: {deny_rule}")
@@ -310,6 +336,9 @@ class PermissionService:
                     mode=self.mode,
                     matched_rule=deny_rule,
                 )
+
+        if not parsed:
+            return None
 
         # Command/process substitution smuggles an arbitrary inner command inside
         # an otherwise benign-looking segment: ``make $(rm -rf ~)`` still starts
@@ -330,14 +359,13 @@ class PermissionService:
             return None
 
         # Allow only when EVERY segment is individually allowed by a rule. A
-        # segment counts as allowed when its RAW or NORMALIZED form matches an
-        # allow rule, so a prefix rule like ``npm test:*`` generalizes across
-        # ``FOO=bar npm test`` and ``env npm test --watch`` without weakening the
-        # every-segment discipline.
+        # segment counts as allowed when its RAW or safe NORMALIZED form matches.
+        # Only known argument-preserving wrappers can borrow an inner allow;
+        # environment assignments and opaque runners retain their own identity.
         matched_rules: list[str] = []
-        for raw_segment, normalized_segment in segment_targets:
-            allow_rule = self._match_rule(tool_name, "allow", raw_segment) or self._match_rule(
-                tool_name, "allow", normalized_segment
+        for segment in segment_targets:
+            allow_rule = self._match_rule(tool_name, "allow", segment.raw) or self._match_rule(
+                tool_name, "allow", segment.allow_normalized
             )
             if not allow_rule:
                 matched_rules = []
@@ -351,26 +379,6 @@ class PermissionService:
                 matched_rule=matched_rules[0],
             )
         return None
-
-    @staticmethod
-    def _normalize_shell_target(command: str) -> str | None:
-        """Normalize a whole (single-segment) shell command for rule matching.
-
-        Tokenizes the command with the classifier's quote-aware tokenizer and
-        strips leading ``VAR=val`` assignments / safe runner wrappers via the
-        Wave-1 resolver, returning the effective inner command string (or
-        ``None`` when nothing is stripped or the command is unparseable). Used so
-        a single wrapped command still matches a prefix allow/deny rule.
-        """
-        try:
-            segments = _tokenize_segments(command)
-        except ValueError:
-            return None
-        # A single logical segment is expected here; if the tokenizer split it
-        # into several, this path is not used (multi-segment handling above).
-        if len(segments) != 1 or not segments[0]:
-            return None
-        return normalize_segment_for_rule(segments[0])
 
     def _apply_mode_override(
         self, result: PermissionEvaluationResult
@@ -449,8 +457,9 @@ class PermissionService:
         decision = evaluate_path_access(
             target,
             operation=operation,
-            workspace_root=self.workspace_root,
+            workspace_root=self._path_workspace_root(),
             additional_roots=self.additional_roots,
+            working_directory=scoped_execution_cwd(),
         )
         if decision.requires_approval and self.mode == PermissionMode.ACCEPT_EDITS:
             # acceptEdits only auto-approves an ordinary workspace write. A path
@@ -573,7 +582,7 @@ class PermissionService:
             classify_command = command
             if tool_name == "git_command":
                 classify_command = _normalize_git_command(command)
-            current_cwd = Path.cwd()
+            current_cwd = get_execution_cwd()
             state = resolve_sandbox_settings(current_cwd)
             excluded_from_sandbox = is_excluded_command(classify_command, cwd=current_cwd)
             decision = (

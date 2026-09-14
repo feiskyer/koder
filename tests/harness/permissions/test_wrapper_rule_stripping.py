@@ -1,17 +1,10 @@
 """Tests for allow/deny rule matching against wrapper-stripped shell targets.
 
-Covers the audit finding ``allow-deny-envvar-safewrapper-stripping``: a prefix
-allow rule such as ``npm test:*`` must generalize across environment-variable
-prefixes (``FOO=bar npm test``) and safe command-runner wrappers
-(``env npm test``, ``timeout 5 npm test``). Rule matching normalizes each shell
-segment down to its effective inner command (reusing the Wave-1 runner
-resolver) and matches rules against BOTH the raw and normalized forms.
-
-Critically, this generalization only makes ALLOW matching more permissive; it
-must NOT weaken DENY matching. A wrapper / env prefix can never smuggle its
-inner command past a deny rule (``env rm``/``FOO=1 rm`` still hit an ``rm``
-deny), and the Wave-1 per-segment allow(every)/deny(any) discipline stays
-intact.
+Known argument-preserving wrappers can inherit an inner allow rule. Environment
+assignments cannot: they may change executable lookup/loading, and quoted
+assignment-like names can be actual executables. Those calls require their own
+full-command authorization. Conservative deny projection still sees through
+recognized environment prefixes without granting positive trust.
 """
 
 from __future__ import annotations
@@ -51,16 +44,22 @@ def _hard_denied(result) -> bool:
 
 class TestNormalizeSegmentForRule:
     def test_strips_leading_env_assignment(self):
-        assert normalize_segment_for_rule(["FOO=bar", "npm", "test"]) == "npm test"
+        tokens = ["FOO=bar", "npm", "test"]
+        assert normalize_segment_for_rule(tokens, for_deny=True) == "npm test"
+        assert normalize_segment_for_rule(tokens) is None
 
     def test_strips_multiple_leading_assignments(self):
-        assert normalize_segment_for_rule(["FOO=1", "BAR=2", "npm", "test"]) == "npm test"
+        tokens = ["FOO=1", "BAR=2", "npm", "test"]
+        assert normalize_segment_for_rule(tokens, for_deny=True) == "npm test"
+        assert normalize_segment_for_rule(tokens) is None
 
     def test_strips_env_wrapper(self):
         assert normalize_segment_for_rule(["env", "npm", "test", "--watch"]) == "npm test --watch"
 
     def test_strips_env_wrapper_with_assignment(self):
-        assert normalize_segment_for_rule(["env", "FOO=bar", "npm", "test"]) == "npm test"
+        tokens = ["env", "FOO=bar", "npm", "test"]
+        assert normalize_segment_for_rule(tokens, for_deny=True) == "npm test"
+        assert normalize_segment_for_rule(tokens) is None
 
     def test_strips_timeout_wrapper_and_duration(self):
         assert normalize_segment_for_rule(["timeout", "5", "npm", "test"]) == "npm test"
@@ -81,19 +80,22 @@ class TestNormalizeSegmentForRule:
 
 
 # --------------------------------------------------------------------------- #
-# Target behavior: allow rules generalize across env prefix + safe wrappers    #
+# Target behavior: only argument-preserving wrappers inherit an inner allow   #
 # --------------------------------------------------------------------------- #
 
 
 class TestAllowRuleGeneralization:
     def test_env_assignment_prefix_auto_allowed(self):
-        """``npm test:*`` allow must auto-approve ``FOO=bar npm test``."""
+        """An assignment prefix needs its own authorization, not an inner allow."""
         service = PermissionService.default()
         service.add_rule("run_shell", "allow", "npm test:*")
 
         result = service.evaluate_tool_call("run_shell", {"command": "FOO=bar npm test"})
+        assert result.requires_approval
+        service.add_rule("run_shell", "allow", "FOO=bar npm test")
+        result = service.evaluate_tool_call("run_shell", {"command": "FOO=bar npm test"})
         assert _auto_allowed(result)
-        assert result.matched_rule == "npm test:*"
+        assert result.matched_rule == "FOO=bar npm test"
 
     def test_env_wrapper_auto_allowed(self):
         """``npm test:*`` allow must auto-approve ``env npm test --watch``."""
@@ -117,12 +119,18 @@ class TestAllowRuleGeneralization:
         service.add_rule("run_shell", "allow", "npm test:*")
 
         result = service.evaluate_tool_call("run_shell", {"command": "FOO=1 BAR=2 npm test"})
+        assert result.requires_approval
+        service.add_rule("run_shell", "allow", "FOO=1 BAR=2 npm test")
+        result = service.evaluate_tool_call("run_shell", {"command": "FOO=1 BAR=2 npm test"})
         assert _auto_allowed(result)
 
     def test_env_wrapper_with_assignment_auto_allowed(self):
         service = PermissionService.default()
         service.add_rule("run_shell", "allow", "npm test:*")
 
+        result = service.evaluate_tool_call("run_shell", {"command": "env FOO=bar npm test"})
+        assert result.requires_approval
+        service.add_rule("run_shell", "allow", "env FOO=bar npm test")
         result = service.evaluate_tool_call("run_shell", {"command": "env FOO=bar npm test"})
         assert _auto_allowed(result)
 

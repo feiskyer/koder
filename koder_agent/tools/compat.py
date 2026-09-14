@@ -15,6 +15,7 @@ from agents.tool import default_tool_error_function
 from agents.tool_context import ToolContext
 
 from ..core.display_context import tool_display_call_scope
+from ..harness.execution_context import capture_tool_directory, get_execution_cwd
 from .permission_context import (
     begin_tool_invocation,
     enforce_tool_permission,
@@ -326,7 +327,10 @@ def _wrap_none_context(tool: FunctionTool) -> FunctionTool:
                     tool_call_id=f"manual-{tool.name}",
                     tool_arguments=input_json,
                 )
-            with tool_display_call_scope(tool.name, getattr(ctx, "tool_call_id", None)):
+            with (
+                capture_tool_directory(),
+                tool_display_call_scope(tool.name, getattr(ctx, "tool_call_id", None)),
+            ):
                 argument_error = _validate_declared_tool_arguments(tool, input_json)
                 if argument_error is not None:
                     return _bound_tool_output(argument_error, max_chars)
@@ -364,12 +368,10 @@ def _dispatching_tool_error_function(ctx: Any, error: Exception) -> str:
         except (json.JSONDecodeError, TypeError):
             pass
     try:
-        from pathlib import Path
-
         from koder_agent.harness.hooks.runtime import dispatch_command_hooks
 
         dispatch_command_hooks(
-            cwd=Path.cwd(),
+            cwd=get_execution_cwd(),
             event_name="PostToolUseFailure",
             match_value=tool_name,
             payload={

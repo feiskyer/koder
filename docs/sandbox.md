@@ -34,7 +34,7 @@ Koder exposes six backend choices:
 
 | Backend | Use it when | Common requirement |
 |---|---|---|
-| `unix-local` | You want the default local sandbox on macOS or Linux-like hosts. | Built into `openai-agents`; macOS uses `/usr/bin/sandbox-exec`. |
+| `unix-local` | You want the local backend on macOS. | Requires `/usr/bin/sandbox-exec`. Koder marks this backend unavailable on Linux and other non-macOS hosts because the pinned backend does not provide kernel confinement there. |
 | `docker` | You want container-backed local execution. | Python `docker` package and a reachable Docker daemon. |
 | `cloudflare` | You want a Cloudflare-hosted sandbox. | `CLOUDFLARE_SANDBOX_WORKER_URL`, optional `CLOUDFLARE_SANDBOX_API_KEY`. |
 | `e2b` | You want an E2B-hosted sandbox. | `E2B_API_KEY`, optional `KODER_SANDBOX_E2B_TYPE`. |
@@ -66,7 +66,12 @@ Koder shows environment variable names and dependency hints, not secret values.
 | `settings_path` | The project-local settings file Koder writes when you run `/sandbox enable` or `/sandbox disable`. |
 | `backend_options` | The supported backend names. |
 
-When sandbox is enabled, Koder uses the configured backend. If that backend is unavailable, non-excluded foreground shell commands are denied instead of silently falling back to the normal local executor.
+When sandbox is enabled, Koder uses the configured backend. Availability alone
+does not prove that the backend enforces every requested policy. Missing
+guarantees require a separate, explicit degradation approval; a generic command
+approval does not accept those losses. If the backend is unavailable, host
+fallback is denied unless an exact, state-bound fallback approval is given.
+There is no silent fallback.
 
 ## What Is Sandboxed
 
@@ -78,12 +83,46 @@ These surfaces are still protected by permissions, but are not currently routed 
 |---|---|
 | File tools such as `read_file`, `write_file`, and `edit_file` | Permission and workspace-root checks. |
 | Background shell commands | Denied while sandbox is enabled. The denial message suggests running in the foreground, adding a `/sandbox exclude` rule, or `/sandbox disable`. |
-| PowerShell commands | Denied while sandbox is enabled. The denial message suggests adding a `/sandbox exclude` rule or `/sandbox disable`. |
+| PowerShell commands | No sandbox backend is used. While sandbox policy is enabled, host execution requires a separate, exact state-bound fallback approval in addition to ordinary tool authorization; otherwise it is blocked. |
 | MCP servers | Deliberately permission-only. MCP server processes are not routed through sandbox backends. |
 | Skills | Skill metadata is read normally. Helper shell commands only inherit sandboxing when they go through foreground `run_shell`. |
-| Agents and teams | Deliberately permission-only. Agent and teammate tool calls go through the same permission engine but are not routed through sandbox backends. |
+| Agent and teammate processes | The processes themselves are not sandboxed. Their foreground shell tool calls still use the same shell executor and configured sandbox policy; other tool surfaces retain their own permission checks. |
 
 Note that commands matched by a `/sandbox exclude` rule bypass these sandbox denials entirely and fall back to the normal permission flow.
+
+Explicit TUI `!` commands use the same shell executor, but the manual path does
+not supply a sandbox-degradation approver. If the selected backend needs
+degradation or host fallback, that command is blocked instead of silently
+accepting the missing guarantees. Inspect `/sandbox status` before changing the
+policy; a direct user command is not implicit consent to weaker confinement.
+
+## Request Cleanup And Outcomes
+
+Each foreground sandbox request owns its session from creation through context
+exit and provider deletion. SDK context exit can persist workspace state and
+close dependencies; provider deletion is a separate operation. Cancellation
+stops further command startup and waits for owned cleanup. Repeated cancellation
+does not detach deletion or interrupt an already-started context exit.
+
+Once a command has run, cleanup failure does not erase its output or actual
+command exit code. The overall shell result is still an error. In print mode,
+a successful command followed by failed cleanup exits Koder with code 1 and
+marks JSON/stream-JSON output as an error. An existing nonzero command exit code
+is retained. A completed sandbox command is not replayed on the host to recover
+from cleanup failure.
+
+Read the execution flags as lifecycle observations: `created` records that a
+session handle was returned, and `executed` records that command execution was
+attempted. They are not an exactly-once guarantee or evidence that cancellation
+undid completed effects. A provider that allocates a resource but fails before
+returning its handle may leave state Koder cannot confirm or delete.
+
+Provider deletion has one five-second timeout. The adapter cancels a timed-out
+delete and waits for it to settle; a noncooperating SDK operation can therefore
+outlast that timeout. Context exit also depends on the SDK completing its own
+cleanup. Koder does not promise forced cleanup after process death or for a
+provider that never returns. A reported cleanup failure means provider resources
+may remain; inspect that provider before retrying work with external effects.
 
 ## Configuration
 
@@ -131,7 +170,13 @@ The default protected metadata paths are:
 .codex
 ```
 
-Koder blocks direct write targets under those paths before starting a sandboxed command. Supported backends still provide the main outside-workspace boundary. On macOS, `unix-local` relies on `/usr/bin/sandbox-exec` to deny writes outside the workspace.
+Koder checks directly visible write targets under those paths before starting
+a sandboxed command. This preflight is best effort: scripts, indirect paths and
+filesystem changes after checking are not a race-free enforcement boundary.
+The selected backend must supply any required process/filesystem confinement.
+On macOS, `unix-local` uses `/usr/bin/sandbox-exec` for its write boundary, but
+Koder does not treat availability as proof of complete host, repository-sync,
+protected-subpath or network isolation.
 
 ## Network Policy
 
@@ -149,7 +194,9 @@ uv run scripts/sandbox_backend_smoke.py --backend unix-local --case protected-pa
 uv run scripts/sandbox_backend_smoke.py --all --skip-unconfigured
 ```
 
-A healthy local run proves that the backend can run `pwd`, write inside the workspace, block an escape write outside the workspace, and enforce timeouts.
+Inspect the result of each selected case: the suite includes `pwd`, workspace
+writes, escape attempts and timeout checks. A passing single case does not prove
+the others, and skipped or unconfigured cases are not passing runtime evidence.
 
 ## Troubleshooting
 
@@ -167,8 +214,11 @@ Common states:
 |---|---|---|
 | `backend_available: false` | The configured backend cannot run right now. | Install or configure that backend, or select another one with `/sandbox enable <backend>`. |
 | `backend_reason: unknown backend` | Settings request a backend id Koder does not know. | Change `sandbox.backend` to one listed by `/sandbox backends`. |
-| A mutating command is auto-allowed | Real sandbox execution is active and `autoAllowBashIfSandboxed` is true. | Set `autoAllowBashIfSandboxed` to false if you still want manual approval. |
+| A mutating command is auto-allowed | It may be allowed by ordinary permission rules. Sandbox-based auto-approval additionally requires proven host/workspace isolation, repository synchronization and every active policy guarantee. | Inspect the permission decision; neither `backend_available` nor `autoAllowBashIfSandboxed` alone grants approval. |
 | Hosted backend says dependencies or credentials are missing | The optional provider is not configured. | Install the named provider package, set the named environment variable, or use `unix-local`. |
 | Network domain lists do not block a local command | Domain filtering is policy-only for the selected backend. | Treat domain lists as status metadata until an enforcing backend or proxy is available. |
 
-When in doubt, use `unix-local` and confirm `/sandbox status` reports `backend_available: true`.
+Choose a backend for the guarantees the task needs. Confirm availability and
+the reported enforcement limits, and read any degradation/fallback approval
+before accepting it. The current backend registry does not claim all guarantees
+required for sandbox-based auto-approval.

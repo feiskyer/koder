@@ -5,17 +5,15 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import uuid
 from collections import Counter, defaultdict
+from contextlib import aclosing
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-import backoff
-import litellm
-from agents import Agent, ModelSettings
-from agents.extensions.models.litellm_model import LitellmModel
+from agents import Agent, ModelBehaviorError, ModelSettings
 from agents.items import ItemHelpers, ModelResponse, TResponseStreamEvent
 from agents.models._openai_shared import get_default_openai_client
 from agents.models.openai_chatcompletions import Converter as ChatCompletionsConverter
@@ -26,21 +24,31 @@ from agents.models.openai_responses import (
     OpenAIResponsesModel,
 )
 from agents.tracing import generation_span
-from agents.usage import Usage
+from agents.usage import model_usage_to_span_usage
 from agents.util._json import _to_dump_compatible
 from openai import AsyncOpenAI, omit
 from openai._models import construct_type
 from openai.types.shared import Reasoning
 from rich.console import Console
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_random_exponential,
+)
 
 from ..auth.tool_utils import clean_json_schema
 from ..config import get_config
 from ..harness.agents.definitions import get_agent_definitions
+from ..harness.execution_context import get_execution_cwd
 from ..harness.memory.budget import ContextPreflightError, estimate_model_request_preflight
 from ..harness.output_styles import load_active_output_style_body
 from ..harness.reasoning_display import normalize_reasoning_display_mode
+from ..litellm_cost_map import get_litellm
 from ..mcp import MCPServerSet, close_mcp_servers, load_mcp_servers
 from ..tools.skill import build_skills_metadata_prompt, discover_merged_skills
+from ..utils.async_tasks import run_sync_owned
 from ..utils.client import (
     GITHUB_COPILOT_HEADERS,
     LITELLM_RETRYABLE_ERRORS,
@@ -49,7 +57,16 @@ from ..utils.client import (
 )
 from ..utils.model_info import get_maximum_output_tokens, should_use_reasoning_param
 from ..utils.prompts import KODER_SYSTEM_PROMPT
+from .oauth_model import OAuthAwareLitellmModel
+from .responses_compat import (
+    check_responses_request_budget,
+    close_provider_stream,
+    present_request_value,
+    responses_usage,
+    terminal_response_error,
+)
 
+litellm = get_litellm()
 console = Console()
 logger = logging.getLogger(__name__)
 
@@ -69,7 +86,7 @@ class _MCPToolNameRecord:
 
 def _present_request_value(value: Any) -> Any:
     """Normalize SDK omission sentinels before request-budget estimation."""
-    return None if value is omit else value
+    return present_request_value(value)
 
 
 class PreflightOpenAIResponsesModel(OpenAIResponsesModel):
@@ -86,32 +103,11 @@ class PreflightOpenAIResponsesModel(OpenAIResponsesModel):
 
     def _build_response_create_kwargs(self, *args, **kwargs) -> dict[str, Any]:
         create_kwargs = super()._build_response_create_kwargs(*args, **kwargs)
-        reserve = _present_request_value(create_kwargs.get("max_output_tokens"))
-        if reserve is None:
-            reserve = get_maximum_output_tokens(
-                str(self.model),
-                max_context_size=self.context_window,
-            )
-
-        # Prompt references and provider extension bodies can contribute
-        # request-side context beyond the four primary Responses fields.
-        extra_payload = {
-            key: _present_request_value(create_kwargs.get(key))
-            for key in ("prompt", "extra_body", "context_management")
-            if _present_request_value(create_kwargs.get(key)) is not None
-        }
-        estimate = estimate_model_request_preflight(
+        check_responses_request_budget(
+            create_kwargs,
             context_window=self.context_window,
-            response_reserve=int(reserve),
-            instructions=_present_request_value(create_kwargs.get("instructions")),
-            input_items=_present_request_value(create_kwargs.get("input")),
-            tools=_present_request_value(create_kwargs.get("tools")),
-            response_format=_present_request_value(create_kwargs.get("text")),
-            extra_payload=extra_payload,
             model=str(self.model),
         )
-        if not estimate.fits:
-            raise ContextPreflightError(estimate, subject="Provider request")
         return create_kwargs
 
 
@@ -367,7 +363,7 @@ _BRIEF_MODE_INSTRUCTION = (
 def _log_api_error_on_retry(details):
     """Log user-friendly error messages before retry attempts.
 
-    Called by backoff decorator before each retry.
+    Called before a scheduled retry.
     """
     from ..agentic.api_errors import classify_api_error
 
@@ -396,7 +392,17 @@ def _log_api_error_on_retry(details):
         logger.error("API error (not retryable): %s", classified.user_message)
 
 
-class RetryingLitellmModel(LitellmModel):
+def _log_nonstream_api_retry(state: RetryCallState) -> None:
+    _log_api_error_on_retry(
+        {
+            "exception": state.outcome.exception() if state.outcome is not None else None,
+            "tries": state.attempt_number,
+            "max_tries": 3,
+        }
+    )
+
+
+class RetryingLitellmModel(OAuthAwareLitellmModel):
     """LitellmModel with backoff retry logic."""
 
     def __init__(self, *args, context_window: int | None = None, **kwargs) -> None:
@@ -422,46 +428,6 @@ class RetryingLitellmModel(LitellmModel):
             str(self.model),
             max_context_size=context_window,
         )
-
-    def _converted_chat_request(
-        self,
-        system_instructions: str | None,
-        input: str | list,
-        model_settings: ModelSettings,
-        tools: list,
-        handoffs: list,
-    ) -> tuple[list, list]:
-        preserve_thinking_blocks = bool(
-            getattr(model_settings, "reasoning", None) is not None
-            and getattr(getattr(model_settings, "reasoning", None), "effort", None) is not None
-        )
-        converted_messages = ChatCompletionsConverter.items_to_messages(
-            input,
-            base_url=getattr(self, "base_url", None),
-            preserve_thinking_blocks=preserve_thinking_blocks,
-            preserve_tool_output_all_content=True,
-            model=self.model,
-            should_replay_reasoning_content=getattr(
-                self,
-                "should_replay_reasoning_content",
-                None,
-            ),
-        )
-        if any(name in str(self.model).lower() for name in ["anthropic", "claude", "gemini"]):
-            converted_messages = self._fix_tool_message_ordering(converted_messages)
-        if "gemini" in str(self.model).lower():
-            converted_messages = self._convert_gemini_extra_content_to_provider_specific_fields(
-                converted_messages
-            )
-        if system_instructions:
-            converted_messages.insert(0, {"content": system_instructions, "role": "system"})
-        converted_tools = (
-            [ChatCompletionsConverter.tool_to_openai(tool) for tool in tools] if tools else []
-        )
-        converted_tools.extend(
-            ChatCompletionsConverter.convert_handoff_tool(handoff) for handoff in handoffs
-        )
-        return _to_dump_compatible(converted_messages), _to_dump_compatible(converted_tools)
 
     @staticmethod
     def _converted_responses_request(
@@ -509,7 +475,7 @@ class RetryingLitellmModel(LitellmModel):
 
     def _is_github_copilot(self) -> bool:
         """Check if the current model is using GitHub Copilot."""
-        return "github_copilot" in str(self.model).lower()
+        return str(self.model).lower().removeprefix("litellm/").startswith("github_copilot/")
 
     def _clean_tools_for_github_copilot(self, tools: list) -> list:
         """Clean tool schemas for GitHub Copilot compatibility.
@@ -543,7 +509,7 @@ class RetryingLitellmModel(LitellmModel):
         Route them through LiteLLM's Responses API instead.
         """
         model_lower = str(self.model).lower()
-        return "github_copilot/" in model_lower and "codex" in model_lower
+        return self._is_github_copilot() and "codex" in model_lower
 
     async def _fetch_responses_api(
         self,
@@ -569,14 +535,14 @@ class RetryingLitellmModel(LitellmModel):
             handoffs,
         )
 
-        if model_settings.parallel_tool_calls and tools:
-            parallel_tool_calls: bool | None = True
-        elif model_settings.parallel_tool_calls is False:
-            parallel_tool_calls = False
-        else:
-            parallel_tool_calls = None
-
-        tool_choice = ResponsesConverter.convert_tool_choice(model_settings.tool_choice)
+        parallel_tool_calls = (
+            model_settings.parallel_tool_calls
+            if converted_tools_payload or prompt is not None
+            else None
+        )
+        tool_choice = ResponsesConverter.convert_tool_choice(
+            model_settings.tool_choice, tools=tools, handoffs=handoffs
+        )
         if tool_choice is omit:
             tool_choice = None
 
@@ -629,21 +595,45 @@ class RetryingLitellmModel(LitellmModel):
             "extra_headers": self._merge_headers(model_settings),
             "extra_query": model_settings.extra_query,
             "extra_body": model_settings.extra_body,
-            **extra_args,
         }
+        for key in (
+            "store",
+            "prompt_cache_retention",
+            "prompt_cache_options",
+            "context_management",
+        ):
+            value = getattr(model_settings, key, None)
+            if value is not None:
+                aresponses_kwargs[key] = value
+        duplicate_keys = sorted(
+            key
+            for key in extra_args
+            if key in aresponses_kwargs
+            and present_request_value(aresponses_kwargs[key]) is not None
+        )
+        if duplicate_keys:
+            raise TypeError(
+                "Responses request received multiple values for: " + ", ".join(duplicate_keys)
+            )
+        aresponses_kwargs.update(extra_args)
         if self.api_key:
             aresponses_kwargs["api_key"] = self.api_key
         if self.base_url:
             aresponses_kwargs["base_url"] = self.base_url
 
+        check_responses_request_budget(
+            aresponses_kwargs,
+            context_window=self._effective_context_window(),
+            model=str(self.model),
+        )
         return await litellm.aresponses(**aresponses_kwargs)
 
-    @backoff.on_exception(
-        backoff.expo,
-        LITELLM_RETRYABLE_ERRORS,
-        max_tries=3,
-        jitter=backoff.full_jitter,
-        on_backoff=_log_api_error_on_retry,
+    @retry(
+        retry=retry_if_exception_type(LITELLM_RETRYABLE_ERRORS),
+        stop=stop_after_attempt(3),
+        wait=wait_random_exponential(multiplier=1),
+        before_sleep=_log_nonstream_api_retry,
+        reraise=True,
     )
     async def get_response(
         self,
@@ -660,16 +650,16 @@ class RetryingLitellmModel(LitellmModel):
     ) -> ModelResponse:
         # Clean tools for GitHub Copilot compatibility
         cleaned_tools = self._clean_tools_for_github_copilot(tools)
-        self._preflight_request(
-            system_instructions,
-            input,
-            model_settings,
-            cleaned_tools,
-            output_schema,
-            handoffs,
-        )
 
         if not self._should_use_responses_api():
+            self._preflight_request(
+                system_instructions,
+                input,
+                model_settings,
+                cleaned_tools,
+                output_schema,
+                handoffs,
+            )
             return await super().get_response(
                 system_instructions,
                 input,
@@ -701,21 +691,12 @@ class RetryingLitellmModel(LitellmModel):
                 prompt=prompt,
             )
 
-            response_usage = getattr(response, "usage", None)
-            if response_usage:
-                usage_kwargs: dict[str, Any] = {
-                    "requests": 1,
-                    "input_tokens": getattr(response_usage, "input_tokens", 0) or 0,
-                    "output_tokens": getattr(response_usage, "output_tokens", 0) or 0,
-                    "total_tokens": getattr(response_usage, "total_tokens", 0) or 0,
-                }
-                usage = Usage(**usage_kwargs)
-                span_generation.span_data.usage = {
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                }
-            else:
-                usage = Usage()
+            failure = terminal_response_error(response)
+            if failure is not None:
+                span_generation.set_error({"message": str(failure), "data": {}})
+                raise failure
+            usage = responses_usage(getattr(response, "usage", None))
+            span_generation.span_data.usage = model_usage_to_span_usage(usage)
 
             if tracing.include_data():
                 try:
@@ -729,6 +710,7 @@ class RetryingLitellmModel(LitellmModel):
             output=getattr(response, "output", []) or [],
             usage=usage,
             response_id=getattr(response, "id", None),
+            request_id=getattr(response, "_request_id", None),
         )
 
     async def _stream_via_responses_api(
@@ -767,45 +749,59 @@ class RetryingLitellmModel(LitellmModel):
                 prompt=prompt,
             )
 
-            final_response = None
-            async for chunk in stream:
-                if hasattr(chunk, "model_dump"):
-                    try:
-                        data = chunk.model_dump()
-                    except Exception:
+            yielded_terminal = False
+            failed = False
+            try:
+                async for chunk in stream:
+                    if hasattr(chunk, "model_dump"):
+                        try:
+                            data = chunk.model_dump()
+                        except Exception:
+                            data = chunk
+                    else:
                         data = chunk
-                else:
-                    data = chunk
 
-                if isinstance(data, dict):
-                    event_type = data.get("type")
-                    if hasattr(event_type, "value"):
-                        data["type"] = event_type.value
-                    elif not isinstance(event_type, str):
-                        data["type"] = str(event_type)
-                    event = construct_type(value=data, type_=TResponseStreamEvent)
-                else:
-                    event = chunk
+                    if isinstance(data, dict):
+                        data = dict(data)
+                        event_type = data.get("type")
+                        if hasattr(event_type, "value"):
+                            data["type"] = event_type.value
+                        elif not isinstance(event_type, str):
+                            data["type"] = str(event_type)
+                        event = construct_type(value=data, type_=TResponseStreamEvent)
+                    else:
+                        event = chunk
 
-                if getattr(event, "type", None) == "response.completed":
+                    event_type = getattr(event, "type", None)
                     final_response = getattr(event, "response", None)
-                yield event
-
-            if final_response is not None and getattr(final_response, "usage", None):
-                usage_obj = final_response.usage
-                span_generation.span_data.usage = {
-                    "input_tokens": getattr(usage_obj, "input_tokens", 0) or 0,
-                    "output_tokens": getattr(usage_obj, "output_tokens", 0) or 0,
-                }
-            if tracing.include_data() and final_response is not None:
-                try:
-                    span_generation.span_data.output = (
-                        [final_response.model_dump()]
-                        if hasattr(final_response, "model_dump")
-                        else [final_response]
+                    failure = terminal_response_error(final_response, event_type=event_type)
+                    yielded_terminal = failure is not None or event_type == "response.completed"
+                    if failure is not None:
+                        span_generation.set_error({"message": str(failure), "data": {}})
+                    elif event_type == "response.completed":
+                        usage = responses_usage(getattr(final_response, "usage", None))
+                        # Record before yielding: callers can close at the terminal event.
+                        span_generation.span_data.usage = model_usage_to_span_usage(usage)
+                        if tracing.include_data() and final_response is not None:
+                            span_generation.span_data.output = (
+                                [final_response.model_dump()]
+                                if hasattr(final_response, "model_dump")
+                                else [final_response]
+                            )
+                    yield event
+                    if failure is not None:
+                        raise failure
+                    if yielded_terminal:
+                        break
+                if not yielded_terminal:
+                    raise ModelBehaviorError(
+                        "Responses stream ended before a terminal response event."
                     )
-                except Exception:
-                    pass
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                await close_provider_stream(stream, suppress_errors=failed or yielded_terminal)
 
     async def stream_response(
         self,
@@ -822,11 +818,8 @@ class RetryingLitellmModel(LitellmModel):
     ):
         """Stream model output with retry-before-first-chunk semantics.
 
-        ``backoff.on_exception`` cannot wrap an async-generator function: it
-        only detects coroutine functions, so for an async generator it would
-        return the generator object without ever wrapping the iteration, and
-        retries would never fire. Instead we implement the retry loop manually
-        here.
+        Creating an async generator does not run its body. Keep retry ownership
+        around iteration itself, rather than decorating generator creation.
 
         A retryable error is only retried while NO chunk has been yielded
         downstream yet. Once any chunk has reached the consumer, retrying would
@@ -835,21 +828,18 @@ class RetryingLitellmModel(LitellmModel):
         """
         # Clean tools for GitHub Copilot compatibility
         cleaned_tools = self._clean_tools_for_github_copilot(tools)
-        self._preflight_request(
-            system_instructions,
-            input,
-            model_settings,
-            cleaned_tools,
-            output_schema,
-            handoffs,
-        )
+        if not self._should_use_responses_api():
+            self._preflight_request(
+                system_instructions,
+                input,
+                model_settings,
+                cleaned_tools,
+                output_schema,
+                handoffs,
+            )
 
         max_tries = 5
         attempt = 0
-        # backoff.expo yields 1, 2, 4, 8, ... seconds; full_jitter randomizes
-        # each wait within [0, value]. We mirror that timing manually.
-        wait_gen = backoff.expo()
-        next(wait_gen)  # prime the generator (first value is the base)
 
         while True:
             attempt += 1
@@ -881,9 +871,12 @@ class RetryingLitellmModel(LitellmModel):
                         prompt=prompt,
                     )
 
-                async for chunk in source:
-                    yielded_any = True
-                    yield chunk
+                # SDK generators own task-local tracing scopes. Closing them in
+                # the consuming task avoids delayed GC cleanup in a new context.
+                async with aclosing(source):
+                    async for chunk in source:
+                        yielded_any = True
+                        yield chunk
                 return
             except LITELLM_RETRYABLE_ERRORS as exc:
                 # Once any chunk has been emitted downstream, a retry would
@@ -897,7 +890,8 @@ class RetryingLitellmModel(LitellmModel):
                         "max_tries": max_tries,
                     }
                 )
-                wait = backoff.full_jitter(next(wait_gen))
+                # Same full-jitter ceilings as non-streaming retries: 1, 2, 4, 8.
+                wait = random.uniform(0, 2 ** (attempt - 1))
                 await asyncio.sleep(wait)
                 continue
 
@@ -914,7 +908,7 @@ def _get_skills_metadata(config) -> str:
         return "Skills are disabled."
 
     all_skills = discover_merged_skills(
-        cwd=Path.cwd(),
+        cwd=get_execution_cwd(),
         user_dir=config.skills.user_skills_dir,
         project_dir=config.skills.project_skills_dir,
     )
@@ -930,7 +924,7 @@ def _get_environment_info(model_name: str) -> str:
     import platform
     from datetime import date
 
-    cwd = Path.cwd()
+    cwd = get_execution_cwd()
     lines = [
         f"Working directory: {cwd}",
         f"Is a git repository: {'true' if (cwd / '.git').exists() else 'false'}",
@@ -947,7 +941,7 @@ def _get_agents_metadata() -> str:
     if os.environ.get("KODER_SIMPLE") == "1":
         return "Agents metadata is disabled in bare mode."
     try:
-        definitions = get_agent_definitions(cwd=Path.cwd())
+        definitions = get_agent_definitions(cwd=get_execution_cwd())
     except Exception:
         return "No agents are currently available."
 
@@ -1040,7 +1034,7 @@ async def create_dev_agent(
     _set_deferred_tools(all_deferred if tool_search_mode != "false" else None)
 
     model_override_value = None if model_override in (None, "", "inherit") else str(model_override)
-    model_client = get_model_client_snapshot(model_override_value)
+    model_client = await run_sync_owned(get_model_client_snapshot, model_override_value)
     effective_model_name = model_client["model_name"]
     context_window = model_client.get("context_window") or get_configured_context_window(
         effective_model_name
@@ -1054,11 +1048,10 @@ async def create_dev_agent(
     # request can bypass the per-provider-call preflight boundary.
     resolved_extra_headers = None
     if model_client["native_openai"]:
-        # Normal harness startup configures this shared client, preserving the
-        # exact native auth/base URL/transport settings previously used by a
-        # plain model string. The fallback also supports direct agent creation
-        # in tests and library callers that skip setup_openai_client().
-        native_client = get_default_openai_client()
+        # Reuse the configured client only for the inherited main model. An
+        # explicit override can resolve different credentials or an endpoint,
+        # which must not be replaced by the main model's shared client.
+        native_client = get_default_openai_client() if model_override_value is None else None
         if native_client is None:
             native_client = AsyncOpenAI(
                 api_key=model_client.get("api_key") or "sk-koder-unconfigured",
@@ -1137,7 +1130,7 @@ async def create_dev_agent(
     # already carry their own persona/instructions.
     if instructions_override is None:
         try:
-            persona_body = load_active_output_style_body(Path.cwd())
+            persona_body = load_active_output_style_body(get_execution_cwd())
         except Exception:
             persona_body = None
         if persona_body:

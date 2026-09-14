@@ -1,6 +1,6 @@
 # Koder
 
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PyPI Downloads](https://static.pepy.tech/badge/koder)](https://pepy.tech/projects/koder)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
@@ -83,7 +83,8 @@ uv sync
 uv run koder
 ```
 
-Requirements: Python 3.10 or newer and a model provider credential or subscription login.
+Requirements: Python 3.11 or newer and a model provider credential or subscription login.
+Python 3.10 is no longer supported; task cancellation relies on Python 3.11's asyncio APIs.
 
 ## Quick Start
 
@@ -347,15 +348,22 @@ Code quality and tests:
 
 ```bash
 uv run black . && uv run ruff format && uv run ruff check --fix
-uv run pytest
+uv run --frozen --no-env-file python scripts/run_isolated_tests.py -q
 ```
 
 Focused test examples:
 
 ```bash
-uv run pytest tests/test_file_tools.py
-uv run pytest -v -k "test_name"
+uv run --frozen --no-env-file python scripts/run_isolated_tests.py --test tests/test_file_tools.py -q
+uv run --frozen --no-env-file python scripts/run_isolated_tests.py -v -k "test_name"
 ```
+
+The isolated runner uses disposable application state, drops inherited provider
+credentials before collection, and guards ordinary Python child processes. It
+excludes real TUI and manual/live-provider tests; it is not an OS sandbox for
+untrusted code. See [test validation](CONTRIBUTING.md#isolated-test-validation)
+for result artifacts and exact boundaries, and
+[wheel validation](CONTRIBUTING.md#wheel-validation) for distribution checks.
 
 ## Security And Privacy
 

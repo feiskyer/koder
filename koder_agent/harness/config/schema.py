@@ -135,8 +135,12 @@ class RuntimeConfig(KoderConfig):
             harness_data = harness.model_dump()
         elif isinstance(harness, dict):
             harness_data = dict(harness)
-        else:
+        elif "harness" not in migrated:
             harness_data = {}
+        else:
+            # Let the declared field validate malformed input; only an absent
+            # section receives defaults.
+            return migrated
         if "auto_dream_write_mode" not in harness_data:
             for key in ("auto_dream_write_mode", "auto_dream_enabled", "auto_dream"):
                 if key in migrated:

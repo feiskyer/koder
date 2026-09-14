@@ -78,6 +78,9 @@ def test_execute_agent_run_publishes_permission_context(monkeypatch):
         def __init__(self, *a, **k):
             pass
 
+        def close(self):
+            pass
+
         async def get_items(self):
             return []
 
@@ -123,6 +126,9 @@ def test_execute_agent_run_context_resets_after_run(monkeypatch):
 
     class _FakeSession:
         def __init__(self, *a, **k):
+            pass
+
+        def close(self):
             pass
 
         async def get_items(self):
@@ -187,6 +193,9 @@ def test_parallel_subagents_receive_isolated_todo_runtime_scopes(monkeypatch):
     class _FakeSession:
         def __init__(self, session_id, *args, **kwargs):
             self.session_id = session_id
+
+        def close(self):
+            pass
 
         async def get_items(self):
             return []
@@ -310,6 +319,9 @@ def test_subagent_uses_deny_approver_not_fail_open_none(monkeypatch):
         def __init__(self, *a, **k):
             pass
 
+        def close(self):
+            pass
+
         async def get_items(self):
             return []
 
@@ -362,6 +374,9 @@ def test_subagent_falls_back_to_inherited_service_when_none_passed(monkeypatch):
 
     class _FakeSession:
         def __init__(self, *a, **k):
+            pass
+
+        def close(self):
             pass
 
         async def get_items(self):

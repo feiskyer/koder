@@ -16,16 +16,16 @@ if str(project_root) not in sys.path:
 from koder_agent.harness.agents.teams import TeamService
 
 
-def test_team_service_can_create_delete_and_route_messages():
-    service = TeamService.for_test(root=Path.cwd() / ".tmp-team-service" / ".koder")
+def test_team_service_can_create_delete_and_route_messages(tmp_path):
+    service = TeamService.for_test(root=tmp_path / ".koder")
     team_id = service.create_team("reviewers")
     service.route(team_id, "sync")
     assert service.read_mailbox(team_id)[0].content == "sync"
     service.delete_team(team_id)
 
 
-def test_team_membership_changes_are_preserved():
-    service = TeamService.for_test(root=Path.cwd() / ".tmp-team-members" / ".koder")
+def test_team_membership_changes_are_preserved(tmp_path):
+    service = TeamService.for_test(root=tmp_path / ".koder")
     team_id = service.create_team("reviewers")
     service.add_member(team_id, "agent-1")
     assert "agent-1" in service.members(team_id)

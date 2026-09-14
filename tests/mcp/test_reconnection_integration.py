@@ -427,7 +427,10 @@ async def test_extra_mcp_factory_cleans_completed_servers_when_cancelled():
 
 
 @pytest.mark.asyncio
-async def test_load_mcp_servers_preserves_initial_cancel_and_clears_managers(monkeypatch):
+async def test_load_mcp_servers_preserves_initial_cancel_and_clears_managers(
+    monkeypatch, cancellation_observer
+):
+    observe, cancellations = cancellation_observer
     config = MCPServerConfig(
         name="stale-manager",
         transport_type=MCPServerType.STDIO,
@@ -486,7 +489,7 @@ async def test_load_mcp_servers_preserves_initial_cancel_and_clears_managers(mon
     monkeypatch.setattr(mcp_module, "_load_plugin_mcp_configs", lambda: [])
     monkeypatch.setattr("koder_agent.harness.channels.state.get_allowed_channels", lambda: [])
 
-    load_task = asyncio.create_task(mcp_module.load_mcp_servers())
+    load_task = asyncio.create_task(observe(mcp_module.load_mcp_servers()))
     try:
         await asyncio.wait_for(prompt_discovery_started.wait(), timeout=1)
         assert len(owners) == 1
@@ -499,9 +502,8 @@ async def test_load_mcp_servers_preserves_initial_cancel_and_clears_managers(mon
         await asyncio.sleep(0)
         cleanup_release.set()
 
-        with pytest.raises(asyncio.CancelledError) as caught:
+        with pytest.raises(asyncio.CancelledError):
             await load_task
-        cancel_args = caught.value.args
         manager_keys_after = list(managers)
     finally:
         cleanup_release.set()
@@ -511,12 +513,15 @@ async def test_load_mcp_servers_preserves_initial_cancel_and_clears_managers(mon
 
     assert cleanup_calls == 1
     assert cleanup_completed == 1
-    assert cancel_args == ("initial-load-cancel",)
+    assert [error.args for error in cancellations] == [("initial-load-cancel",)]
     assert manager_keys_after == []
 
 
 @pytest.mark.asyncio
-async def test_extra_mcp_factory_transfers_failed_server_before_cleanup_cancellation():
+async def test_extra_mcp_factory_transfers_failed_server_before_cleanup_cancellation(
+    cancellation_observer,
+):
+    observe, cancellations = cancellation_observer
     config = MCPServerConfig(
         name="failed-server",
         transport_type=MCPServerType.STDIO,
@@ -548,19 +553,21 @@ async def test_extra_mcp_factory_transfers_failed_server_before_cleanup_cancella
         return server
 
     with patch.object(MCPServerFactory, "create_server", mock_create_server):
-        construction = asyncio.create_task(MCPServerFactory.create_servers_from_configs([config]))
+        construction = asyncio.create_task(
+            observe(MCPServerFactory.create_servers_from_configs([config]))
+        )
         await asyncio.wait_for(cleanup_started.wait(), timeout=1)
         construction.cancel("cancel-during-error-cleanup")
         await asyncio.sleep(0)
         cleanup_release.set()
 
-        with pytest.raises(asyncio.CancelledError) as caught:
+        with pytest.raises(asyncio.CancelledError):
             await construction
 
     await drain_orphaned_retirements()
     assert cleanup_calls == 1
     assert cleanup_completed == 1
-    assert caught.value.args == ("cancel-during-error-cleanup",)
+    assert [error.args for error in cancellations] == [("cancel-during-error-cleanup",)]
 
 
 @pytest.mark.asyncio

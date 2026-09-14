@@ -1,9 +1,9 @@
 """Tool orchestration helpers.
 
-Concurrent execution: ``ToolOrchestrator`` from ``tools/orchestration.py`` provides
-read/write batching for concurrent tool execution. Currently the openai-agents
-SDK handles tool execution sequentially. When batch execution support is added,
-the orchestrator can be integrated here to run read-only tools concurrently.
+``ToolOrchestrator`` from ``tools/orchestration.py`` is an experimental read/write
+batching utility, not part of the active agent execution path. The openai-agents
+SDK owns tool scheduling; this utility's serial-write policy must not be assumed
+to protect SDK-run tools.
 
 Note: the former ``ToolEngine`` class was removed because it had no runtime call
 site — tools are exposed to the agent via the SDK ``@function_tool`` decorators
@@ -16,7 +16,7 @@ from .orchestration import ToolOrchestrator
 def get_orchestrator() -> ToolOrchestrator:
     """Get a ToolOrchestrator instance for concurrent read-only batching.
 
-    Example usage when SDK supports batch execution::
+    Example of standalone use (not the production SDK path)::
 
         orchestrator = get_orchestrator()
         results = await orchestrator.execute_batch(

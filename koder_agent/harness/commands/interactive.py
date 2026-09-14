@@ -35,7 +35,6 @@ from koder_agent.harness.agents.service import (
     resolve_agent_record_origin,
 )
 from koder_agent.harness.agents.teams.context import TeamToolContext
-from koder_agent.harness.agents.teams.in_process import InProcessTeammateRunner
 from koder_agent.harness.agents.teams.runtime import (
     resolve_teammate_execution_mode,
     resolve_teammate_mode,
@@ -291,7 +290,8 @@ class HarnessInteractiveCommandHandler:
         self.agent_service = agent_service or AgentService(
             permission_service=self.permission_service
         )
-        self.team_service = team_service or TeamService(cwd=Path.cwd())
+        team_runtime = self.agent_service.get_team_tool_runtime()
+        self.team_service = team_service or team_runtime.team_service
 
         # Create permission bridge for in-process teammates
         from koder_agent.harness.agents.teams.permission_bridge import (
@@ -308,8 +308,7 @@ class HarnessInteractiveCommandHandler:
 
         permission_bridge = PermissionBridge(handler=leader_permission_handler)
 
-        self.in_process_teammate_runner = InProcessTeammateRunner(
-            agent_service=self.agent_service,
+        self.in_process_teammate_runner = team_runtime.configure(
             team_service=self.team_service,
             permission_bridge=permission_bridge,
             local_prompt_executor=self._execute_teammate_local_prompt,
@@ -1258,6 +1257,7 @@ Koder understands your codebase, edits files with your permission, and runs loca
 
         from koder_agent.harness.channels.state import (
             get_allowed_channels,
+            get_channel_state,
             get_has_dev_channels,
         )
         from koder_agent.harness.channels.types import (
@@ -1285,6 +1285,25 @@ Koder understands your codebase, edits files with your permission, and runs loca
                     lines.append(f"- plugin:{entry.name}@{entry.marketplace}{marker}")
                 else:
                     lines.append(f"- {entry}{marker}")
+        inbox = get_channel_state().inbox
+        if inbox is not None:
+            snapshot = inbox.snapshot()
+            lines.extend(
+                [
+                    f"inbox_status: {snapshot['status']}",
+                    "inbox_counts: "
+                    f"staging={snapshot['admitting']} "
+                    f"pending={snapshot['pending']} running={snapshot['running']} "
+                    f"failed={snapshot['failed']} cancelled={snapshot['cancelled']} "
+                    f"interrupted={snapshot['interrupted']} completed={snapshot['completed']}",
+                    "inbox_limits: "
+                    f"messages={snapshot['retained_messages'] + snapshot['admitting']}/{inbox.limits.max_messages} "
+                    f"bytes={snapshot['retained_bytes'] + snapshot['admitting_bytes']}/{inbox.limits.max_bytes} "
+                    f"max_message={inbox.limits.max_message_bytes}",
+                    f"inbox_rejected: {snapshot['rejected']}",
+                    f"inbox_path: {snapshot['path']}",
+                ]
+            )
         return "\n".join(lines)
 
     async def _execute_reload_plugins(self, _scheduler, _args: list[str]) -> str:

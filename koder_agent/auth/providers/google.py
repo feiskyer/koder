@@ -19,7 +19,7 @@ from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import GenericStreamingChunk, ModelResponse, Usage
 
 from koder_agent.auth.base import OAuthProvider, OAuthResult, OAuthTokens
-from koder_agent.auth.client_integration import get_oauth_token
+from koder_agent.auth.client_integration import async_get_oauth_token
 from koder_agent.auth.constants import (
     CODE_ASSIST_HEADERS,
     GEMINI_CODE_ASSIST_ENDPOINT,
@@ -223,16 +223,16 @@ class GoogleOAuthLLM(CustomLLM):
         self._last_request_message_count: int = 0
         self._last_request_model: Optional[str] = None
 
-    def _get_access_token(self) -> Optional[str]:
+    async def _get_access_token(self) -> Optional[str]:
         """Get OAuth access token for Google."""
-        tokens = get_oauth_token(self.provider_id)
+        tokens = await async_get_oauth_token(self.provider_id)
         if tokens:
             return tokens.access_token
         return None
 
-    def _require_access_token(self) -> str:
+    async def _require_access_token(self) -> str:
         """Return a valid OAuth token or raise a helpful error."""
-        access_token = self._get_access_token()
+        access_token = await self._get_access_token()
         if not access_token:
             raise ValueError(
                 "No OAuth token available for Google. "
@@ -521,7 +521,7 @@ class GoogleOAuthLLM(CustomLLM):
         **kwargs: Any,
     ) -> ModelResponse:
         """Async completion using Gemini Code Assist endpoint."""
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         # Get managed project ID
@@ -651,7 +651,7 @@ class GoogleOAuthLLM(CustomLLM):
         """Async streaming using Gemini Code Assist endpoint."""
         from koder_agent.auth.tool_utils import extract_tool_calls_from_gemini_response
 
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         # Get managed project ID (required for API access)

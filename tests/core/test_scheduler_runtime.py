@@ -105,10 +105,13 @@ async def test_scheduler_serializes_concurrent_handle_calls():
         scheduler._capture_usage = AsyncMock()
         scheduler._refresh_magic_docs_after_turn = AsyncMock()
 
-        await asyncio.gather(
-            scheduler.handle("first", render_output=False),
-            scheduler.handle("second", render_output=False),
-        )
+        try:
+            await asyncio.gather(
+                scheduler.handle("first", render_output=False),
+                scheduler.handle("second", render_output=False),
+            )
+        finally:
+            await scheduler.cleanup()
 
     assert max_active == 1
 
@@ -173,11 +176,14 @@ async def test_stream_json_emits_reasoning_deltas_when_enabled(tmp_path, monkeyp
         scheduler._refresh_magic_docs_after_turn = AsyncMock()
         events = []
 
-        response = await scheduler.handle_stream_json(
-            "hello",
-            on_event=events.append,
-            include_partial_messages=True,
-        )
+        try:
+            response = await scheduler.handle_stream_json(
+                "hello",
+                on_event=events.append,
+                include_partial_messages=True,
+            )
+        finally:
+            await scheduler.cleanup()
 
     assert response == "Visible answer."
     assert events[0]["event"]["delta"] == {
@@ -239,14 +245,16 @@ async def test_stream_json_continues_active_goal_until_complete(tmp_path, monkey
         scheduler._capture_usage = AsyncMock()
         scheduler._refresh_magic_docs_after_turn = AsyncMock()
 
-        goal = await scheduler.goal_store.replace_goal(
-            "stream-goal", "finish the streamed goal", GoalStatus.ACTIVE, token_budget=None
-        )
+        try:
+            goal = await scheduler.goal_store.replace_goal(
+                "stream-goal", "finish the streamed goal", GoalStatus.ACTIVE, token_budget=None
+            )
 
-        events = []
-        response = await scheduler.handle_stream_json("start", on_event=events.append)
-        final = await scheduler.goal_store.get_goal("stream-goal")
-        await scheduler.goal_store.close()
+            events = []
+            response = await scheduler.handle_stream_json("start", on_event=events.append)
+            final = await scheduler.goal_store.get_goal("stream-goal")
+        finally:
+            await scheduler.cleanup()
 
     assert response == "turn 2"
     assert len(calls) == 2

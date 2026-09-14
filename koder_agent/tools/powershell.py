@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import BaseModel
 
+from koder_agent.harness.execution_context import get_execution_cwd
 from koder_agent.harness.permissions.powershell_classifier import classify_powershell_command
 from koder_agent.harness.sandbox_settings import is_excluded_command, resolve_sandbox_settings
 from koder_agent.harness.tools.shell_executor import (
@@ -41,7 +40,7 @@ async def run_powershell(command: str, timeout: int = 120, run_in_background: bo
     if not decision.allowed:
         return decision.reason
 
-    cwd = Path.cwd()
+    cwd = get_execution_cwd()
     sandbox_state = resolve_sandbox_settings(cwd)
     degraded = sandbox_state.enabled and not is_excluded_command(command, cwd=cwd)
     if degraded:
@@ -72,7 +71,7 @@ async def run_powershell(command: str, timeout: int = 120, run_in_background: bo
                 "reason: exact PowerShell unsandboxed fallback approval was not granted; "
                 f"{fallback_requirement.reason}"
             )
-        refreshed_state = resolve_sandbox_settings(Path.cwd())
+        refreshed_state = resolve_sandbox_settings(get_execution_cwd())
         mismatch_reason = unsandboxed_fallback_requirement_mismatch(
             fallback_requirement,
             refreshed_state,

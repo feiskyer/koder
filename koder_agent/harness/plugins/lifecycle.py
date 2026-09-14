@@ -16,7 +16,7 @@ from .path_safety import (
     PluginRootGuard,
     copy_tree_without_links,
 )
-from .state import PluginState, PluginStateStore
+from .state import PluginInstallOrigin, PluginState, PluginStateStore
 
 _JOURNAL_NAME = ".koder-lifecycle-transaction.json"
 _INTERNAL_NAME = re.compile(r"^\.koder-(?:stage|backup)-[0-9a-f]{24}$")
@@ -95,11 +95,7 @@ class PluginLifecycleService:
             return None
         if not isinstance(data, dict):
             raise PluginPathError("Lifecycle journal contains invalid plugin state")
-        return PluginState(
-            enabled=bool(data.get("enabled", True)),
-            scope=str(data.get("scope", "user")),
-            installed_at=str(data.get("installed_at", "")),
-        )
+        return PluginState.from_record(data)
 
     def _write_journal(self, journal: dict[str, Any], phase: str) -> None:
         journal["phase"] = phase
@@ -261,7 +257,14 @@ class PluginLifecycleService:
                     if self._paths.entry_exists(staging.name):
                         self._paths.remove_entry_name(staging.name)
 
-    def install_from_dir(self, plugin_dir: Path, *, scope: str = "user") -> PluginLifecycleResult:
+    def install_from_dir(
+        self,
+        plugin_dir: Path,
+        *,
+        scope: str = "user",
+        origin: PluginInstallOrigin | None = None,
+        expected_name: str | None = None,
+    ) -> PluginLifecycleResult:
         """Parse and install a plugin from a symlink-free local directory."""
         manifest, errors, _warnings = parse_manifest(plugin_dir)
         if manifest is None or errors:
@@ -270,10 +273,16 @@ class PluginLifecycleService:
                 rollback_performed=False,
                 message="; ".join(errors) if errors else "Invalid manifest",
             )
+        if expected_name is not None and manifest.name != expected_name:
+            return PluginLifecycleResult(
+                success=False,
+                rollback_performed=False,
+                message=f"Selected plugin identity changed from '{expected_name}' to '{manifest.name}'",
+            )
         return self.install_from_manifest(
             plugin_dir,
             manifest,
-            state=PluginState(enabled=True, scope=scope),
+            state=PluginState(enabled=True, scope=scope, origin=origin),
         )
 
     def install_from_manifest(

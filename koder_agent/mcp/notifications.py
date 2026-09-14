@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
@@ -71,7 +74,22 @@ class MCPNotificationHandler:
 
 # Global notification handler
 _handler = MCPNotificationHandler()
+_current_handler: ContextVar[MCPNotificationHandler | None] = ContextVar(
+    "koder_mcp_notification_handler", default=None
+)
+
+
+@contextmanager
+def notification_handler_scope() -> Iterator[MCPNotificationHandler]:
+    """Keep runtime registrations separate, including nested runtime calls."""
+    handler = MCPNotificationHandler()
+    token = _current_handler.set(handler)
+    try:
+        yield handler
+    finally:
+        _current_handler.reset(token)
 
 
 def get_notification_handler() -> MCPNotificationHandler:
-    return _handler
+    handler = _current_handler.get()
+    return handler if handler is not None else _handler

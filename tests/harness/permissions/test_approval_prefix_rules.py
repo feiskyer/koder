@@ -47,8 +47,8 @@ def test_derive_widens_safe_single_token_verb():
 
 
 def test_derive_normalizes_absolute_verb_path():
-    # An absolute path to a known-safe verb widens by its basename.
-    assert derive_shell_prefix_rule("/usr/local/bin/npm test") == "npm test:*"
+    # The known verb family must not discard the actual approved executable.
+    assert derive_shell_prefix_rule("/usr/local/bin/npm test") == "/usr/local/bin/npm test:*"
 
 
 def test_derive_refuses_unlisted_subcommand():
@@ -348,13 +348,18 @@ def test_runtime_builds_store_backed_service(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime_mod.PermissionService, "default", staticmethod(_spy_default))
     monkeypatch.setattr(runtime_mod, "harness_home_dir", lambda: tmp_path)
 
-    # Drive just the service-construction prefix of run() via a help request that
-    # returns early, then assert a real store was passed.
+    async def fake_session_flow(**_kwargs):
+        return 0
+
+    monkeypatch.setattr(runtime_mod, "run_harness_session_flow", fake_session_flow)
+
+    # Agent startup must still build a persistent service; maintenance paths
+    # intentionally skip it so they remain usable with broken configuration.
     class _Req:
-        mode = "help"
-        help_text = "x"
+        mode = "prompt"
+        first_arg = "hello"
         permission_mode = None
-        argv: list = []
+        argv: list = ["hello"]
 
     import asyncio
 

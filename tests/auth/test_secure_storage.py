@@ -1,219 +1,98 @@
-"""Tests for secure credential storage."""
+"""Compatibility wrappers and fixed pipe invocation for secure storage."""
 
+import base64
+import json
 import subprocess
-from unittest.mock import MagicMock, patch
+import sys
 
+from koder_agent.auth import secure_storage
 from koder_agent.auth.secure_storage import SecureStorage, get_storage
 
 
 class TestSecureStorage:
-    """Test SecureStorage class."""
+    def test_is_available_returns_true_on_macos(self, monkeypatch):
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Darwin")
+        assert SecureStorage().is_available() is True
 
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_is_available_returns_true_on_macos(self, mock_system, mock_which):
-        """Test is_available returns True on macOS when security command exists."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
+    def test_is_available_returns_false_when_security_not_found(self, monkeypatch, tmp_path):
+        """A missing native helper is unavailable without probing a keychain."""
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(secure_storage, "_HELPER", tmp_path / "missing-helper.py")
+        assert SecureStorage().is_available() is False
 
-        storage = SecureStorage()
-        assert storage.is_available() is True
+    def test_is_available_returns_false_on_non_macos(self, monkeypatch):
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Linux")
+        assert SecureStorage().is_available() is False
 
-        mock_system.assert_called_once_with()
-        mock_which.assert_called_once_with("security")
+    def test_store_calls_subprocess_with_correct_args(self, keychain_pipe):
+        assert keychain_pipe.storage.store("koder", "api_key", "synthetic-key")
+        arguments, options = keychain_pipe.calls[-1]
+        assert arguments == [sys.executable, "-I", str(secure_storage._HELPER)]
+        assert not {"koder", "api_key", "synthetic-key"} & set(arguments)
+        payload = json.loads(options["input"])
+        assert payload["operation"] == "store"
+        assert payload["service"] == "koder"
+        assert payload["account"] == "api_key"
+        assert base64.b64decode(payload["data_b64"]) == b"synthetic-key"
 
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_is_available_returns_false_when_security_not_found(self, mock_system, mock_which):
-        """Test is_available returns False when security command not found."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = None
+    def test_store_returns_false_on_error(self, keychain_pipe):
+        keychain_pipe.state.status = -25308
+        assert keychain_pipe.storage.store("koder", "api_key", "synthetic-key") is False
 
-        storage = SecureStorage()
-        assert storage.is_available() is False
+    def test_retrieve_calls_subprocess_with_correct_args(self, keychain_pipe):
+        keychain_pipe.entries[("koder", "api_key")] = b"synthetic-key"
+        assert keychain_pipe.storage.retrieve("koder", "api_key") == "synthetic-key"
+        arguments, options = keychain_pipe.calls[-1]
+        assert arguments == [sys.executable, "-I", str(secure_storage._HELPER)]
+        payload = json.loads(options["input"])
+        assert payload == {
+            "version": 1,
+            "operation": "retrieve",
+            "service": "koder",
+            "account": "api_key",
+        }
 
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_is_available_returns_false_on_non_macos(self, mock_system, mock_which):
-        """Test is_available returns False on non-macOS platforms."""
-        mock_system.return_value = "Linux"
-        mock_which.return_value = "/usr/bin/security"
+    def test_retrieve_returns_none_on_error(self, keychain_pipe):
+        keychain_pipe.state.transport_error = subprocess.CalledProcessError(1, "synthetic")
+        assert keychain_pipe.storage.retrieve("koder", "api_key") is None
 
-        storage = SecureStorage()
-        assert storage.is_available() is False
+    def test_retrieve_returns_none_when_not_found(self, keychain_pipe):
+        assert keychain_pipe.storage.retrieve("koder", "nonexistent") is None
 
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_store_calls_subprocess_with_correct_args(self, mock_system, mock_which, mock_run):
-        """Test store calls subprocess with correct arguments."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.return_value = MagicMock(returncode=0)
+    def test_delete_calls_subprocess_with_correct_args(self, keychain_pipe):
+        keychain_pipe.entries[("koder", "api_key")] = b"synthetic-key"
+        assert keychain_pipe.storage.delete("koder", "api_key")
+        arguments, options = keychain_pipe.calls[-1]
+        assert arguments == [sys.executable, "-I", str(secure_storage._HELPER)]
+        assert json.loads(options["input"]) == {
+            "version": 1,
+            "operation": "delete",
+            "service": "koder",
+            "account": "api_key",
+        }
+        assert ("koder", "api_key") not in keychain_pipe.entries
 
-        storage = SecureStorage()
-        result = storage.store("koder", "api_key", "secret-key-123")
-
-        assert result is True
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0] == "security"
-        assert "add-generic-password" in args
-        assert "-s" in args
-        assert "koder" in args
-        assert "-a" in args
-        assert "api_key" in args
-        assert "-w" in args
-        assert "secret-key-123" in args
-        assert "-U" in args  # Update if exists
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_store_returns_false_on_error(self, mock_system, mock_which, mock_run):
-        """Test store returns False on subprocess error."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.return_value = MagicMock(returncode=1)
-
-        storage = SecureStorage()
-        result = storage.store("koder", "api_key", "secret-key-123")
-
-        assert result is False
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_retrieve_calls_subprocess_with_correct_args(self, mock_system, mock_which, mock_run):
-        """Test retrieve calls subprocess with correct arguments."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.return_value = MagicMock(returncode=0, stdout="secret-key-123\n", stderr="")
-
-        storage = SecureStorage()
-        result = storage.retrieve("koder", "api_key")
-
-        assert result == "secret-key-123"
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0] == "security"
-        assert "find-generic-password" in args
-        assert "-s" in args
-        assert "koder" in args
-        assert "-a" in args
-        assert "api_key" in args
-        assert "-w" in args
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_retrieve_returns_none_on_error(self, mock_system, mock_which, mock_run):
-        """Test retrieve returns None on error."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.side_effect = subprocess.CalledProcessError(1, "security")
-
-        storage = SecureStorage()
-        result = storage.retrieve("koder", "api_key")
-
-        assert result is None
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_retrieve_returns_none_when_not_found(self, mock_system, mock_which, mock_run):
-        """Test retrieve returns None when credential not found."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.return_value = MagicMock(returncode=44)  # errSecItemNotFound
-
-        storage = SecureStorage()
-        result = storage.retrieve("koder", "nonexistent")
-
-        assert result is None
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_delete_calls_subprocess_with_correct_args(self, mock_system, mock_which, mock_run):
-        """Test delete calls subprocess with correct arguments."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.return_value = MagicMock(returncode=0)
-
-        storage = SecureStorage()
-        result = storage.delete("koder", "api_key")
-
-        assert result is True
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0] == "security"
-        assert "delete-generic-password" in args
-        assert "-s" in args
-        assert "koder" in args
-        assert "-a" in args
-        assert "api_key" in args
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_delete_returns_false_on_error(self, mock_system, mock_which, mock_run):
-        """Test delete returns False on error."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-        mock_run.return_value = MagicMock(returncode=1)
-
-        storage = SecureStorage()
-        result = storage.delete("koder", "api_key")
-
-        assert result is False
+    def test_delete_returns_false_on_error(self, keychain_pipe):
+        keychain_pipe.state.status = -25308
+        assert keychain_pipe.storage.delete("koder", "api_key") is False
 
 
 class TestGetStorage:
-    """Test get_storage function."""
-
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_get_storage_returns_secure_storage_on_macos(self, mock_system, mock_which):
-        """Test get_storage returns SecureStorage on macOS."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = "/usr/bin/security"
-
+    def test_get_storage_returns_secure_storage_on_macos(self, monkeypatch):
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Darwin")
         storage = get_storage()
-
-        assert storage is not None
         assert isinstance(storage, SecureStorage)
-        assert storage.is_available() is True
+        assert storage.is_available()
 
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_get_storage_returns_none_on_linux(self, mock_system, mock_which):
-        """Test get_storage returns None on Linux."""
-        mock_system.return_value = "Linux"
-        mock_which.return_value = None
+    def test_get_storage_returns_none_on_linux(self, monkeypatch):
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Linux")
+        assert get_storage() is None
 
-        storage = get_storage()
+    def test_get_storage_returns_none_on_windows(self, monkeypatch):
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Windows")
+        assert get_storage() is None
 
-        assert storage is None
-
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_get_storage_returns_none_on_windows(self, mock_system, mock_which):
-        """Test get_storage returns None on Windows."""
-        mock_system.return_value = "Windows"
-        mock_which.return_value = None
-
-        storage = get_storage()
-
-        assert storage is None
-
-    @patch("shutil.which")
-    @patch("platform.system")
-    def test_get_storage_returns_none_when_security_unavailable(self, mock_system, mock_which):
-        """Test get_storage returns None when security command unavailable."""
-        mock_system.return_value = "Darwin"
-        mock_which.return_value = None
-
-        storage = get_storage()
-
-        assert storage is None
+    def test_get_storage_returns_none_when_security_unavailable(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(secure_storage.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(secure_storage, "_HELPER", tmp_path / "missing-helper.py")
+        assert get_storage() is None

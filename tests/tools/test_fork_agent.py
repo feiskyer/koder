@@ -116,3 +116,31 @@ def test_fork_context_token_estimate():
     )
     tokens = ctx.estimate_tokens()
     assert tokens > 0
+
+
+def test_fork_filters_incomplete_responses_pairs():
+    messages = [
+        {"role": "user", "content": "Inspect the repository"},
+        {"type": "function_call", "call_id": "done", "name": "read_file", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "done", "output": "file contents"},
+        {"type": "function_call", "call_id": "pending", "name": "read_file", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "orphan", "output": "unmatched result"},
+    ]
+
+    assert build_fork_context(messages).to_messages() == messages[:3]
+    assert len(messages) == 5
+
+
+def test_fork_keeps_chat_and_responses_pairs_separate():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "shared", "function": {"name": "read_file", "arguments": "{}"}}],
+        },
+        {"type": "function_call_output", "call_id": "shared", "output": "wrong protocol"},
+        {"type": "function_call", "call_id": "other", "name": "read_file", "arguments": "{}"},
+        {"role": "tool", "tool_call_id": "other", "content": "wrong protocol"},
+    ]
+
+    assert filter_incomplete_tool_calls(messages) == []

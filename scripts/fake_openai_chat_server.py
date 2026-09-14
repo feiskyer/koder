@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serve deterministic OpenAI-compatible chat completions for tmux scenarios."""
+"""Serve deterministic OpenAI-compatible Chat/Responses for tmux scenarios."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ _TOOL_SCENARIOS = (
     "streaming_tool_queue",
     "streaming_tool_error",
     "sandbox_shell_tool",
+    "git_query_mutation",
+    "sed_query_mutation",
 )
 _SCENARIOS = ("single", *_TOOL_SCENARIOS)
 _SUBAGENT_CHILD_MARKERS = {
@@ -47,6 +49,10 @@ class _Handler(BaseHTTPRequestHandler):
 
         self._write_log(body)
 
+        if self.path.rstrip("/").endswith("/responses") and self.scenario == "single":
+            self._send_response(body)
+            return
+
         if self.scenario in _TOOL_SCENARIOS:
             if not body.get("tools"):
                 self._send_json(self._chat_completion(body, self.response_text))
@@ -69,7 +75,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(self._tool_call_completion(body))
             return
 
-        self._send_json(self._chat_completion(body, self.response_text))
+        if body.get("stream"):
+            self._send_text_stream(body)
+        else:
+            self._send_json(self._chat_completion(body, self.response_text))
 
     def _write_log(self, body: dict[str, Any]) -> None:
         if self.log_file is None:
@@ -81,9 +90,43 @@ class _Handler(BaseHTTPRequestHandler):
         marker = self._subagent_log_marker(body)
         if marker is not None:
             record["marker"] = marker
+        if self.scenario == "git_query_mutation":
+            record.update(self._git_permission_denials(body))
+        elif self.scenario == "sed_query_mutation":
+            record.update(self._sed_permission_outcomes(body))
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
         with self.log_lock, self.log_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _tool_result_contains(body: dict[str, Any], call_id: str, text: str) -> bool:
+        messages = body.get("messages")
+        messages = messages if isinstance(messages, list) else []
+        return any(
+            isinstance(message, dict)
+            and message.get("role") == "tool"
+            and message.get("tool_call_id") == call_id
+            and text in str(message.get("content"))
+            for message in messages
+        )
+
+    @classmethod
+    def _git_permission_denials(cls, body: dict[str, Any]) -> dict[str, bool]:
+        return {
+            f"git_{name}_denied": cls._tool_result_contains(
+                body, f"call_koder_git_{name}", "dontAsk mode: approval auto-denied"
+            )
+            for name in ("reflog", "fsck")
+        }
+
+    @classmethod
+    def _sed_permission_outcomes(cls, body: dict[str, Any]) -> dict[str, bool]:
+        return {
+            "sed_write_denied": cls._tool_result_contains(
+                body, "call_koder_sed_write", "dontAsk mode: approval auto-denied"
+            ),
+            "sed_read_succeeded": cls._tool_result_contains(body, "call_koder_sed_read", "initial"),
+        }
 
     def _subagent_log_marker(self, body: dict[str, Any]) -> str | None:
         if self.scenario != "streaming_subagent_tool":
@@ -222,6 +265,38 @@ class _Handler(BaseHTTPRequestHandler):
                 "run_shell",
                 {"command": "touch model-tool-created.txt"},
             )
+        if self.scenario in {"git_query_mutation", "sed_query_mutation"}:
+            latest_user = next(
+                (
+                    message
+                    for message in reversed(request_body.get("messages") or [])
+                    if isinstance(message, dict) and message.get("role") == "user"
+                ),
+                {},
+            )
+            if self.scenario == "sed_query_mutation":
+                read = "KODER_SED_READ" in json.dumps(latest_user, ensure_ascii=False)
+                return self._function_tool_call(
+                    f"call_koder_sed_{'read' if read else 'write'}",
+                    "run_shell",
+                    {
+                        "command": (
+                            "sed -n '1p' sample.txt"
+                            if read
+                            else "sed -n 'w sed-write-proof.txt' sample.txt"
+                        )
+                    },
+                )
+            fsck = "KODER_GIT_FSCK" in json.dumps(latest_user, ensure_ascii=False)
+            return self._function_tool_call(
+                f"call_koder_git_{'fsck' if fsck else 'reflog'}",
+                "run_shell",
+                {
+                    "command": (
+                        "git fsck --lost" if fsck else "git reflog expire --expire=all --all"
+                    )
+                },
+            )
         return self._function_tool_call(
             "call_koder_queue_fixture",
             "read_file",
@@ -249,6 +324,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("cache-control", "no-cache")
         self.end_headers()
         for chunk in chunks:
+            if str(chunk.get("type", "")).startswith("response."):
+                self.wfile.write(f"event: {chunk['type']}\n".encode())
             encoded = f"data: {json.dumps(chunk)}\n\n".encode("utf-8")
             self.wfile.write(encoded)
             self.wfile.flush()
@@ -339,6 +416,57 @@ class _Handler(BaseHTTPRequestHandler):
             self._stream_chunk(body, {}, "stop"),
         ]
         self._send_sse(chunks)
+
+    def _send_response(self, body: dict[str, Any]) -> None:
+        part = {"type": "output_text", "text": self.response_text, "annotations": []}
+        message = {
+            "type": "message",
+            "id": "msg_koder_fixture",
+            "role": "assistant",
+            "status": "completed",
+            "content": [part],
+        }
+        response = {
+            "id": "resp_koder_fixture",
+            "object": "response",
+            "created_at": int(time.time()),
+            "model": body.get("model", "fixture"),
+            "status": "completed",
+            "output": [message],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "total_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
+        }
+        if not body.get("stream"):
+            self._send_json(response)
+            return
+        empty_part = {**part, "text": ""}
+        location = {"output_index": 0, "item_id": message["id"], "content_index": 0}
+        events = [
+            {
+                "type": "response.created",
+                "response": {**response, "status": "in_progress", "output": []},
+            },
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {**message, "status": "in_progress", "content": []},
+            },
+            {"type": "response.content_part.added", **location, "part": empty_part},
+            {"type": "response.output_text.delta", **location, "delta": self.response_text},
+            {"type": "response.output_text.done", **location, "text": self.response_text},
+            {"type": "response.content_part.done", **location, "part": part},
+            {"type": "response.output_item.done", "output_index": 0, "item": message},
+            {"type": "response.completed", "response": response},
+        ]
+        self._send_sse([{**event, "sequence_number": index} for index, event in enumerate(events)])
 
     def _send_json(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(payload).encode("utf-8")

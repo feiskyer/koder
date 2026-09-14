@@ -5,14 +5,43 @@ from __future__ import annotations
 import errno
 import json
 import os
+import re
 import secrets
 import stat
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .name_validation import canonical_plugin_name
+from .name_validation import canonical_marketplace_name, canonical_plugin_name
 from .path_safety import _open_directory_no_symlinks
+
+
+@dataclass(frozen=True)
+class PluginInstallOrigin:
+    """Installer-owned catalog identity; never taken from a plugin manifest."""
+
+    marketplace: str
+    source_digest: str
+
+    def __post_init__(self) -> None:
+        canonical, _reason = canonical_marketplace_name(self.marketplace)
+        if canonical is None or canonical != self.marketplace:
+            raise ValueError("Invalid installation marketplace")
+        if not isinstance(self.source_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", self.source_digest
+        ):
+            raise ValueError("Invalid installation source digest")
+
+    @classmethod
+    def from_record(cls, data: object) -> "PluginInstallOrigin | None":
+        if not isinstance(data, dict):
+            return None
+        try:
+            return cls(marketplace=data.get("marketplace"), source_digest=data.get("source_digest"))
+        except (TypeError, ValueError):
+            # Malformed/legacy provenance confers no channel grant. Ordinary
+            # installed plugin state can still be read and explicitly repaired.
+            return None
 
 
 @dataclass
@@ -22,10 +51,20 @@ class PluginState:
     enabled: bool = True
     scope: str = "user"
     installed_at: str = ""
+    origin: PluginInstallOrigin | None = None
 
     def __post_init__(self) -> None:
         if not self.installed_at:
             self.installed_at = datetime.now(timezone.utc).isoformat()
+
+    @classmethod
+    def from_record(cls, entry: dict) -> "PluginState":
+        return cls(
+            enabled=entry.get("enabled", True),
+            scope=entry.get("scope", "user"),
+            installed_at=entry.get("installed_at", ""),
+            origin=PluginInstallOrigin.from_record(entry.get("origin")),
+        )
 
 
 class PluginStateStore:
@@ -204,11 +243,7 @@ class PluginStateStore:
         entry = self._load().get(name)
         if entry is None:
             return None
-        return PluginState(
-            enabled=entry.get("enabled", True),
-            scope=entry.get("scope", "user"),
-            installed_at=entry.get("installed_at", ""),
-        )
+        return PluginState.from_record(entry)
 
     def set(self, name: str, state: PluginState) -> None:
         name = self._validated_name(name)
@@ -230,11 +265,4 @@ class PluginStateStore:
         return True if state is None else state.enabled
 
     def list_all(self) -> dict[str, PluginState]:
-        return {
-            name: PluginState(
-                enabled=entry.get("enabled", True),
-                scope=entry.get("scope", "user"),
-                installed_at=entry.get("installed_at", ""),
-            )
-            for name, entry in self._load().items()
-        }
+        return {name: PluginState.from_record(entry) for name, entry in self._load().items()}

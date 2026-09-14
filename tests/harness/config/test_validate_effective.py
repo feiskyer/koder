@@ -39,14 +39,36 @@ def _run_real_config_validate_cli(
         yaml.safe_dump({"harness": {"task_delegate_max_batch_size": 3}}),
         encoding="utf-8",
     )
-    env = os.environ.copy()
-    for env_name in TASK_DELEGATE_ENV_VARS:
-        env.pop(env_name, None)
+    # A real CLI process needs a synthetic profile AND cwd. Do not inherit
+    # provider credentials or project-local settings from the developer shell.
+    inherited_names = (
+        "PATH",
+        "SYSTEMROOT",
+        "COMSPEC",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_PYTHON",
+        "UV_NO_SYNC",
+    )
+    env = {name: os.environ[name] for name in inherited_names if name in os.environ}
     env["HOME"] = str(tmp_path)
+    env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+    env["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
     env.update(env_overrides)
     return subprocess.run(
-        ["uv", "run", "koder", "config", "validate"],
-        cwd=PROJECT_ROOT,
+        [
+            "uv",
+            "run",
+            "--project",
+            str(PROJECT_ROOT),
+            "--no-env-file",
+            "koder",
+            "config",
+            "validate",
+        ],
+        cwd=tmp_path,
         env=env,
         capture_output=True,
         text=True,

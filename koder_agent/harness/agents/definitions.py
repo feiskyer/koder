@@ -19,6 +19,7 @@ from koder_agent.harness.paths import (
     user_agents_dir,
 )
 from koder_agent.harness.permissions.modes import FILE_WRITE_TOOLS
+from koder_agent.harness.plugins.context import get_plugin_root, normalize_plugin_root
 from koder_agent.mcp.server_config import MCPServerConfig, MCPServerScope, MCPServerType
 from koder_agent.mcp.server_manager import MCPServerManager
 
@@ -732,9 +733,7 @@ def get_agent_definitions(
 ) -> AgentDefinitionsResult:
     cwd_path = Path(cwd).resolve()
     plugin_root_path = (
-        Path(plugin_root).expanduser().resolve()
-        if plugin_root is not None
-        else (Path.home() / ".koder" / "plugins").resolve()
+        normalize_plugin_root(plugin_root) if plugin_root is not None else get_plugin_root()
     )
 
     builtins = list(BUILTIN_AGENT_DEFINITIONS)

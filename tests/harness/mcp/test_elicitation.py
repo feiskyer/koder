@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from mcp.types import (
@@ -16,10 +16,12 @@ from koder_agent.mcp.elicitation import ElicitationHandler, get_elicitation_hand
 
 
 @pytest.fixture
-def handler():
+def handler(monkeypatch):
     """Create a handler with a mock console."""
     console = Console(force_terminal=True, file=MagicMock())
-    return ElicitationHandler(console=console)
+    instance = ElicitationHandler(console=console)
+    monkeypatch.setattr(instance, "_read_input", AsyncMock(return_value="yes"))
+    return instance
 
 
 # ------------------------------------------------------------------
@@ -38,9 +40,7 @@ class TestFormMode:
         """Empty schema shows message and asks for accept/decline."""
         params = self._make_form_params("Do you agree?")
 
-        with patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        result = asyncio.run(handler._handle_form(params))
 
         assert isinstance(result, ElicitResult)
         assert result.action == "accept"
@@ -50,9 +50,8 @@ class TestFormMode:
         """Declining an empty-schema form returns 'decline'."""
         params = self._make_form_params("Do you agree?")
 
-        with patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm:
-            mock_confirm.ask.return_value = False
-            result = handler._handle_form(params)
+        handler._read_input.return_value = "no"
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "decline"
 
@@ -66,13 +65,8 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.Prompt") as mock_prompt,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_prompt.ask.return_value = "Alice"
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["Alice", "yes"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
         assert result.content == {"name": "Alice"}
@@ -87,18 +81,14 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            # First call for the boolean field, second call for submission confirm
-            mock_confirm.ask.side_effect = [True, True]
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["yes", "yes"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
         assert result.content == {"enabled": True}
 
     def test_integer_field(self, handler):
-        """Integer field uses IntPrompt."""
+        """Integer input is converted without a blocking console prompt."""
         params = self._make_form_params(
             "Count",
             {
@@ -107,19 +97,14 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.IntPrompt") as mock_int,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_int.ask.return_value = 42
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["42", "yes"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
         assert result.content == {"count": 42}
 
     def test_number_field(self, handler):
-        """Number/float field uses FloatPrompt."""
+        """Number input retains its numeric type."""
         params = self._make_form_params(
             "Rate",
             {
@@ -128,13 +113,8 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.FloatPrompt") as mock_float,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_float.ask.return_value = 3.14
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["3.14", "yes"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
         assert result.content == {"rate": 3.14}
@@ -149,13 +129,8 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.Prompt") as mock_prompt,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_prompt.ask.return_value = "2"  # green (index 2)
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["2", "yes"]  # green (index 2)
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
         assert result.content == {"color": "green"}
@@ -170,19 +145,14 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.Prompt") as mock_prompt,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_prompt.ask.return_value = "blue"
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["blue", "yes"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
         assert result.content == {"color": "blue"}
 
     def test_array_field(self, handler):
-        """Array field joins comma-separated input into a string."""
+        """Array field retains comma-separated input as an array of strings."""
         params = self._make_form_params(
             "Tags",
             {
@@ -191,16 +161,11 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.Prompt") as mock_prompt,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_prompt.ask.return_value = "foo, bar, baz"
-            mock_confirm.ask.return_value = True
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["foo, bar, baz", "yes"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "accept"
-        assert result.content == {"tags": "foo, bar, baz"}
+        assert result.content == {"tags": ["foo", "bar", "baz"]}
 
     def test_decline_submission(self, handler):
         """Declining at the submission step returns 'decline'."""
@@ -212,13 +177,8 @@ class TestFormMode:
             },
         )
 
-        with (
-            patch("koder_agent.mcp.elicitation.Prompt") as mock_prompt,
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_prompt.ask.return_value = "Alice"
-            mock_confirm.ask.return_value = False  # Decline submission
-            result = handler._handle_form(params)
+        handler._read_input.side_effect = ["Alice", "no"]
+        result = asyncio.run(handler._handle_form(params))
 
         assert result.action == "decline"
         assert result.content is None
@@ -280,11 +240,7 @@ class TestHookAutoResponse:
         mock_result.elicitation_action = None
         mock_result.elicitation_content = None
 
-        with (
-            patch(self._HOOKS_TARGET, return_value=mock_result),
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_confirm.ask.return_value = True
+        with patch(self._HOOKS_TARGET, return_value=mock_result):
             result = asyncio.run(handler(None, params))
 
         assert result.action == "accept"
@@ -296,11 +252,7 @@ class TestHookAutoResponse:
             requestedSchema={},
         )
 
-        with (
-            patch(self._HOOKS_TARGET, side_effect=ImportError("no hooks module")),
-            patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm,
-        ):
-            mock_confirm.ask.return_value = True
+        with patch(self._HOOKS_TARGET, side_effect=ImportError("no hooks module")):
             result = asyncio.run(handler(None, params))
 
         assert result.action == "accept"
@@ -320,9 +272,7 @@ class TestDispatch:
         )
 
         with patch.object(handler, "_try_hook_auto_response", return_value=None):
-            with patch("koder_agent.mcp.elicitation.Confirm") as mock_confirm:
-                mock_confirm.ask.return_value = True
-                result = asyncio.run(handler(None, params))
+            result = asyncio.run(handler(None, params))
 
         assert result.action == "accept"
 

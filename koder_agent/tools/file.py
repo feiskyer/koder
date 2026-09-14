@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from ..core.security import SecurityGuard
 from ..harness.checkpoint import record_pre_edit
+from ..harness.execution_context import execution_path
 from .compat import function_tool
 from .file_state import ReadFileState
 
@@ -46,9 +47,7 @@ def _no_follow_target(path: str) -> Path:
     full ``Path.resolve()`` would silently redirect a symlinked leaf to its
     target — the bypass this closes. Never pass a fully ``resolve()``-d path here.
     """
-    raw = Path(path).expanduser()
-    if not raw.is_absolute():
-        raw = Path.cwd() / raw
+    raw = execution_path(path)
     return raw.parent.resolve() / raw.name
 
 
@@ -65,7 +64,12 @@ def _write_bytes_no_follow(path: str, data: bytes, *, append: bool) -> None:
     flags |= os.O_APPEND if append else os.O_TRUNC
     fd = os.open(str(target), flags, 0o644)
     try:
-        os.write(fd, data)
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError(errno.EIO, "write made no progress")
+            remaining = remaining[written:]
     finally:
         os.close(fd)
 
@@ -197,20 +201,37 @@ def _apply_line_ending(text: str, ending: str) -> bytes:
 
 
 def get_file_state() -> ReadFileState:
-    """Get the global file state tracker."""
+    """Get the active Session's read evidence, or the unscoped legacy tracker."""
+    from ..harness.agents.runtime_context import (
+        get_runtime_agent_session,
+        has_agent_session_scope,
+    )
+
+    session = get_runtime_agent_session()
+    if session is not None:
+        file_state = getattr(session, "file_read_state", None)
+        if not isinstance(file_state, ReadFileState):
+            raise RuntimeError("Managed session does not support file-read state")
+        return file_state
+    if has_agent_session_scope():
+        raise RuntimeError("File tools require an active managed session")
     return _file_state
 
 
 def validate_read_file_for_edit(path: str) -> Optional[str]:
     """Return an edit guard error unless ``path`` has a fresh, complete read."""
-    p = Path(path).resolve()
+    try:
+        file_state = get_file_state()
+    except RuntimeError as exc:
+        return f"Error accessing file-read state: {exc}"
+    p = execution_path(path).resolve()
     if not p.exists():
         return f"File not found: {path}"
-    if not _file_state.has_been_read(str(p)):
+    if not file_state.has_been_read(str(p)):
         return "File has not been read yet. Read it first before editing it."
-    if _file_state.is_partial_view(str(p)):
+    if file_state.is_partial_view(str(p)):
         return "File was only partially read. Read the full file before editing."
-    if _file_state.is_stale(str(p)):
+    if file_state.is_stale(str(p)):
         return (
             "File has been modified since it was last read. "
             "Read it again before attempting to edit it."
@@ -228,8 +249,9 @@ def replace_read_file_contents(path: str, content: str) -> Optional[str]:
     if validation_error is not None:
         return validation_error
 
-    p = Path(path).resolve()
+    p = execution_path(path).resolve()
     try:
+        file_state = get_file_state()
         _, line_ending = _read_text_preserving_ending(p)
         record_pre_edit(str(p))
         validation_error = validate_read_file_for_edit(path)
@@ -243,7 +265,7 @@ def replace_read_file_contents(path: str, content: str) -> Optional[str]:
     except Exception as e:
         return f"Error editing file: {str(e)}"
 
-    _file_state.record_read(str(p), content=_normalize_newlines(content))
+    file_state.record_read(str(p), content=_normalize_newlines(content))
     return None
 
 
@@ -383,7 +405,8 @@ def read_file(path: str, offset: Optional[int] = None, limit: Optional[int] = No
         limit: Maximum number of lines to read (for large files)
     """
     try:
-        p = Path(path).resolve()
+        file_state = get_file_state()
+        p = execution_path(path).resolve()
         if not p.exists():
             return "File not found"
 
@@ -398,14 +421,14 @@ def read_file(path: str, offset: Optional[int] = None, limit: Optional[int] = No
         # the body to save context tokens. Partial/offset/limit reads are never
         # short-circuited.
         is_whole_file = offset is None and limit is None
-        if is_whole_file and _file_state.has_been_read(str(p)) and not _file_state.is_stale(str(p)):
-            prior_content = _file_state.get_full_content(str(p))
+        if is_whole_file and file_state.has_been_read(str(p)) and not file_state.is_stale(str(p)):
+            prior_content = file_state.get_full_content(str(p))
             if prior_content is not None:
                 prior_line_count = prior_content.count("\n") + (
                     0 if prior_content.endswith("\n") or prior_content == "" else 1
                 )
                 # Refresh mtime/size/hash so subsequent staleness checks stay accurate.
-                _file_state.record_read(str(p), content=prior_content, is_partial=False)
+                file_state.record_read(str(p), content=prior_content, is_partial=False)
                 return (
                     f"File unchanged since last read ({prior_line_count} lines); "
                     "prior content still in context"
@@ -453,7 +476,7 @@ def read_file(path: str, offset: Optional[int] = None, limit: Optional[int] = No
         # Track the read for staleness detection
         is_partial = offset is not None or limit is not None or was_truncated
         full_content = "".join(lines) if not is_partial else None
-        _file_state.record_read(str(p), content=full_content, is_partial=is_partial)
+        file_state.record_read(str(p), content=full_content, is_partial=is_partial)
 
         return display_content
     except PermissionError as e:
@@ -531,7 +554,8 @@ def write_file(path: str, content: str) -> str:
         content: Full file content to write (replaces any existing content)
     """
     try:
-        p = Path(path).resolve()
+        file_state = get_file_state()
+        p = execution_path(path).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
 
         # Check if file exists and get old content for diff
@@ -539,9 +563,9 @@ def write_file(path: str, content: str) -> str:
 
         # Enforce read-before-write for existing files
         if not is_new_file:
-            if not _file_state.has_been_read(str(p)):
+            if not file_state.has_been_read(str(p)):
                 return "File has not been read yet. Read it first before writing to it."
-            if _file_state.is_stale(str(p)):
+            if file_state.is_stale(str(p)):
                 return (
                     "File has been modified since it was last read. "
                     "Read it again before attempting to write it."
@@ -564,7 +588,7 @@ def write_file(path: str, content: str) -> str:
             content.encode("utf-8") if is_new_file else _apply_line_ending(content, line_ending)
         )
         _atomic_write_no_follow(path, disk_bytes)
-        _file_state.record_read(str(p), content=_normalize_newlines(content))
+        file_state.record_read(str(p), content=_normalize_newlines(content))
 
         # Generate diff for display
         filename = p.name
@@ -592,7 +616,8 @@ def append_file(path: str, content: str) -> str:
         content: Text to append at the end of the file
     """
     try:
-        p = Path(path).resolve()
+        file_state = get_file_state()
+        p = execution_path(path).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
 
         # Get old content for diff (if file exists)
@@ -600,9 +625,9 @@ def append_file(path: str, content: str) -> str:
 
         # Enforce read-before-write for existing files, matching write_file
         if not is_new_file:
-            if not _file_state.has_been_read(str(p)):
+            if not file_state.has_been_read(str(p)):
                 return "File has not been read yet. Read it first before appending to it."
-            if _file_state.is_stale(str(p)):
+            if file_state.is_stale(str(p)):
                 return (
                     "File has been modified since it was last read. "
                     "Read it again before attempting to append to it."
@@ -633,7 +658,7 @@ def append_file(path: str, content: str) -> str:
         # spuriously fail the staleness check: is_stale() re-reads the file with
         # universal newlines (LF), so the stored copy must be LF too (mirrors
         # write_file). Storing raw CR-bearing content would look "modified".
-        _file_state.record_read(str(p), content=_normalize_newlines(new_content))
+        file_state.record_read(str(p), content=_normalize_newlines(new_content))
         filename = p.name
         diff_output = _generate_diff_output(old_content, new_content, filename, is_new_file)
 
@@ -659,7 +684,11 @@ def edit_file_by_replacement(
     and replace it with new_string.  Supports curly quote normalization and
     replace_all for multiple occurrences.
     """
-    p = Path(path).resolve()
+    try:
+        file_state = get_file_state()
+    except RuntimeError as exc:
+        return f"Error editing file: {exc}"
+    p = execution_path(path).resolve()
 
     # Reject no-op edits
     if old_string == new_string:
@@ -687,7 +716,7 @@ def edit_file_by_replacement(
             if e.errno == errno.ELOOP:
                 return f"{_SYMLINK_WRITE_MSG}: {path}"
             return str(e)
-        _file_state.record_read(str(p), content=_normalize_newlines(new_string))
+        file_state.record_read(str(p), content=_normalize_newlines(new_string))
         return f"Created {path} ({len(new_string)} bytes)"
 
     # File must exist
@@ -695,11 +724,11 @@ def edit_file_by_replacement(
         return f"File not found: {path}"
 
     # Enforce read-before-edit, matching write_file and the diff-mode path
-    if not _file_state.has_been_read(str(p)):
+    if not file_state.has_been_read(str(p)):
         return "File has not been read yet. Read it first before editing it."
-    if _file_state.is_partial_view(str(p)):
+    if file_state.is_partial_view(str(p)):
         return "File was only partially read. Read the full file before editing."
-    if _file_state.is_stale(str(p)):
+    if file_state.is_stale(str(p)):
         return (
             "File has been modified since it was last read. "
             "Read it again before attempting to edit it."
@@ -748,7 +777,7 @@ def edit_file_by_replacement(
         return str(e)
     # Store LF-normalized content so the staleness check (which re-reads with
     # universal newlines) stays consistent even if new_string carried literal \r.
-    _file_state.record_read(str(p), content=_normalize_newlines(new_content))
+    file_state.record_read(str(p), content=_normalize_newlines(new_content))
 
     diff_output = _generate_diff_output(content, new_content, p.name)
     return f"Successfully edited {path}\n---DIFF---\n{diff_output}"
@@ -794,16 +823,17 @@ def edit_file(
     if diff is not None:
         # Existing diff-based path (keep current logic)
         try:
-            p = Path(path).resolve()
+            file_state = get_file_state()
+            p = execution_path(path).resolve()
             if not p.exists():
                 return f"File not found: {path}"
 
             # Read-before-write enforcement
-            if not _file_state.has_been_read(str(p)):
+            if not file_state.has_been_read(str(p)):
                 return "File has not been read yet. Read it first before editing."
-            if _file_state.is_partial_view(str(p)):
+            if file_state.is_partial_view(str(p)):
                 return "File was only partially read. Read the full file before editing."
-            if _file_state.is_stale(str(p)):
+            if file_state.is_stale(str(p)):
                 return (
                     "File has been modified since it was last read. "
                     "Read it again before attempting to edit it."
@@ -816,7 +846,7 @@ def edit_file(
             # Snapshot pre-edit content for /rewind code restoration (no-op-safe).
             record_pre_edit(str(p))
             _atomic_write_no_follow(path, _apply_line_ending(new_content, line_ending))
-            _file_state.record_read(str(p), content=_normalize_newlines(new_content))
+            file_state.record_read(str(p), content=_normalize_newlines(new_content))
             return f"Successfully applied diff to {path}\n---DIFF---\n{diff}"
         except OSError as e:
             if e.errno == errno.ELOOP:
@@ -837,7 +867,7 @@ def list_directory(path: str, ignore: Optional[List[str]] = None) -> str:
         ignore: Glob patterns for entries to skip (e.g. ["*.pyc", "node_modules"])
     """
     try:
-        p = Path(path).resolve()
+        p = execution_path(path).resolve()
         if not p.exists():
             return "Path does not exist"
         if not p.is_dir():

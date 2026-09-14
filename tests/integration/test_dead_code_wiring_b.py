@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def _source(path):
-    return Path(path).read_text()
+    return (Path(__file__).resolve().parents[2] / path).read_text(encoding="utf-8")
 
 
 def test_mcp_reconnection_wired():

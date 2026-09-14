@@ -5,9 +5,12 @@ and extracts the authorization code for token exchange.
 """
 
 import asyncio
+import html
+import secrets
 import webbrowser
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from aiohttp import web
 
@@ -110,7 +113,13 @@ class OAuthCallbackServer:
     with authorization code.
     """
 
-    def __init__(self, port: int, callback_path: str = "/auth/callback"):
+    def __init__(
+        self,
+        port: int,
+        callback_path: str = "/auth/callback",
+        *,
+        expected_state: Optional[str] = None,
+    ):
         """Initialize callback server.
 
         Args:
@@ -119,6 +128,7 @@ class OAuthCallbackServer:
         """
         self.port = port
         self.callback_path = callback_path
+        self.expected_state = expected_state
         self._result: Optional[CallbackResult] = None
         self._callback_received = asyncio.Event()
         self._app: Optional[web.Application] = None
@@ -136,6 +146,14 @@ class OAuthCallbackServer:
         """
         # Parse query parameters
         query = request.query
+        state = query.get("state")
+        if self.expected_state is not None and (
+            not state or not secrets.compare_digest(state.encode(), self.expected_state.encode())
+        ):
+            # An unrelated request must not finish or poison the pending login.
+            return web.Response(status=400, text="Invalid OAuth state")
+        if self._callback_received.is_set():
+            return web.Response(status=409, text="OAuth callback already received")
 
         # Check for error
         error = query.get("error")
@@ -144,16 +162,19 @@ class OAuthCallbackServer:
                 success=False,
                 error=error,
                 error_description=query.get("error_description"),
+                state=state,
             )
             self._callback_received.set()
             return web.Response(
-                text=ERROR_HTML.format(error=f"{error}: {query.get('error_description', '')}"),
+                text=ERROR_HTML.replace(
+                    "{error}", html.escape(f"{error}: {query.get('error_description', '')}")
+                ),
                 content_type="text/html",
+                status=400,
             )
 
         # Extract code and state
         code = query.get("code")
-        state = query.get("state")
 
         if not code:
             self._result = CallbackResult(
@@ -163,8 +184,9 @@ class OAuthCallbackServer:
             )
             self._callback_received.set()
             return web.Response(
-                text=ERROR_HTML.format(error="No authorization code received"),
+                text=ERROR_HTML.replace("{error}", "No authorization code received"),
                 content_type="text/html",
+                status=400,
             )
 
         self._result = CallbackResult(
@@ -178,14 +200,21 @@ class OAuthCallbackServer:
 
     async def start(self) -> None:
         """Start the callback server."""
+        self._result = None
+        self._callback_received.clear()
         self._app = web.Application()
         self._app.router.add_get(self.callback_path, self._handle_callback)
 
         self._runner = web.AppRunner(self._app)
-        await self._runner.setup()
-
-        self._site = web.TCPSite(self._runner, "localhost", self.port)
-        await self._site.start()
+        try:
+            await self._runner.setup()
+            self._site = web.TCPSite(self._runner, "localhost", self.port)
+            await self._site.start()
+        except BaseException:
+            await self._runner.cleanup()
+            self._site = None
+            self._runner = None
+            raise
 
     async def stop(self) -> None:
         """Stop the callback server."""
@@ -247,7 +276,12 @@ async def run_oauth_flow(
     Returns:
         CallbackResult with authorization code or error
     """
-    async with OAuthCallbackServer(port=port, callback_path=callback_path) as server:
+    states = parse_qs(urlparse(auth_url).query).get("state", [])
+    if len(states) != 1 or not states[0]:
+        raise ValueError("Authorization URL must contain one OAuth state")
+    async with OAuthCallbackServer(
+        port=port, callback_path=callback_path, expected_state=states[0]
+    ) as server:
         # Open browser
         if open_browser:
             print("\nOpening browser for authentication...")

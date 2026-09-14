@@ -13,7 +13,7 @@ from prompt_toolkit.layout import FormattedTextControl, Window
 
 from ..harness.statusline_settings import resolve_statusline_config
 from ..harness.version_info import resolve_runtime_version
-from ..utils.model_info import get_context_window_size
+from ..utils.client import get_configured_context_window
 
 if TYPE_CHECKING:
     from ..harness.pr_status import PrStatusPoller
@@ -266,7 +266,7 @@ class StatusLine:
         usage = self.usage_tracker.session_usage
         model = self.usage_tracker.model
         current_dir = os.getcwd()
-        max_context = get_context_window_size(model)
+        max_context = get_configured_context_window(model)
         used_percentage = (
             (usage.current_context_tokens / max_context * 100) if max_context > 0 else 0.0
         )
@@ -295,6 +295,7 @@ class StatusLine:
             },
             "cost": {
                 "total_cost_usd": usage.total_cost,
+                "cost_unavailable": self._usage_summary().cost_unavailable,
                 "total_duration_ms": 0,
                 "total_api_duration_ms": 0,
                 "total_lines_added": 0,
@@ -409,7 +410,7 @@ class StatusLine:
         if custom is not None:
             return custom
 
-        # Model name - use cached model from usage_tracker to avoid repeated lookups
+        # Resolve the active model so /model changes are visible before the next request.
         model = self.usage_tracker.model
         if "/" in model:
             display_model = model.replace("litellm/", "")
@@ -432,7 +433,7 @@ class StatusLine:
         # This represents the total context that will be sent in the next turn
         # (assuming sessions automatically include previous conversation history)
         current_tokens = usage.current_context_tokens
-        max_context = get_context_window_size(model)
+        max_context = get_configured_context_window(model)
         context_pct = (current_tokens / max_context * 100) if max_context > 0 else 0
         context_style = self._get_context_style(context_pct)
 

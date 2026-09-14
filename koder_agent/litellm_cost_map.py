@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sys
+import threading
 from functools import lru_cache
 from importlib.resources import files
+from types import ModuleType
 from typing import Any
 
 LITELLM_LOCAL_MODEL_COST_MAP_ENV = "LITELLM_LOCAL_MODEL_COST_MAP"
@@ -14,6 +17,16 @@ MODEL_COST_MAP_PACKAGE = "koder_agent.data"
 MODEL_COST_MAP_FILENAME = "model_prices_and_context_window.json"
 _INSTALLED_MAP_ID_ATTR = "_koder_vendored_model_cost_map_id"
 _INIT_EVENTS: list[str] = []
+_INSTALL_LOCK = threading.RLock()
+
+
+def _reset_install_lock_after_fork() -> None:
+    global _INSTALL_LOCK
+    _INSTALL_LOCK = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_install_lock_after_fork)
 
 
 def _record_init_event(message: str) -> None:
@@ -23,12 +36,23 @@ def _record_init_event(message: str) -> None:
 
 def configure_litellm_local_model_cost_map() -> None:
     """Prevent LiteLLM from fetching its model cost map at import time."""
-    if "litellm" in sys.modules:
+    if (
+        "litellm" in sys.modules
+        and os.environ.get(LITELLM_LOCAL_MODEL_COST_MAP_ENV, "").strip().lower() != "true"
+    ):
         _record_init_event(
             "warning: litellm was already imported before local cost-map env was configured"
         )
     os.environ[LITELLM_LOCAL_MODEL_COST_MAP_ENV] = "true"
     _record_init_event(f"set {LITELLM_LOCAL_MODEL_COST_MAP_ENV}=true before LiteLLM import")
+
+
+def get_litellm() -> ModuleType:
+    """Initialize the SDK and Koder's price map only at a model-using boundary."""
+    configure_litellm_local_model_cost_map()
+    module = importlib.import_module("litellm")
+    install_vendored_litellm_model_cost_map(module)
+    return module
 
 
 @lru_cache(maxsize=1)
@@ -50,6 +74,13 @@ def install_vendored_litellm_model_cost_map(litellm_module: Any) -> dict[str, An
     If LiteLLM replaces the map later, a subsequent call will merge the vendored data
     into the new map while preserving custom entries that are not in Koder's copy.
     """
+    # Different model-facing modules can be imported by different threads.
+    # Join one publication before returning its shared map to any caller.
+    with _INSTALL_LOCK:
+        return _install_vendored_model_cost_map(litellm_module)
+
+
+def _install_vendored_model_cost_map(litellm_module: Any) -> dict[str, Any]:
     active_model_cost = getattr(litellm_module, "model_cost", None)
     installed_map_id = getattr(litellm_module, _INSTALLED_MAP_ID_ATTR, None)
     if isinstance(active_model_cost, dict) and installed_map_id == id(active_model_cost):
@@ -88,7 +119,7 @@ def _get_litellm_model_cost_map_source_info() -> dict[str, Any]:
 def get_litellm_cost_map_debug_lines(litellm_module: Any | None = None) -> list[str]:
     """Render debug details for LiteLLM cost-map initialization."""
     if litellm_module is None:
-        import litellm as litellm_module
+        litellm_module = get_litellm()
 
     source_info = _get_litellm_model_cost_map_source_info()
 

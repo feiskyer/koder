@@ -46,4 +46,33 @@ def test_provider_compat_can_resolve_model_client_without_harness_runtime(monkey
     resolved = compat.resolve_model_client()
     assert resolved.model_name == "gpt-4.1"
     assert resolved.api_key == "sk-test"
-    assert resolved.litellm_kwargs["model"] == "gpt-4.1"
+    # LiteLLM kwargs retain the canonical provider-qualified identity; the
+    # separate native model_name field remains unqualified.
+    assert resolved.litellm_kwargs["model"] == "openai/gpt-4.1"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "override"),
+    [
+        ("openai", "gpt-4.1", "anthropic/claude-opus-4-1"),
+        ("anthropic", "claude-opus-4-1", "openai/gpt-4.1"),
+        ("anthropic", "claude-opus-4-1", "anthropic/claude-sonnet-4-6"),
+    ],
+)
+def test_override_uses_one_canonical_provider_snapshot(
+    monkeypatch, tmp_path, provider, model, override
+):
+    from koder_agent.utils.client import get_model_client_snapshot
+
+    _write_config(tmp_path, {"model": {"name": model, "provider": provider}})
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "synthetic-anthropic-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example.invalid")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example.invalid")
+    monkeypatch.setattr("koder_agent.auth.client_integration.get_oauth_api_key", lambda _: None)
+    monkeypatch.setattr("koder_agent.auth.client_integration.has_oauth_token", lambda _: False)
+
+    expected = get_model_client_snapshot(override)
+    actual = ProviderCompat().resolve_model_client(override)
+    for field in ("model_name", "api_key", "base_url", "native_openai", "litellm_kwargs"):
+        assert getattr(actual, field) == expected[field], field

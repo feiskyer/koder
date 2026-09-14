@@ -4,8 +4,6 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
-
 from .models import KoderConfig
 
 
@@ -54,7 +52,9 @@ class ConfigManager:
                         Defaults to ~/.koder/config.yaml
         """
         self.config_path = config_path or self.default_config_path()
-        self._config: Optional[KoderConfig] = None
+        from koder_agent.harness.config.service import RuntimeConfigService
+
+        self._service = RuntimeConfigService(self.config_path)
 
     def load(self) -> KoderConfig:
         """Load configuration from file, creating default if not exists.
@@ -62,22 +62,7 @@ class ConfigManager:
         Returns:
             KoderConfig instance with loaded or default configuration.
         """
-        if self._config is not None:
-            return self._config
-
-        if self.config_path.exists():
-            with open(self.config_path, "r") as f:
-                data = yaml.safe_load(f) or {}
-            data = _migrate_legacy_voice_fields(data)
-            from koder_agent.harness.config.schema import parse_runtime_config_source
-
-            self._config = parse_runtime_config_source(data)
-        else:
-            from koder_agent.harness.config.schema import RuntimeConfig
-
-            self._config = RuntimeConfig()
-
-        return self._config
+        return self._service.load()
 
     def save(self, config: Optional[KoderConfig] = None) -> None:
         """Save configuration to file.
@@ -85,22 +70,7 @@ class ConfigManager:
         Args:
             config: Optional config to save. Uses cached config if not provided.
         """
-        if config is None and self._config is None:
-            from koder_agent.harness.config.schema import RuntimeConfig
-
-            config = RuntimeConfig()
-        else:
-            config = config or self._config
-
-        # Ensure directory exists
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Convert to dict and save as YAML
-        data = config.model_dump(exclude_none=False)
-        with open(self.config_path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-        self._config = config
+        self._service.save(config)
 
     def reload(self) -> KoderConfig:
         """Force reload configuration from file.
@@ -108,8 +78,7 @@ class ConfigManager:
         Returns:
             Freshly loaded KoderConfig instance.
         """
-        self._config = None
-        return self.load()
+        return self._service.reload()
 
     def get_effective_value(
         self, config_value: Any, env_var_name: Optional[str], cli_value: Any = None

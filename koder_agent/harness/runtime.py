@@ -9,9 +9,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from rich.console import Console
-
-from koder_agent.harness.bootstrap import build_registries
 from koder_agent.harness.config.service import RuntimeConfigService
 from koder_agent.harness.paths import harness_home_dir
 from koder_agent.harness.permissions.ai_classifier import AiShellClassifier
@@ -64,28 +61,50 @@ class HarnessRuntime:
     request: object
 
     async def run(self) -> int:
-        try:
-            return await self._run()
-        finally:
-            from koder_agent.mcp import drain_orphaned_mcp_owners
-            from koder_agent.mcp.reconnection import drain_orphaned_retirements
+        from koder_agent.harness.channels.state import channel_state_scope
+        from koder_agent.mcp.notifications import notification_handler_scope
 
-            for label, drain in (
-                ("owner", drain_orphaned_mcp_owners),
-                ("transport", drain_orphaned_retirements),
-            ):
-                try:
-                    await drain()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    _logger.debug(
-                        "Best-effort MCP %s orphan cleanup was incomplete; retaining it for retry",
-                        label,
-                        exc_info=True,
-                    )
+        with channel_state_scope(), notification_handler_scope():
+            try:
+                return await self._run()
+            finally:
+                from koder_agent.mcp import drain_orphaned_mcp_owners
+                from koder_agent.mcp.reconnection import drain_orphaned_retirements
+
+                for label, drain in (
+                    ("owner", drain_orphaned_mcp_owners),
+                    ("transport", drain_orphaned_retirements),
+                ):
+                    try:
+                        await drain()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        _logger.debug(
+                            "Best-effort MCP %s orphan cleanup was incomplete; retaining it for retry",
+                            label,
+                            exc_info=True,
+                        )
 
     async def _run(self) -> int:
+        mode = getattr(self.request, "mode", "")
+        argv = list(getattr(self.request, "argv", []))
+        first_arg = getattr(self.request, "first_arg", None)
+        # Maintenance must work even when the config it diagnoses is invalid.
+        if mode == "help":
+            from koder_agent.cli import _append_subcommand_help, _build_cli_parser
+
+            help_text = getattr(self.request, "help_text", None)
+            sys.stdout.write(
+                help_text or _append_subcommand_help(_build_cli_parser(None).format_help())
+            )
+            return 0
+        if mode == "version":
+            sys.stdout.write(render_cli_version_banner() + "\n")
+            return 0
+        if first_arg == "config":
+            return await run_harness_session_flow(first_arg=first_arg, argv=argv)
+
         # Create permission hierarchy and AI classifier
         rule_hierarchy = _load_permission_hierarchy()
         ai_classifier = AiShellClassifier()
@@ -116,25 +135,6 @@ class HarnessRuntime:
             rule_hierarchy=rule_hierarchy,
             ai_classifier=ai_classifier,
         )
-        command_registry, tool_registry = build_registries(permission_service=permission_service)
-        mode = getattr(self.request, "mode", "")
-        argv = list(getattr(self.request, "argv", []))
-
-        if mode == "help":
-            help_text = getattr(self.request, "help_text", None)
-            if help_text:
-                sys.stdout.write(help_text)
-                return 0
-            console = Console()
-            console.print("koder harness runtime bootstrap")
-            console.print(f"commands: {len(command_registry.list_names())}")
-            console.print(f"tools: {len(tool_registry.list_names())}")
-            return 0
-
-        if mode == "version":
-            sys.stdout.write(render_cli_version_banner() + "\n")
-            return 0
-
         if mode == "interactive":
             return await run_harness_session_flow(
                 first_arg=None,
@@ -143,7 +143,6 @@ class HarnessRuntime:
             )
 
         if mode in {"prompt", "subcommand", "auth_passthrough"}:
-            first_arg = getattr(self.request, "first_arg", None)
             return await run_harness_session_flow(
                 first_arg=first_arg,
                 argv=argv,

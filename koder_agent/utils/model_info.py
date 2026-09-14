@@ -3,7 +3,9 @@
 from math import floor
 from typing import Optional
 
-import litellm
+from ..litellm_cost_map import get_litellm
+
+litellm = get_litellm()
 
 
 class UnknownModelContextWindowError(ValueError):

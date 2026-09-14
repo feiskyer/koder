@@ -77,10 +77,10 @@ def model_supports_vision(model: str) -> bool:
     if not model:
         return False
     try:
-        import litellm
-
+        from ..litellm_cost_map import get_litellm
         from .model_info import get_model_name_variants_for_lookup
 
+        litellm = get_litellm()
         for name in get_model_name_variants_for_lookup(model):
             try:
                 if litellm.supports_vision(model=name):

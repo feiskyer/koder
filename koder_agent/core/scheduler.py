@@ -5,6 +5,7 @@ import inspect
 import json
 import logging
 import os
+import sys
 import threading
 import uuid
 from contextlib import ExitStack
@@ -35,6 +36,7 @@ from ..core.goal_prompts import GOAL_CONTEXT_MARKER
 from ..core.goal_runtime import GoalRuntime
 from ..core.goals import GoalStore
 from ..core.keyboard_listener import escape_listener, iter_with_cancellation
+from ..core.legacy_sessions import LegacySessionMigrationError
 from ..core.queued_input import QueuedInputManager, wrap_function_tool_for_queued_input
 from ..core.session import EnhancedSQLiteSession, migrate_legacy_sessions
 from ..core.streaming_display import StreamingDisplayManager
@@ -56,6 +58,12 @@ from ..harness.agents.definitions import (
     resolve_agent_model,
 )
 from ..harness.agents.hooks import SubagentLifecycleHooks
+from ..harness.agents.runtime_context import (
+    reset_agent_service_provider,
+    reset_agent_session,
+    set_agent_service_provider,
+    set_agent_session,
+)
 from ..harness.buddy import (
     COMPANION_ASSISTANT_GUIDANCE,
     BuddyLiveLayout,
@@ -81,6 +89,12 @@ from ..harness.memory.compact import (
 from ..harness.memory.extraction import llm_extract_memories
 from ..harness.memory.post_compact import PostCompactRepair
 from ..harness.memory.session_memory import SessionMemoryManager
+from ..harness.plugins.context import (
+    get_plugin_root,
+    plugin_root_scope,
+    reset_plugin_root,
+    set_plugin_root,
+)
 from ..harness.reasoning_display import normalize_reasoning_display_mode
 from ..tools import BackgroundShellManager, get_all_tools
 from ..tools.goal import reset_goal_context, set_goal_context
@@ -95,6 +109,7 @@ from ..tools.todo import (
     reset_todo_context,
     set_todo_context,
 )
+from ..utils.async_tasks import await_owned_task as _await_owned_task
 from ..utils.client import get_configured_context_window, get_model_name
 from ..utils.model_info import get_maximum_output_tokens
 from ..utils.terminal_theme import get_adaptive_console
@@ -170,17 +185,25 @@ class _GoalTurnLifecycle:
         self._perm_token = None
         self._goal_token = None
         self._todo_token = None
+        self._plugin_token = None
+        self._agent_service_token = None
+        self._agent_session_token = None
 
     async def __aenter__(self) -> "_GoalTurnLifecycle":
         self.scheduler._last_turn_cancelled = False
         self.scheduler._last_turn_errored = False
-        self._perm_token = set_tool_permission_context(
-            self.scheduler.permission_service,
-            approver=self.scheduler.approver,
-        )
-        self._goal_token = set_goal_context(self.scheduler.goal_runtime)
-        self._todo_token = set_todo_context(self.scheduler.todo_store)
         try:
+            self._plugin_token = set_plugin_root(self.scheduler.plugin_root)
+            self._perm_token = set_tool_permission_context(
+                self.scheduler.permission_service,
+                approver=self.scheduler.approver,
+            )
+            self._goal_token = set_goal_context(self.scheduler.goal_runtime)
+            self._todo_token = set_todo_context(self.scheduler.todo_store)
+            self._agent_service_token = set_agent_service_provider(
+                lambda scheduler=self.scheduler: scheduler.get_agent_service()
+            )
+            self._agent_session_token = set_agent_session(self.scheduler.session)
             await self.scheduler.goal_runtime.on_turn_start(
                 self.scheduler._goal_cumulative_tokens()
             )
@@ -211,15 +234,23 @@ class _GoalTurnLifecycle:
 
     async def finish(self) -> None:
         if self._finish_task is None:
+            # Some paths return diagnostics or partial text instead of raising.
+            # Freeze their status before releasing ownership of this turn.
             self._finish_task = asyncio.create_task(
                 self.scheduler._finish_goal_turn(
-                    error=self.error,
-                    cancelled=self.cancelled,
+                    error=self.error or self.scheduler._last_turn_errored,
+                    cancelled=self.cancelled or self.scheduler._last_turn_cancelled,
                 )
             )
         await _await_owned_task(self._finish_task)
 
     def _reset_contexts(self) -> None:
+        if self._agent_session_token is not None:
+            reset_agent_session(self._agent_session_token)
+            self._agent_session_token = None
+        if self._agent_service_token is not None:
+            reset_agent_service_provider(self._agent_service_token)
+            self._agent_service_token = None
         if self._todo_token is not None:
             reset_todo_context(self._todo_token)
             self._todo_token = None
@@ -229,26 +260,9 @@ class _GoalTurnLifecycle:
         if self._perm_token is not None:
             reset_tool_permission_context(self._perm_token)
             self._perm_token = None
-
-
-async def _await_owned_task(task: asyncio.Task[Any]) -> Any:
-    """Wait for owned work through repeated cancellation, then re-raise it."""
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-
-    try:
-        result = task.result()
-    except BaseException:
-        if cancelled:
-            raise asyncio.CancelledError from None
-        raise
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
+        if self._plugin_token is not None:
+            reset_plugin_root(self._plugin_token)
+            self._plugin_token = None
 
 
 async def _run_sync_and_join(function) -> Any:
@@ -411,10 +425,17 @@ class AgentScheduler:
         approver=None,
         todo_store: TodoStore | None = None,
         project_root: str | Path | None = None,
+        plugin_root: str | Path | None = None,
+        agent_service: Any = None,
     ):
         runtime_cwd = Path(project_root or os.getcwd()).expanduser().resolve()
         self.session = EnhancedSQLiteSession(session_id=session_id)
         self.project_root = runtime_cwd
+        self.plugin_root = (
+            get_plugin_root() if plugin_root is None else Path(plugin_root).expanduser()
+        )
+        if not self.plugin_root.is_absolute():
+            self.plugin_root = runtime_cwd / self.plugin_root
         self.agent_definition = agent_definition
         self.instructions_override = instructions_override
         self.instructions_append = instructions_append
@@ -430,6 +451,8 @@ class AgentScheduler:
         self.dev_agent = None  # Will be initialized in async method
         self.streaming = streaming
         self.permission_service = permission_service
+        self._agent_service = agent_service
+        self._owns_agent_service = agent_service is None
         # Interactive approver seam: when a call requires approval, this callback
         # (tool_name, arguments, decision) -> "allow"/"always"/"deny" is consulted
         # by enforce_tool_permission. Passing it through to the permission context
@@ -458,7 +481,7 @@ class AgentScheduler:
         self._load_usage_snapshot()
         self._runtime_config_service = RuntimeConfigService()
         self._title_generation_task: asyncio.Task | None = None  # Async title generation
-        self._migration_done = False  # Track if migration has been performed
+        self._migration_done = False  # Automatic import completed or explicitly deferred
         # Memory management - will be initialized after agent is created
         self._auto_compact: AutoCompactManager | None = None
         self._session_memory = SessionMemoryManager(project_dir=runtime_cwd)
@@ -492,12 +515,9 @@ class AgentScheduler:
         self._cancelled_stream_settlement: asyncio.Future[Any] | None = None
         self._cleanup_task: asyncio.Task[None] | None = None
         self._background_shell_cleanup_ids: frozenset[str] | None = None
-        # NOTE: micro_compact_messages is NOT wired here because the openai-agents
-        # SDK's Runner manages tool results internally.  Individual tool outputs are
-        # fed back into the conversation by the SDK before session.add_items is
-        # called, so we have no interception point to truncate them.  To enable
-        # micro-compaction the SDK would need a hook or the session's add_items
-        # override would need to post-process tool-role items.
+        # The SDK persists tool results through EnhancedSQLiteSession.add_items,
+        # whose override owns micro-compaction. This scheduler owns full
+        # conversation summarization rather than a second truncation path.
 
     def _has_content(self, content) -> bool:
         """Check if Rich or string content has any content."""
@@ -552,10 +572,20 @@ class AgentScheduler:
         return ""
 
     async def _ensure_agent_initialized(self):
-        """Ensure the dev agent is initialized and migration is complete."""
-        # Run migration once per process
+        """Initialize the agent after attempting the legacy import once."""
         if not self._migration_done:
-            await migrate_legacy_sessions(self.session.db_path)
+            try:
+                await migrate_legacy_sessions(self.session.db_path)
+            except LegacySessionMigrationError:
+                # Legacy-data repair must not take unrelated modern sessions
+                # offline. I/O failures and cancellation still abort startup.
+                # Keep diagnostics off stdout so JSON/JSONL output stays valid.
+                print(
+                    "Legacy session import deferred: old records need repair or conflict "
+                    "with existing history. No histories were changed. "
+                    "Run /backfill-sessions for details.",
+                    file=sys.stderr,
+                )
             self._migration_done = True
 
         if not self._agent_initialized:
@@ -574,18 +604,19 @@ class AgentScheduler:
                 instructions_override = self.instructions_override
             append_segments = [segment for segment in [self.instructions_append] if segment]
             append_segments.append(COMPANION_ASSISTANT_GUIDANCE)
-            dev_agent = await create_dev_agent(
-                self.tools,
-                name=name,
-                instructions_override=instructions_override,
-                instructions_append="\n\n".join(append_segments) if append_segments else None,
-                model_override=model_override,
-                extra_mcp_server_configs=(
-                    resolve_agent_mcp_server_configs(self.agent_definition)
-                    if self.agent_definition is not None
-                    else None
-                ),
-            )
+            with plugin_root_scope(self.plugin_root):
+                dev_agent = await create_dev_agent(
+                    self.tools,
+                    name=name,
+                    instructions_override=instructions_override,
+                    instructions_append="\n\n".join(append_segments) if append_segments else None,
+                    model_override=model_override,
+                    extra_mcp_server_configs=(
+                        resolve_agent_mcp_server_configs(self.agent_definition)
+                        if self.agent_definition is not None
+                        else None
+                    ),
+                )
             try:
                 tracked_servers = getattr(dev_agent, "_koder_mcp_servers", None)
                 # Initialize AutoCompactManager with model's context window
@@ -874,7 +905,7 @@ class AgentScheduler:
 
         await self._await_cancelled_stream_settlement()
 
-        # Ensure agent is initialized with MCP servers and migration complete
+        # Ensure agent is initialized with MCP servers and the legacy import checked
         cancellation_scope = current_turn_cancellation_scope()
         if cancellation_scope is not None:
             cancellation_scope.raise_if_cancelled()
@@ -883,7 +914,9 @@ class AgentScheduler:
         await self._reconnect_unhealthy_mcp_servers()
 
         if self.dev_agent is None:
-            console.print("[dim red]Agent not initialized[/dim red]")
+            goal_turn.mark_error()
+            if render_output:
+                console.print("[dim red]Agent not initialized[/dim red]")
             return "Agent not initialized"
 
         await self._repair_unreplayable_session_items()
@@ -909,6 +942,7 @@ class AgentScheduler:
             history_tokens=0,
         )
         if not initial_estimate.fits:
+            goal_turn.mark_error()
             error = ContextPreflightError(initial_estimate, subject="Current input")
             response = str(error)
             if render_output:
@@ -951,6 +985,7 @@ class AgentScheduler:
         try:
             await self._preflight_main_model_call(run_input)
         except ContextPreflightError as error:
+            goal_turn.mark_error()
             response = str(error)
             if render_output:
                 print_reflowable(console, f"[red]{response}[/red]")
@@ -1063,6 +1098,7 @@ class AgentScheduler:
         # Check session cost ceiling after each turn
         cost_error = self._check_session_cost_limit()
         if cost_error:
+            goal_turn.mark_error()
             if render_output:
                 print_reflowable(console, f"[red]{cost_error}[/red]")
             return cost_error
@@ -1110,7 +1146,7 @@ class AgentScheduler:
                         remaining = deadline - asyncio.get_running_loop().time()
                         if remaining <= 0:
                             turn_coro.close()
-                            raise TimeoutError
+                            raise asyncio.TimeoutError
                         return await asyncio.wait_for(turn_coro, timeout=remaining)
 
                 response = await run_turn(user_input)
@@ -1148,6 +1184,7 @@ class AgentScheduler:
 
         initial_estimate = await self._estimate_main_call_preflight(user_input, history_tokens=0)
         if not initial_estimate.fits:
+            self._last_turn_errored = True
             response = str(ContextPreflightError(initial_estimate, subject="Current input"))
             on_event({"type": "error", "error": response})
             return response
@@ -1155,6 +1192,7 @@ class AgentScheduler:
         try:
             await self._preflight_main_model_call(user_input)
         except ContextPreflightError as error:
+            self._last_turn_errored = True
             response = str(error)
             on_event({"type": "error", "error": response})
             return response
@@ -1669,12 +1707,13 @@ class AgentScheduler:
                 console.print("\n[yellow]Operation cancelled by user[/yellow]")
                 console.print()
             else:
+                cancelled_content: list[Any] = []
                 if self._has_content(partial_content):
-                    streaming_ui.set_final_content(partial_content)
+                    cancelled_content.extend([partial_content, Text()])
                 elif partial_text and partial_text.strip():
-                    streaming_ui.set_final_text(partial_text)
-                else:
-                    streaming_ui.set_final_text("[yellow]Operation cancelled by user[/yellow]")
+                    cancelled_content.extend([Text(partial_text), Text()])
+                cancelled_content.append(Text("Operation cancelled by user", style="yellow"))
+                streaming_ui.set_final_content(Group(*cancelled_content))
 
             # Return partial text for session history
             return partial_text or "Operation cancelled. You can provide additional instructions."
@@ -2241,12 +2280,9 @@ class AgentScheduler:
             # Keep more recent conversation so the model retains working context
             # after a compaction instead of re-reading everything.
             #
-            # LIMITATION: llm_compact_messages only preserves recent PLAIN
-            # messages (user/assistant text) via _recent_plain_context_items;
-            # raising keep_recent keeps more of that text but does NOT preserve
-            # raw tool-call / tool-output items (e.g. recently-read files). Full
-            # tool-output retention would require changing the read-only
-            # harness/memory/compact.py and is out of scope here.
+            # The helper retains instructions, recent conversation and eligible
+            # trailing tool items. Increasing keep_recent does not retain every
+            # older tool output; recently accessed files are restored below.
             keep_recent = self._compact_keep_recent()
             result = await llm_compact_messages(messages, keep_recent=keep_recent)
 
@@ -2301,13 +2337,6 @@ class AgentScheduler:
                 )
 
                 self._auto_compact.record_success()
-
-                # Invalidate the file-read dedup cache: compaction removes file
-                # contents from context, so the "already in context" fast-path
-                # would return stale/missing data if not cleared.
-                from ..tools.file import get_file_state
-
-                get_file_state().invalidate_all()
 
                 self._dispatch_compact_hooks(
                     "PostCompact",
@@ -2436,6 +2465,14 @@ class AgentScheduler:
             self._cleanup_task = asyncio.create_task(self._cleanup_resources())
         await _await_owned_task(self._cleanup_task)
 
+    def get_agent_service(self):
+        """Retain one service for SDK tools; managed sessions may share an app owner."""
+        if self._agent_service is None:
+            from koder_agent.harness.agents.service import AgentService
+
+            self._agent_service = AgentService(permission_service=self.permission_service)
+        return self._agent_service
+
     def prepare_uncommitted_cleanup(self) -> None:
         """Mark an aborted replacement as owning no pre-existing shells."""
         if self._background_shell_cleanup_ids is None:
@@ -2470,10 +2507,15 @@ class AgentScheduler:
             self._await_cancelled_stream_settlement,
         )
         await self._cleanup_guard("title generation task", self._stop_title_generation)
+        await self._cleanup_guard("owned agent service", self._stop_owned_agent_service)
         await self._cleanup_guard("MCP agent reset", self.reset_agent)
         await self._cleanup_guard("background shells", self._stop_background_shells)
         await self._cleanup_guard("goal store", self.goal_store.close)
         await self._cleanup_guard("session", self._close_session)
+
+    async def _stop_owned_agent_service(self) -> None:
+        if self._owns_agent_service and self._agent_service is not None:
+            await self._agent_service.aclose()
 
     async def _cleanup_guard(self, label: str, action) -> None:
         try:

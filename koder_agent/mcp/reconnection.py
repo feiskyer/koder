@@ -10,6 +10,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from .iterators import closing_async_iterator
+
 logger = logging.getLogger(__name__)
 
 # Upstream defaults
@@ -510,8 +512,9 @@ class LiveMCPServer:
                     f"MCP server method '{'.'.join(attribute_path)}' does not return an async "
                     "iterator"
                 )
-            async for item in result:
-                yield item
+            async with closing_async_iterator(result) as iterator:
+                async for item in iterator:
+                    yield item
         finally:
             await self._release(server)
 
@@ -543,16 +546,17 @@ class LiveMCPServer:
 
         validator = get_project_authorization_validator(self)
         if validator is not None:
-            async for item in validator._run_authorized_iterator(
+            source = validator._run_authorized_iterator(
                 self._iterate_server_path,
                 attribute_path,
                 *args,
                 **kwargs,
-            ):
+            )
+        else:
+            source = self._iterate_server_path(attribute_path, *args, **kwargs)
+        async with closing_async_iterator(source) as iterator:
+            async for item in iterator:
                 yield item
-            return
-        async for item in self._iterate_server_path(attribute_path, *args, **kwargs):
-            yield item
 
     @staticmethod
     def _resolve_session_callable(
@@ -615,8 +619,9 @@ class LiveMCPServer:
                 raise TypeError(
                     f"MCP session method '{'.'.join(path)}' does not return an async iterator"
                 )
-            async for item in result:
-                yield item
+            async with closing_async_iterator(result) as iterator:
+                async for item in iterator:
+                    yield item
         finally:
             await self._release(server)
 

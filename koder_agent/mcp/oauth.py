@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import stat
 import time
 import webbrowser
@@ -27,11 +28,13 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, AsyncGenerator, Callable, Dict, Generator
 from urllib.parse import urlencode, urlsplit
 
 import httpx
+
+from koder_agent.utils.async_tasks import run_sync_owned
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ _TEMP_FILE_SUFFIX = ".tmp"
 _PROTECTED_PAYLOAD_MAGIC = b"KODER-MCP-OAUTH-DPAPI-v1\0"
 _LOCK_OPEN_ATTEMPTS = 32
 _REFRESH_LOCK_POLL_INTERVAL = 0.05
+_CALLBACK_REQUEST_TIMEOUT_SECONDS = 5.0
 
 try:  # pragma: no branch - exactly one platform branch is active
     import fcntl
@@ -1269,6 +1273,8 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
     flow generated is rejected without recording an auth code.
     """
 
+    timeout = _CALLBACK_REQUEST_TIMEOUT_SECONDS
+
     def do_GET(self) -> None:  # noqa: N802
         from urllib.parse import parse_qs, urlparse
 
@@ -1327,6 +1333,60 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
         logger.debug("OAuth callback HTTP request handled")
 
 
+class _OAuthCallbackServer(HTTPServer):
+    """Own accepted connections so a stalled request cannot prevent shutdown."""
+
+    def __init__(self, server_address, handler):
+        self._request_lock = Lock()
+        self._active_requests: set[socket.socket] = set()
+        self._callback_thread: Thread | None = None
+        self._closing = False
+        super().__init__(server_address, handler)
+
+    def get_request(self):
+        request, address = super().get_request()
+        with self._request_lock:
+            if not self._closing:
+                self._active_requests.add(request)
+                return request, address
+        request.close()
+        raise OSError("OAuth callback server is stopping")
+
+    def close_request(self, request):
+        try:
+            super().close_request(request)
+        finally:
+            with self._request_lock:
+                self._active_requests.discard(request)
+
+    def begin_shutdown(self) -> None:
+        with self._request_lock:
+            self._closing = True
+            requests = tuple(self._active_requests)
+        for request in requests:
+            try:
+                request.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                # The handler may have closed the connection concurrently.
+                pass
+
+
+def _stop_callback_server(server: HTTPServer) -> None:
+    """Stop admission, release active reads and close the listening socket."""
+    try:
+        if isinstance(server, _OAuthCallbackServer):
+            server.begin_shutdown()
+    finally:
+        try:
+            server.shutdown()
+        finally:
+            try:
+                server.server_close()
+            finally:
+                if isinstance(server, _OAuthCallbackServer) and server._callback_thread is not None:
+                    server._callback_thread.join()
+
+
 def _start_callback_server(port: int | None) -> tuple[HTTPServer, int]:
     """Start a local HTTP server and return ``(server, actual_port)``.
 
@@ -1335,15 +1395,24 @@ def _start_callback_server(port: int | None) -> tuple[HTTPServer, int]:
     callback path before opening the browser.
     """
     bind_port = port or 0  # 0 = OS picks a free port
-    server = HTTPServer(("127.0.0.1", bind_port), _OAuthCallbackHandler)
-    # Per-flow state lives on the server instance, not on the handler class,
-    # so concurrent flows do not clobber each other.
-    server.oauth_result = _CallbackResult()  # type: ignore[attr-defined]
-    server.oauth_expected_state = None  # type: ignore[attr-defined]
-    server.oauth_callback_path = None  # type: ignore[attr-defined]
-    actual_port = server.server_address[1]
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server = _OAuthCallbackServer(("127.0.0.1", bind_port), _OAuthCallbackHandler)
+    thread = None
+    try:
+        # Per-flow state lives on the server instance, not on the handler class,
+        # so concurrent flows do not clobber each other.
+        server.oauth_result = _CallbackResult()  # type: ignore[attr-defined]
+        server.oauth_expected_state = None  # type: ignore[attr-defined]
+        server.oauth_callback_path = None  # type: ignore[attr-defined]
+        actual_port = server.server_address[1]
+        thread = Thread(target=server.serve_forever, daemon=True)
+        server._callback_thread = thread
+        thread.start()
+    except BaseException:
+        if thread is not None and thread.is_alive():
+            _stop_callback_server(server)
+        else:
+            server.server_close()
+        raise
     return server, actual_port
 
 
@@ -1430,14 +1499,23 @@ class MCPOAuthFlow:
         server, actual_port = _start_callback_server(callback_port)
         redirect_uri = f"http://127.0.0.1:{actual_port}/callback"
 
+        primary_error: BaseException | None = None
         try:
             client_id, client_secret = await self._ensure_client(metadata, redirect_uri)
 
             tokens = await self._authorization_code_flow(
                 metadata, client_id, client_secret, server=server, redirect_uri=redirect_uri
             )
+        except BaseException as exc:
+            primary_error = exc
+            raise
         finally:
-            server.shutdown()
+            try:
+                await run_sync_owned(_stop_callback_server, server)
+            except BaseException as exc:
+                if primary_error is None:
+                    raise
+                logger.debug("OAuth callback cleanup failed (%s)", type(exc).__name__)
         _merge_bound_tokens(self.cache_identity, tokens, binding)
         return {"Authorization": f"Bearer {tokens['access_token']}"}
 

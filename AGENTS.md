@@ -27,12 +27,37 @@ uv run pylint koder_agent/ --disable=C,R,W --errors-only # Error-only check
 
 ### Testing
 
+Use the installed-runtime entrypoint for primary unit/non-E2E integration
+validation. It discovers the Python behind `koder` on PATH and reads its current
+dependencies on every invocation, adds test tools without changing that install,
+and rejects dependency mismatches before collection. Do not substitute an old
+`uv.lock` environment for the user's actual runtime. An alternate install can be
+selected with `--runtime-python /path/to/bin/python`.
+
+The underlying isolated runner uses temporary application state and blocks
+accidental Python access to real profiles and remote services. It is not an OS
+sandbox. Dependency alignment does not mean using the user's real configuration.
+
+```bash
+bash scripts/test.sh -q
+bash scripts/test.sh --test tests/core -q
+bash scripts/test.sh --runtime-report /tmp/koder-runtime.json --junitxml /tmp/koder-tests.xml -q
+```
+
+Direct pytest commands do not provide those collection-time isolation guards:
+
 ```bash
 uv run pytest                                   # All tests
 uv run pytest tests/test_file_tools.py          # Single file
 uv run pytest -v -k "test_name"                 # Single test by name
 uv run pytest tests/integration/                # Integration tests
 uv run pytest tests/e2e/                        # E2E tmux tests (requires tmux)
+```
+
+Validate a built wheel without importing the application:
+
+```bash
+uv run --no-project --no-env-file python scripts/verify_wheel.py dist/koder-0.6.3-py3-none-any.whl --source . --json
 ```
 
 ### CLI Subcommands
@@ -115,7 +140,7 @@ koder_agent/
 │   ├── tools/         #   Harness-level tool implementations (file ops, shell executor, search, web)
 │   ├── voice/         #   Voice dictation service (OpenAI, Google)
 │   └── worktree/      #   Git worktree management for parallel development
-├── litellm_cost_map.py # Vendored cost map loader (prevents LiteLLM network fetch at import)
+├── litellm_cost_map.py # Local cost-map mode and explicit model-boundary SDK initialization
 ├── mcp/               # MCP server integration: stdio/SSE/HTTP transports, OAuth, reconnection,
 │                      #   server factory/manager, elicitation, prompts, serve mode
 ├── providers/         # Provider model definitions and compatibility shims
@@ -124,6 +149,11 @@ koder_agent/
 └── utils/             # Client setup, system prompts, session helpers, model info/deprecation,
                        #   image input, terminal theme
 ```
+
+`koder_agent/version.py` supplies the shared lightweight version resolver for the
+package and CLI. Importing the root package keeps local cost-map mode enabled but
+does not import LiteLLM; model consumers use `litellm_cost_map.get_litellm()` to
+initialize the SDK and publish the vendored map before model/pricing use.
 
 ### Core Flow
 
@@ -138,23 +168,41 @@ koder_agent/
 
 ### Key Design Patterns
 
-- **Provider Abstraction**: `utils/client.py` detects providers from environment/config and uses native OpenAI clients or LiteLLM wrappers as appropriate. Maps KODER_API_KEY/KODER_BASE_URL to provider-specific env vars.
+- **Provider Abstraction**: `utils/client.py` resolves providers from environment/config and selects native OpenAI clients or LiteLLM wrappers. API keys flow through explicit client/request arguments, not newly exported child-process environment variables; base URLs and non-secret provider settings keep their documented precedence.
+- **OAuth Request Routing**: `auth/oauth_routing.py` maps public OAuth model names to private SDK wire routes, restores model identity, and keeps provider credentials/endpoints with Koder handlers. `agentic/oauth_model.py` preserves SDK chat conversion and per-request stream ownership. Do not steer OAuth by deleting SDK-native model catalog entries.
 - **OAuth Providers**: `auth/providers/` supports Google, Claude, ChatGPT, Antigravity, and GitHub Copilot subscription-backed model access. Tokens stored under `~/.koder/tokens/`.
+- **Keychain Boundary**: `auth/keychain_backend.py` is a standalone, lazy native helper for existing file-based Keychain items. Values travel through bounded pipes, not argv; checked operations use full OSStatus values. Never infer absence from a process exit code. Native references/buffers and the helper's interaction policy are restored/released. TokenStorage propagates uncertain mutation results instead of publishing a fallback as if the write certainly failed. Native tests use adapters and must not access real Keychains or profiles.
+- **MCP OAuth Callbacks**: `mcp/oauth.py` owns the loopback listener and accepted connections for each authorization flow. Shutdown interrupts active reads, closes the listener and joins its server thread off the event loop; cleanup preserves the original authorization error or cancellation. Idle callback reads have a finite timeout, and failed thread startup closes the allocated listener.
+- **MCP SDK Connections**: `mcp/connection.py` owns each transport/session on one lifetime task. Connect, reconnection retirement, and cleanup callers signal/join it; never unwind AnyIO scopes from a different task. MCP 2 uses the public `Client` with numeric seconds; MCP 1 uses its duration-based `ClientSession` contract. Channel admission uses Koder's explicit stream/session binding, not SDK-private read-stream fields. Test actual SDK negotiation over subprocess stdio, not just mocked configuration lists.
+- **MCP Elicitation**: `mcp/elicitation.py` runs hooks and owned form prompts asynchronously. Serialize terminal readers per event loop; cancellation joins prompt cleanup. Preserve arrays, validate responses with an offline schema registry, omit content on decline/cancel, and never read stdin without an interactive terminal. URL mode is explicitly declined, not opened automatically.
+- **Manual OAuth Input**: `harness/auth/commands.py` owns an asynchronous authorization-code prompt. Timeout and cancellation stop and join the prompt before returning; do not use an executor-backed `input()` that can keep consuming stdin after its waiter exits. Empty/closed input never reaches token exchange or storage.
+- **Copilot Device Login**: `auth/github_copilot.py` owns asynchronous device polling using the installed SDK's endpoints, headers and cache paths. Validate finite positive deadlines, honor provider expiry/slow-down responses, close HTTP resources through cancellation, and publish only after both credentials are obtained. Cache writes are owned and atomic per file, not a two-file/power-loss transaction.
 - **RetryingLitellmModel**: `agentic/agent.py` wraps LiteLLM with exponential backoff retry (3-5 attempts) for rate limits and transient errors.
 - **Progressive Disclosure Skills**: `tools/skill.py` loads skill metadata at startup (Level 1) and full content on demand (Level 2), saving 90%+ tokens.
 - **Bundled Skills**: `harness/skills/bundled_skills/` ships 14 built-in skills: `batch`, `code-review`, `debug`, `fewer-permission-prompts`, `init-explore`, `loop`, `remember`, `review-spec`, `run`, `security-review`, `simplify`, `stuck`, `update-config`, `verify`.
 - **Skill Restrictions**: `tools/skill_context.py` and `agentic/skill_guardrail.py` limit tool access when restricted skills are active.
 - **Goals System**: `core/goals.py` provides persistent session objectives with optional token budgets. Tools (`tools/goal.py`) create/update/query goals; `core/goal_runtime.py` manages lifecycle.
 - **Hooks System**: `harness/hooks/runtime.py` dispatches command hooks for events like `PreToolUse`, `PostToolUse`, `SessionStart`, `FileChanged`, `CwdChanged`, etc. Hooks are configured in `.koder/settings.json`.
-- **Memory & Compaction**: `harness/memory/` handles token-aware conversation compaction with auto-compact, micro-compact, and dream modes. Includes recovery and retrieval of past session context.
+- **Hook Results**: Matching another hook retains accumulated results unless its output explicitly replaces a field. HTTP hook failures close their response bodies before returning diagnostics.
+- **Memory & Compaction**: `harness/memory/` handles token-aware compaction, dream modes and retrieval. Its standalone `TranscriptStore` and SQLite recovery helpers are not wired to the main SDK-backed Session; no automatic `.bak` fallback is implied.
+- **Compaction Safety**: Empty, analysis-only or malformed summary output must fail before history replacement. Preserve instruction items, recent multimodal messages and complete trailing tool pairs; unfinished tool items stay in summary source. Recognize both Responses and Chat content blocks. An already-compacted no-op keeps original item shapes and does not count pinned system/developer instructions against the recent-conversation budget.
+- **File Read Ownership**: Managed file tools use the actual `EnhancedSQLiteSession.file_read_state`, never another session's or the legacy unscoped cache. Capture this state before file side effects; detached, retired or closed managed bindings cannot borrow unscoped read evidence. Session replacement, clear/pop, micro-truncation and close invalidate only their owner's state. Exact replacement invalidates after commit wins; failed atomic replacement retains the original evidence.
+- **SQLite Ownership**: Session metadata and legacy MCP migration use `utils/sqlite_connections.py` to retain connection ownership through failed opening and repeated cancellation. Close and join the SQLite worker before returning; raw `async with aiosqlite.connect(...)` does not cover failed-opening cleanup. GoalStore reuses the same close helper for its cached connection.
+- **Metadata Schema**: Session metadata reads/writes and listing share `core/session.py`'s schema helper. Already-current schemas use a read-only fast path; migration rechecks columns after `BEGIN IMMEDIATE` and commits the upgrade atomically. Do not reintroduce separate check-then-ALTER paths that race concurrent openers.
 - **Streaming Display**: `core/streaming_display.py` manages Rich Live displays for real-time output with reasoning display support.
 - **Approval Hooks**: `agentic/approval_hooks.py` and `harness/permissions/` wrap tool execution with permission checks. Shell commands are classified by `permissions/shell_classifier.py` and `permissions/ai_classifier.py`.
+- **Shell Executable Identity**: Positive readonly/allow decisions preserve explicit executable paths; `./ls` is not trusted merely because its basename is `ls`. Path-qualified runners are not transparently unwrapped for allow matching. Deny and hazard checks retain a separate conservative basename projection. Never reuse that deny projection to grant execution, or infer an allow from failed parsing/unresolved normalization.
 - **Plan Mode**: `agentic/plan_guardrail.py` restricts write operations during exploration/planning.
 - **Security Guard**: `core/security.py` and `core/bash_security.py` validate shell commands before execution.
+- **Shell Runner Projection**: `harness/permissions/shell_runners.py` recognizes only known argument-preserving wrapper forms for automatic read/allow decisions. Unknown flags, environment edits, `xargs`, `nohup`, and session-detaching wrappers do not inherit inner-command trust. Rule serialization preserves word boundaries; deny-only projections may conservatively recognize paths and assignments but never grant an allow.
+- **Shell Segment Identity**: `harness/permissions/shell_segments.py` supplies the shared literal segment parser for classification, matching and saved-prefix derivation. Keep original quote spelling separate from decoded argv, consume only actual redirection operands, and treat `#` inside a word as literal. Saved rules retain the approved executable path; unsupported syntax stays approval-gated.
 - **Sandbox**: `harness/sandbox/` supports sandboxed execution via multiple backends (unix-local, Docker, Modal, E2B, Vercel) with filesystem policies.
 - **Background Shells**: `tools/shell.py` `BackgroundShellManager` tracks async shell commands.
 - **Agent Teams**: `harness/agents/teams/` supports in-process and tmux-backed teammate execution with memory sync and permission bridging.
-- **Channels**: `harness/channels/` enables MCP servers and plugins to push real-time events into running sessions.
+- **Team Tool Ownership**: `harness/agents/teams/tool_runtime.py` retains leader selections per actual main Session on the owning AgentService. Public team tools and interactive commands share the in-process runner; an idle teammate is still live work. Close its consumer before releasing the service. Generation-scoped TeamService handles prevent stale leader tools from acting on a deleted-and-recreated team.
+- **Fork Context**: `harness/agents/runtime_context.py` binds the actual Session during a managed turn. `agent_tool(context="fork")` reads that parent instead of guessing a session ID/database, filters incomplete tool pairs, and rejects unavailable/retired parents. Detached agent tasks do not retain a live parent Session binding; each agent execution owns and closes its own Session.
+- **Channels**: `harness/channels/` enables MCP servers and plugins to push real-time events into running sessions. Each managed `HarnessRuntime.run()` owns its channel policy and MCP notification handler. Admission retains that owner's policy across reader tasks, and runtime exit revokes it. A downstream turn cancellation does not retire the session's consumer; session shutdown cancels and joins it. Direct unscoped helper calls retain the legacy default context; this is not a guarantee that all other process-global runtime state is isolated.
+- **Channel Inbox**: `harness/channels/inbox.py` stages bounded payloads in a private per-runtime directory and retains only entry descriptors in memory. Admission must not wait for model consumption on the MCP receive path. Reject overload explicitly; preserve unfinished files without automatic replay. Stop admission and join the consumer before finalizing the inbox. A scheduler-reported failure or cancellation is not successful delivery.
 - **Plugin System**: `harness/plugins/` manages plugin lifecycle, discovery, marketplace integration, and manifest validation.
 - **Code Intelligence**: `harness/code_intelligence.py` provides LSP-style operations (document symbols, workspace symbols, definition, references, diagnostics).
 - **Buddy Companion**: `harness/buddy.py` implements an interactive companion personality with rarities and speech bubbles.
@@ -251,6 +299,7 @@ tests/
 - Always run `uv run black . && uv run ruff format && uv run ruff check --fix` and fix warnings/errors whenever code changes are made.
 - Always use `uv run` whenever you need to run, evaluate, or test Python scripts.
 - Before claiming TUI behavior, validate the real terminal flow with scenario-based tmux checks from `tests/e2e/tui_feature_scenarios.json`. Validate scenarios with `uv run scripts/tmux_feature_scenarios.py --check`; run focused scenarios with `uv run scripts/tmux_feature_scenarios.py --run <name>` or the full suite with `--run-all`.
+- TUI acceptance must also use the actual installed runtime's interpreter/dependencies, with isolated HOME, a private tmux socket, and synthetic providers. Pin the selected `UV_PYTHON`/`UV_PROJECT_ENVIRONMENT` for that invocation to prevent child CLI drift; this is not permission to reuse a historical dependency lock.
 - When adding a new tool, register it in `tools/__init__.py` → `get_all_tools()` and update the Tool Categories table above.
 - When adding new CLI subcommands or flags, update `cli.py` parser and `harness/cli/entrypoint.py` SUBCOMMANDS set.
 - When adding new hook events, update `harness/hooks/runtime.py` HOOK_EVENTS set.

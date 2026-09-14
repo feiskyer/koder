@@ -99,6 +99,21 @@ The status line can show model, session, usage, and workspace details. These com
 /cost
 ```
 
+Changing the model updates the status label without clearing accumulated usage.
+Each request is attributed and priced using its request model; selecting another
+model does not reprice earlier tokens. Unknown pricing is shown as unavailable
+(`$?`), including sessions that mix known and unknown prices. Known amounts remain
+a subtotal, not a complete vendor bill.
+
+An explicit context-window override is used by both the default status line and
+custom status commands, including for custom model names.
+
+During streaming, `Escape` cancels the active turn. In fixed-bottom mode, partial
+output and the cancellation notice remain in the transcript, and the next prompt
+can continue the same session. A later turn waits for pending streamed-session
+persistence before starting. Cancellation does not mean that already-completed
+external side effects have been undone.
+
 You can customize terminal style with:
 
 ```bash

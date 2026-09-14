@@ -11,12 +11,17 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import aiosqlite
+
+from ..utils.async_tasks import await_owned_task
+from ..utils.sqlite_connections import close_sqlite_connection
 
 MAX_GOAL_OBJECTIVE_CHARS = 4_000
 
@@ -182,9 +187,13 @@ class GoalStore:
 
     async def _connection(self) -> aiosqlite.Connection:
         if self._conn is None:
-            conn = await aiosqlite.connect(self.db_path)
+            conn = aiosqlite.connect(self.db_path)
             status_list = ", ".join(f"'{value}'" for value in _ALL_STATUS_VALUES)
-            await conn.execute(f"""CREATE TABLE IF NOT EXISTS session_goals (
+            try:
+                # Retain ownership before the first await: cancelling connect()
+                # itself can lose a connection still being opened by its worker.
+                await await_owned_task(asyncio.ensure_future(conn))
+                cursor = await conn.execute(f"""CREATE TABLE IF NOT EXISTS session_goals (
                     session_id TEXT PRIMARY KEY NOT NULL,
                     goal_id TEXT NOT NULL,
                     objective TEXT NOT NULL,
@@ -195,22 +204,53 @@ class GoalStore:
                     created_at_ms INTEGER NOT NULL,
                     updated_at_ms INTEGER NOT NULL
                 )""")
-            await conn.commit()
+                await cursor.close()
+                await conn.commit()
+            except BaseException:
+                await await_owned_task(asyncio.create_task(close_sqlite_connection(conn)))
+                raise
             self._conn = conn
         return self._conn
 
     async def close(self) -> None:
         async with self._lock:
             if self._conn is not None:
-                await self._conn.close()
+                conn = self._conn
                 self._conn = None
+                await await_owned_task(asyncio.create_task(close_sqlite_connection(conn)))
+
+    async def _rollback_or_close(self, conn: aiosqlite.Connection) -> None:
+        try:
+            await conn.rollback()
+        except BaseException:
+            # A connection with an unresolvable transaction cannot be reused.
+            self._conn = None
+            await close_sqlite_connection(conn)
+            raise
+
+    @asynccontextmanager
+    async def _transaction(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Keep writes, their result snapshot, and failure cleanup under one lock.
+
+        Rollback is queued after any interrupted SQLite work and joined before
+        the next caller can use the connection. A commit already executed by
+        SQLite cannot be undone if cancellation races its completion.
+        """
+        async with self._lock:
+            conn = await self._connection()
+            try:
+                yield conn
+                await conn.commit()
+            except BaseException:
+                await await_owned_task(asyncio.create_task(self._rollback_or_close(conn)))
+                raise
 
     async def _fetch_goal(self, conn: aiosqlite.Connection, session_id: str) -> Optional[Goal]:
-        cursor = await conn.execute(
+        async with conn.execute(
             f"SELECT {_GOAL_COLUMNS} FROM session_goals WHERE session_id = ?",
             (session_id,),
-        )
-        row = await cursor.fetchone()
+        ) as cursor:
+            row = await cursor.fetchone()
         return _goal_from_row(row) if row else None
 
     async def get_goal(self, session_id: str) -> Optional[Goal]:
@@ -232,8 +272,7 @@ class GoalStore:
         goal_id = str(uuid.uuid4())
         now_ms = _now_ms()
         status = _status_after_budget_limit(status, 0, token_budget)
-        async with self._lock:
-            conn = await self._connection()
+        async with self._transaction() as conn:
             cursor = await conn.execute(
                 f"""INSERT INTO session_goals (
                     session_id, goal_id, objective, status, token_budget,
@@ -252,7 +291,7 @@ class GoalStore:
                 (session_id, goal_id, objective, status.value, token_budget, now_ms, now_ms),
             )
             row = await cursor.fetchone()
-            await conn.commit()
+            await cursor.close()
         return _goal_from_row(row)
 
     async def insert_goal(
@@ -270,8 +309,7 @@ class GoalStore:
         goal_id = str(uuid.uuid4())
         now_ms = _now_ms()
         status = _status_after_budget_limit(status, 0, token_budget)
-        async with self._lock:
-            conn = await self._connection()
+        async with self._transaction() as conn:
             cursor = await conn.execute(
                 f"""INSERT INTO session_goals (
                     session_id, goal_id, objective, status, token_budget,
@@ -291,7 +329,7 @@ class GoalStore:
                 (session_id, goal_id, objective, status.value, token_budget, now_ms, now_ms),
             )
             row = await cursor.fetchone()
-            await conn.commit()
+            await cursor.close()
         return _goal_from_row(row) if row else None
 
     async def update_goal(self, session_id: str, update: GoalUpdate) -> Optional[Goal]:
@@ -312,8 +350,7 @@ class GoalStore:
         expected = update.expected_goal_id
         now_ms = _now_ms()
 
-        async with self._lock:
-            conn = await self._connection()
+        async with self._transaction() as conn:
             if status is not None and update.has_budget_update:
                 token_budget = update.token_budget
                 cursor = await conn.execute(
@@ -413,7 +450,7 @@ class GoalStore:
                 return goal
 
             rows_affected = cursor.rowcount
-            await conn.commit()
+            await cursor.close()
             if rows_affected == 0:
                 return None
             return await self._fetch_goal(conn, session_id)
@@ -433,8 +470,7 @@ class GoalStore:
         stronger stop reason stays visible.
         """
         now_ms = _now_ms()
-        async with self._lock:
-            conn = await self._connection()
+        async with self._transaction() as conn:
             cursor = await conn.execute(
                 """UPDATE session_goals
                 SET status = ?, updated_at_ms = ?
@@ -446,14 +482,13 @@ class GoalStore:
                 (status.value, now_ms, session_id, status.value),
             )
             rows_affected = cursor.rowcount
-            await conn.commit()
+            await cursor.close()
             if rows_affected == 0:
                 return None
             return await self._fetch_goal(conn, session_id)
 
     async def delete_goal(self, session_id: str) -> Optional[Goal]:
-        async with self._lock:
-            conn = await self._connection()
+        async with self._transaction() as conn:
             cursor = await conn.execute(
                 f"""DELETE FROM session_goals
                 WHERE session_id = ?
@@ -461,7 +496,7 @@ class GoalStore:
                 (session_id,),
             )
             row = await cursor.fetchone()
-            await conn.commit()
+            await cursor.close()
         return _goal_from_row(row) if row else None
 
     async def account_usage(
@@ -504,8 +539,7 @@ class GoalStore:
             expected_clause = " AND goal_id = ?"
             params.append(expected_goal_id)
 
-        async with self._lock:
-            conn = await self._connection()
+        async with self._transaction() as conn:
             cursor = await conn.execute(
                 f"""UPDATE session_goals
                 SET
@@ -524,7 +558,7 @@ class GoalStore:
                 tuple(params),
             )
             row = await cursor.fetchone()
-            await conn.commit()
+            await cursor.close()
             if row is None:
                 current = await self._fetch_goal(conn, session_id)
                 return GoalAccountingOutcome(updated=False, goal=current)

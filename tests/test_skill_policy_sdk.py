@@ -33,6 +33,7 @@ from koder_agent.tools.skill import Skill
 from koder_agent.tools.skill_context import (
     clear_restrictions,
     get_active_restrictions,
+    get_skill_activation_block_message,
     skill_invocation_scope,
     skill_run_scope,
 )
@@ -222,7 +223,8 @@ def test_get_skill_parallel_batch_fails_closed_before_disallowed_tool(monkeypatc
     assert get_active_restrictions() is None
 
 
-def test_batch_generation_does_not_block_reused_call_id_in_next_response(monkeypatch):
+@pytest.mark.parametrize("reuse_call_id", [False, True])
+def test_batch_generation_respects_sdk_tool_call_identity(monkeypatch, reuse_call_id):
     writes: list[str] = []
     write_tool = _function_tool("write_file", writes)
     skill = Skill(
@@ -235,7 +237,7 @@ def test_batch_generation_does_not_block_reused_call_id_in_next_response(monkeyp
     model = _SequenceModel(
         [
             _mixed_skill_batch("skill-write"),
-            _tool_call("write_file", "write-1"),
+            _tool_call("write_file", "write-1" if reuse_call_id else "write-2"),
             _message("done", "generation-message"),
         ]
     )
@@ -253,8 +255,26 @@ def test_batch_generation_does_not_block_reused_call_id_in_next_response(monkeyp
     result = asyncio.run(scenario())
 
     assert result.final_output == "done"
-    assert writes == ["write_file"]
+    # The current SDK deduplicates completed call IDs, including calls that
+    # produced a guardrail result. A new invocation needs a fresh ID; do not
+    # bypass the SDK's replay protection to test Koder's per-response policy.
+    assert writes == ([] if reuse_call_id else ["write_file"])
     assert "call this tool again in the next model step" in str(model.inputs[1])
+
+
+def test_policy_generation_itself_does_not_retain_prior_response_call_ids():
+    async def scenario():
+        with skill_run_scope() as run_hooks:
+            await run_hooks.on_llm_end(
+                None, None, SimpleNamespace(output=_mixed_skill_batch("skill-write"))
+            )
+            assert get_skill_activation_block_message("write_file", "write-1") is not None
+            await run_hooks.on_llm_end(
+                None, None, SimpleNamespace(output=_tool_call("write_file", "write-1"))
+            )
+            assert get_skill_activation_block_message("write_file", "write-1") is None
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("order", ["skill-write", "write-skill"])
@@ -761,6 +781,9 @@ def test_unseeded_agent_service_fork_activates_skill_across_sdk_steps(monkeypatc
     class _Session:
         def __init__(self, session_id):
             self.session_id = session_id
+
+        def close(self):
+            pass
 
         async def get_items(self):
             return []

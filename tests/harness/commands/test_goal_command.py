@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+import pytest_asyncio
 
 # Stub litellm before importing koder_agent to avoid optional dependency issues
 if "litellm" not in sys.modules:
@@ -42,9 +43,13 @@ def handler():
     return HarnessInteractiveCommandHandler(emit_console=False)
 
 
-@pytest.fixture
-def scheduler(tmp_path):
-    return FakeScheduler(tmp_path)
+@pytest_asyncio.fixture
+async def scheduler(tmp_path):
+    instance = FakeScheduler(tmp_path)
+    try:
+        yield instance
+    finally:
+        await instance.goal_store.close()
 
 
 def test_goal_command_is_registered():

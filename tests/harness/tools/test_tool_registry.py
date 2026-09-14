@@ -1,3 +1,4 @@
+import _thread
 import asyncio
 import gc
 import importlib
@@ -520,8 +521,16 @@ def test_first_registration_self_import_rolls_back_exactly_and_retries(
     assert registry.source_for("one") == "module@retry"
 
 
+@pytest.mark.parametrize(
+    "start_worker",
+    [
+        "threading.Thread(target=mutate_public_module).start()",
+        "_thread.start_new_thread(mutate_public_module, ())",
+        "_thread.start_new(mutate_public_module, ())",
+    ],
+)
 def test_failed_candidate_import_rejects_child_thread_before_live_module_access(
-    reload_module_fixture,
+    reload_module_fixture, start_worker
 ):
     module_name, qualified_name, write_module = reload_module_fixture
     write_module(_tool_module_source("v1", (("one", "one-old"),)) + "\nSTATE = {'items': []}\n")
@@ -529,22 +538,25 @@ def test_failed_candidate_import_rejects_child_thread_before_live_module_access(
     registry.register_module(module_name, source="module@v1")
     public_module = sys.modules[qualified_name]
     original_spec = registry.get("one")
+    thread_starters = (_thread.start_new_thread, _thread.start_new)
 
     write_module(
         "\n".join(
             [
+                "import _thread",
                 "import sys",
                 "import threading",
                 "from koder_agent.harness.tools.registry import ToolSpec",
                 "VERSION = 'failed-import-child'",
                 "STATE = {'items': []}",
+                "finished = threading.Event()",
                 "def mutate_public_module():",
                 "    public_module = sys.modules[__name__]",
                 "    public_module.STATE['items'].append('import-child-thread')",
                 "    public_module.VERSION = 'import-child-thread-leak'",
-                "worker = threading.Thread(target=mutate_public_module)",
-                "worker.start()",
-                "worker.join()",
+                "    finished.set()",
+                start_worker,
+                "assert finished.wait(timeout=2)",
                 "def register_tools(registry):",
                 "    registry.register(ToolSpec(name='one'))",
                 "",
@@ -563,6 +575,7 @@ def test_failed_candidate_import_rejects_child_thread_before_live_module_access(
     assert asyncio.run(registry.get("one").invoke({}))["content"] == "v1"
     assert registry.source_for("one") == "module@v1"
     assert registry.replacement_history() == ()
+    assert (_thread.start_new_thread, _thread.start_new) == thread_starters
 
 
 def test_failed_reload_import_preserves_registry_and_external_module_reference(
@@ -666,8 +679,16 @@ def test_failed_reload_registration_preserves_registry_and_external_module_refer
     assert registry.replacement_history() == ()
 
 
+@pytest.mark.parametrize(
+    "start_worker",
+    [
+        "threading.Thread(target=mutate_public_module).start()",
+        "_thread.start_new_thread(mutate_public_module, ())",
+        "_thread.start_new(mutate_public_module, ())",
+    ],
+)
 def test_failed_tool_collection_rejects_child_thread_before_live_module_access(
-    reload_module_fixture,
+    reload_module_fixture, start_worker
 ):
     module_name, qualified_name, write_module = reload_module_fixture
     write_module(_tool_module_source("v1", (("one", "one-old"),)) + "\nSTATE = {'items': []}\n")
@@ -675,24 +696,27 @@ def test_failed_tool_collection_rejects_child_thread_before_live_module_access(
     registry.register_module(module_name, source="module@v1")
     public_module = sys.modules[qualified_name]
     original_spec = registry.get("one")
+    thread_starters = (_thread.start_new_thread, _thread.start_new)
 
     write_module(
         "\n".join(
             [
+                "import _thread",
                 "import sys",
                 "import threading",
                 "from koder_agent.harness.tools.registry import ToolSpec",
                 "VERSION = 'failed-register-child'",
                 "STATE = {'items': []}",
+                "finished = threading.Event()",
                 "def mutate_public_module():",
                 "    public_module = sys.modules[__name__]",
                 "    public_module.STATE['items'].append('register-child-thread')",
                 "    public_module.VERSION = 'register-child-thread-leak'",
+                "    finished.set()",
                 "def register_tools(registry):",
                 "    registry.register(ToolSpec(name='staged'))",
-                "    worker = threading.Thread(target=mutate_public_module)",
-                "    worker.start()",
-                "    worker.join()",
+                f"    {start_worker}",
+                "    assert finished.wait(timeout=2)",
                 "",
             ]
         )
@@ -710,6 +734,7 @@ def test_failed_tool_collection_rejects_child_thread_before_live_module_access(
     assert asyncio.run(registry.get("one").invoke({}))["content"] == "v1"
     assert registry.source_for("one") == "module@v1"
     assert registry.replacement_history() == ()
+    assert (_thread.start_new_thread, _thread.start_new) == thread_starters
 
 
 def test_reentrant_register_module_during_collection_is_fail_closed_and_rolls_back(
@@ -815,6 +840,14 @@ def test_failed_candidate_is_never_transiently_visible_to_lock_free_readers(
         assert getattr(tools_package, module_name) is public_module
         assert public_module.VERSION == "v1"
         assert asyncio.run(registry.get("one").invoke({}))["content"] == "v1"
+        # A candidate in the executor thread must not block unrelated callers
+        # from creating their own threads while it is staged.
+        observed_versions = []
+        reader = threading.Thread(target=lambda: observed_versions.append(public_module.VERSION))
+        reader.start()
+        reader.join(timeout=2)
+        assert not reader.is_alive()
+        assert observed_versions == ["v1"]
         gate.release.set()
         with pytest.raises(RuntimeError, match="candidate failed after visibility gate"):
             future.result(timeout=5)

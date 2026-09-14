@@ -60,12 +60,19 @@ def resolve_with_symlinks(path: str) -> tuple[str, str]:
     return original, real
 
 
-def _is_dangerous_path(normalized: Path) -> bool:
+def _is_dangerous_path(normalized: Path, roots: list[Path]) -> bool:
     """Check if the normalized path points to a dangerous file or directory."""
     name = normalized.name
     if name in DANGEROUS_FILES:
         return True
-    for part in normalized.parts:
+    containing = [root for root in roots if _path_within(normalized, root)]
+    root = max(containing, key=lambda item: len(item.parts)) if containing else None
+    # A worktree can live below .koder without making every source file a
+    # configuration file. Protect sensitive paths inside its actual boundary.
+    parts = normalized.relative_to(root).parts if root is not None else normalized.parts
+    if root is not None and root.name in DANGEROUS_DIRECTORIES:
+        return True
+    for part in parts:
         if part in DANGEROUS_DIRECTORIES:
             return True
     return False
@@ -117,6 +124,7 @@ def evaluate_path_access(
     operation: str,
     workspace_root: Path | str | None = None,
     additional_roots: Iterable[str | Path] | None = None,
+    working_directory: Path | str | None = None,
 ) -> PathAccessDecision:
     """Evaluate whether a path operation is allowed within the current workspace."""
     # Check shell expansion FIRST before any normalization
@@ -131,9 +139,10 @@ def evaluate_path_access(
         )
 
     root = _normalize_root(workspace_root)
+    directory = _normalize_root(working_directory) if working_directory is not None else root
 
     if "\0" in path:
-        normalized = _normalize_target(path, root)
+        normalized = _normalize_target(path, directory)
         return PathAccessDecision(
             path=path,
             normalized_path=str(normalized),
@@ -146,10 +155,10 @@ def evaluate_path_access(
     # Build the path without resolving symlinks first
     raw_path = Path(path.replace("\0", "")).expanduser()
     if not raw_path.is_absolute():
-        raw_path = root / raw_path
+        raw_path = directory / raw_path
 
     # Now normalize (which resolves symlinks)
-    normalized = _normalize_target(path, root)
+    normalized = _normalize_target(path, directory)
     roots = _all_roots(root, additional_roots)
 
     # Check if path is a symlink and where it points
@@ -214,7 +223,7 @@ def evaluate_path_access(
         )
 
     # Check for dangerous files/directories for write/delete operations
-    if operation in ("write", "delete") and _is_dangerous_path(normalized):
+    if operation in ("write", "delete") and _is_dangerous_path(normalized, roots):
         return PathAccessDecision(
             path=path,
             normalized_path=str(normalized),

@@ -1,5 +1,7 @@
 """Tests for enhanced per-model cost tracking."""
 
+import pytest
+
 from koder_agent.core.usage_tracker import (
     ModelUsage,
     UsageTracker,
@@ -102,3 +104,124 @@ def test_format_summary():
     assert "claude-sonnet-4-6" in summary or "sonnet" in summary.lower()
     assert isinstance(summary, str)
     assert len(summary) > 0
+
+
+@pytest.fixture
+def model_switch(monkeypatch):
+    active = ["model-a"]
+    monkeypatch.setattr("koder_agent.core.usage_tracker.get_model_name", lambda: active[0])
+    monkeypatch.setattr(
+        "koder_agent.core.usage_tracker.litellm.model_cost",
+        {
+            "model-a": {"input_cost_per_token": 0.01, "output_cost_per_token": 0.02},
+            "model-b": {"input_cost_per_token": 0.03, "output_cost_per_token": 0.04},
+        },
+    )
+    return active
+
+
+def test_switch_refreshes_cached_pricing_without_repricing_history(model_switch):
+    tracker = UsageTracker()
+    tracker.record_usage(10, 5, model="model-a")
+    assert tracker.model == "model-a"
+    assert tracker.get_model_costs() == (0.01, 0.02)
+    old_cost = tracker.session_usage.total_cost
+    model_switch[0] = "model-b"
+
+    # Exercise the cost lookup before reading the model label.
+    assert tracker.get_model_costs() == (0.03, 0.04)
+    assert tracker.model == "model-b"
+    assert tracker.session_usage.total_cost == old_cost
+    tracker.record_usage(10, 5, model="model-b")
+    assert tracker.session_usage.total_cost == pytest.approx(0.7)
+    assert tracker.get_per_model_usage()["model-a"].cost == pytest.approx(0.2)
+    assert tracker.get_per_model_usage()["model-b"].cost == pytest.approx(0.5)
+
+
+def test_explicit_request_model_controls_price_not_active_model(model_switch):
+    tracker = UsageTracker()
+    tracker.record_usage(10, 5, model="model-b")
+    assert tracker.model == "model-a"
+    assert tracker.session_usage.total_cost == pytest.approx(0.5)
+    assert tracker.get_per_model_usage()["model-b"].cost == pytest.approx(0.5)
+
+
+def test_implicit_model_usage_is_attributed_across_switches(model_switch):
+    tracker = UsageTracker()
+    tracker.record_usage(10, 5)
+    model_switch[0] = "model-b"
+    tracker.record_usage(10, 5)
+    assert set(tracker.get_per_model_usage()) == {"model-a", "model-b"}
+    assert tracker.session_usage.total_cost == pytest.approx(0.7)
+
+
+def test_unknown_pricing_stays_incomplete_after_switch_and_reload(model_switch, tmp_path):
+    tracker = UsageTracker()
+    tracker.record_usage(10, 5, model="unknown-fixture")
+    tracker.record_usage(10, 5, model="model-a")
+    assert tracker.summary().cost_unavailable is True
+    assert tracker.session_usage.total_cost == pytest.approx(0.2)
+    rendered = tracker.format_summary()
+    assert "Total Cost: unavailable" in rendered
+    assert "Cost: $0.2000" in rendered
+
+    path = tmp_path / "usage.json"
+    tracker.save(path)
+    loaded = UsageTracker()
+    loaded.load(path)
+    model_switch[0] = "model-b"
+    assert loaded.summary().cost_unavailable is True
+    assert loaded.session_usage.total_cost == pytest.approx(0.2)
+    assert loaded.get_per_model_usage()["model-a"].cost == pytest.approx(0.2)
+    loaded.reset()
+    assert loaded.summary().cost_unavailable is False
+    assert loaded.get_per_model_usage() == {}
+
+
+@pytest.mark.parametrize("with_model_breakdown", [False, True])
+def test_legacy_unpriced_usage_is_not_made_free_by_switching_models(
+    model_switch, tmp_path, with_model_breakdown
+):
+    import json
+
+    data = {
+        "session_usage": {
+            "request_count": 1,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_cost": 0.0,
+        },
+        "per_model": {},
+    }
+    if with_model_breakdown:
+        data["per_model"]["unknown-fixture"] = {
+            "model": "unknown-fixture",
+            "request_count": 1,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cost": 0.0,
+        }
+    path = tmp_path / "legacy-usage.json"
+    path.write_text(json.dumps(data))
+    tracker = UsageTracker()
+    tracker.load(path)
+
+    assert tracker.model == "model-a"
+    assert tracker.summary().cost_unavailable is True
+    assert "Cost: $0.0000" not in tracker.format_summary()
+
+
+def test_cached_rates_are_keyed_by_model_and_reused(model_switch, monkeypatch):
+    from unittest.mock import Mock
+
+    import litellm
+
+    prices = Mock(wraps=litellm.model_cost)
+    monkeypatch.setattr(litellm, "model_cost", prices)
+    tracker = UsageTracker()
+    assert tracker.get_model_costs() == (0.01, 0.02)
+    model_switch[0] = "model-b"
+    assert tracker.get_model_costs() == (0.03, 0.04)
+    model_switch[0] = "model-a"
+    assert tracker.get_model_costs() == (0.01, 0.02)
+    assert prices.get.call_count == 2

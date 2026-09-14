@@ -1,4 +1,8 @@
-"""Permission relay over channels — ID generation, profanity filter, callbacks."""
+"""Standalone permission-relay primitives, not a runtime approval consumer.
+
+These helpers do not authenticate a sender. Any integrating caller must own
+admission and provenance; the current channel runtime does not wire this relay.
+"""
 
 from __future__ import annotations
 
@@ -116,6 +120,11 @@ class ChannelPermissionResponse:
     from_server: str
 
 
+@dataclass(frozen=True)
+class _PendingPermission:
+    handler: Callable[[ChannelPermissionResponse], None]
+
+
 class ChannelPermissionCallbacks:
     """Track pending permission relay requests and resolve them.
 
@@ -123,7 +132,7 @@ class ChannelPermissionCallbacks:
     """
 
     def __init__(self) -> None:
-        self._pending: dict[str, Callable[[ChannelPermissionResponse], None]] = {}
+        self._pending: dict[str, _PendingPermission] = {}
 
     def on_response(
         self,
@@ -132,10 +141,14 @@ class ChannelPermissionCallbacks:
     ) -> Callable[[], None]:
         """Register *handler* for *request_id*.  Returns an unsubscribe function."""
         key = request_id.lower()
-        self._pending[key] = handler
+        if key in self._pending:
+            raise ValueError("Permission request ID is already pending")
+        pending = _PendingPermission(handler)
+        self._pending[key] = pending
 
         def unsubscribe() -> None:
-            self._pending.pop(key, None)
+            if self._pending.get(key) is pending:
+                self._pending.pop(key, None)
 
         return unsubscribe
 
@@ -151,11 +164,17 @@ class ChannelPermissionCallbacks:
         ``False`` if no handler was registered for that ID.  The entry
         is deleted **before** the handler is called to prevent re-entrancy.
         """
-        key = request_id.lower()
-        handler = self._pending.pop(key, None)
-        if handler is None:
+        if behavior not in ("allow", "deny"):
             return False
-        handler(ChannelPermissionResponse(behavior=behavior, from_server=from_server))  # type: ignore[arg-type]
+        key = request_id.lower()
+        pending = self._pending.pop(key, None)
+        if pending is None:
+            return False
+        pending.handler(
+            ChannelPermissionResponse(
+                behavior="allow" if behavior == "allow" else "deny", from_server=from_server
+            )
+        )
         return True
 
     @property

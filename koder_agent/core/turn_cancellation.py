@@ -6,6 +6,8 @@ import asyncio
 from contextvars import ContextVar, Token
 from typing import Awaitable, Callable, TypeVar
 
+from koder_agent.utils.async_tasks import await_owned_task
+
 from .keyboard_listener import CancellationToken
 
 T = TypeVar("T")
@@ -72,23 +74,37 @@ def reset_turn_cancellation_scope(token: Token) -> None:
 
 
 async def await_with_turn_cancellation(awaitable: Awaitable[T]) -> T:
-    """Await work while propagating the active turn cancellation signal."""
+    """Own work until it settles, even when the caller itself is cancelled."""
     scope = current_turn_cancellation_scope()
     if scope is None:
         return await awaitable
-    scope.raise_if_cancelled()
+
+    # Take ownership before checking the signal: the caller may already have
+    # created a coroutine or started a task that must not be abandoned.
     work_task = asyncio.ensure_future(awaitable)
     cancel_task = asyncio.create_task(scope.token.wait())
-    done, pending = await asyncio.wait(
-        {work_task, cancel_task},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in pending:
-        task.cancel()
-    if cancel_task in done:
-        work_task.cancel()
-        await asyncio.gather(work_task, return_exceptions=True)
-        raise asyncio.CancelledError
-    cancel_task.cancel()
-    await asyncio.gather(cancel_task, return_exceptions=True)
-    return work_task.result()
+    primary_error: BaseException | None = None
+    try:
+        scope.raise_if_cancelled()
+        done, _ = await asyncio.wait(
+            {work_task, cancel_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_task in done:
+            raise asyncio.CancelledError
+        return work_task.result()
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        for task in (work_task, cancel_task):
+            if not task.done():
+                task.cancel()
+        settlement = asyncio.gather(work_task, cancel_task, return_exceptions=True)
+        try:
+            await await_owned_task(settlement)
+        except asyncio.CancelledError:
+            # Repeated cancellation must not interrupt provider cleanup or
+            # replace the original failure/cancellation (including its message).
+            if primary_error is None:
+                raise

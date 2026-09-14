@@ -6,6 +6,7 @@ results get truncated before hitting disk (and being re-read into future turns).
 """
 
 import os
+from contextlib import ExitStack, closing
 
 import pytest
 
@@ -18,13 +19,26 @@ def db_path(tmp_path):
     return str(tmp_path / "micro.db")
 
 
+@pytest.fixture
+def session_factory(db_path):
+    """Own each test's sessions, including when an assertion fails."""
+    with ExitStack() as resources:
+
+        def create_session(session_id):
+            return resources.enter_context(
+                closing(EnhancedSQLiteSession(session_id, db_path=db_path))
+            )
+
+        yield create_session
+
+
 @pytest.mark.asyncio
-async def test_large_function_call_output_persisted_truncated(db_path, monkeypatch):
+async def test_large_function_call_output_persisted_truncated(session_factory, monkeypatch):
     """A 100k-char function_call_output persists a truncated version + marker."""
     monkeypatch.delenv(ENABLED_ENV, raising=False)
     monkeypatch.delenv("KODER_MICRO_COMPACT_MAX_CHARS", raising=False)
 
-    session = EnhancedSQLiteSession("s-large-fco", db_path=db_path)
+    session = session_factory("s-large-fco")
     big = "Z" * 100_000
     items = [
         {"type": "function_call", "call_id": "call_1", "name": "grep", "arguments": "{}"},
@@ -49,9 +63,9 @@ async def test_large_function_call_output_persisted_truncated(db_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_large_tool_role_content_persisted_truncated(db_path):
+async def test_large_tool_role_content_persisted_truncated(session_factory):
     """A large role=='tool' content is truncated on persist."""
-    session = EnhancedSQLiteSession("s-large-tool", db_path=db_path)
+    session = session_factory("s-large-tool")
     big = "Q" * 100_000
     items = [
         {"role": "user", "content": "run it"},
@@ -68,9 +82,9 @@ async def test_large_tool_role_content_persisted_truncated(db_path):
 
 
 @pytest.mark.asyncio
-async def test_small_output_untouched(db_path):
+async def test_small_output_untouched(session_factory):
     """Small outputs are persisted verbatim (no marker, normal operation)."""
-    session = EnhancedSQLiteSession("s-small", db_path=db_path)
+    session = session_factory("s-small")
     items = [
         {"type": "function_call", "call_id": "c", "name": "ls", "arguments": "{}"},
         {"type": "function_call_output", "call_id": "c", "output": "small result"},
@@ -88,9 +102,9 @@ async def test_small_output_untouched(db_path):
 
 
 @pytest.mark.asyncio
-async def test_call_ids_and_count_preserved_multi(db_path):
+async def test_call_ids_and_count_preserved_multi(session_factory):
     """Item count and all call ids survive a mixed batch."""
-    session = EnhancedSQLiteSession("s-multi", db_path=db_path)
+    session = session_factory("s-multi")
     items = [
         {"role": "user", "content": "go"},
         {"type": "function_call", "call_id": "a", "name": "f", "arguments": "{}"},
@@ -113,11 +127,11 @@ async def test_call_ids_and_count_preserved_multi(db_path):
 
 
 @pytest.mark.asyncio
-async def test_disabled_via_env_persists_full_output(db_path, monkeypatch):
+async def test_disabled_via_env_persists_full_output(session_factory, monkeypatch):
     """When KODER_MICRO_COMPACT is off, large outputs persist untruncated."""
     monkeypatch.setenv(ENABLED_ENV, "0")
 
-    session = EnhancedSQLiteSession("s-disabled", db_path=db_path)
+    session = session_factory("s-disabled")
     big = "W" * 60_000
     items = [
         {"type": "function_call_output", "call_id": "c", "output": big},
@@ -131,11 +145,11 @@ async def test_disabled_via_env_persists_full_output(db_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_custom_threshold_via_env(db_path, monkeypatch):
+async def test_custom_threshold_via_env(session_factory, monkeypatch):
     """KODER_MICRO_COMPACT_MAX_CHARS controls the truncation threshold."""
     monkeypatch.setenv("KODER_MICRO_COMPACT_MAX_CHARS", "1000")
 
-    session = EnhancedSQLiteSession("s-threshold", db_path=db_path)
+    session = session_factory("s-threshold")
     output = "M" * 5000  # under default (20k) but over custom 1000
     items = [
         {"type": "function_call_output", "call_id": "c", "output": output},
@@ -150,18 +164,18 @@ async def test_custom_threshold_via_env(db_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_empty_items_noop(db_path):
+async def test_empty_items_noop(session_factory):
     """Empty add_items call is a safe no-op."""
-    session = EnhancedSQLiteSession("s-empty", db_path=db_path)
+    session = session_factory("s-empty")
     await session.add_items([])
     stored = await session.get_items()
     assert stored == []
 
 
 @pytest.mark.asyncio
-async def test_original_items_not_mutated(db_path):
+async def test_original_items_not_mutated(session_factory):
     """add_items must not mutate the caller's list/dicts in place."""
-    session = EnhancedSQLiteSession("s-nomutate", db_path=db_path)
+    session = session_factory("s-nomutate")
     big = "X" * 60_000
     original = {"type": "function_call_output", "call_id": "c", "output": big}
     items = [original]
@@ -170,8 +184,8 @@ async def test_original_items_not_mutated(db_path):
 
 
 @pytest.mark.asyncio
-async def test_replace_items_atomically_replaces_instead_of_appending(db_path):
-    session = EnhancedSQLiteSession("s-replace", db_path=db_path)
+async def test_replace_items_atomically_replaces_instead_of_appending(session_factory):
+    session = session_factory("s-replace")
     originals = [
         {"role": "user", "content": "ORIGINAL_A"},
         {"role": "assistant", "content": "ORIGINAL_B"},
@@ -185,8 +199,8 @@ async def test_replace_items_atomically_replaces_instead_of_appending(db_path):
 
 
 @pytest.mark.asyncio
-async def test_replace_items_rolls_back_partial_transaction(db_path, monkeypatch):
-    session = EnhancedSQLiteSession("s-replace-fail", db_path=db_path)
+async def test_replace_items_rolls_back_partial_transaction(session_factory, monkeypatch):
+    session = session_factory("s-replace-fail")
     originals = [
         {"role": "user", "content": "ORIGINAL_A"},
         {"role": "assistant", "content": "ORIGINAL_B"},

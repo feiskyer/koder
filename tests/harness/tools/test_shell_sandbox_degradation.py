@@ -452,12 +452,14 @@ def test_available_sandbox_path_unchanged_and_callback_not_consulted(monkeypatch
         monkeypatch,
         tmp_path,
         backend_result=SandboxExecutionResult(
-            status="ok",
+            status="success",
             exit_code=0,
             stdout="hello",
             stderr="",
             sandboxed=True,
             backend_id="unix-local",
+            created=True,
+            executed=True,
         ),
     )
     monkeypatch.chdir(tmp_path)

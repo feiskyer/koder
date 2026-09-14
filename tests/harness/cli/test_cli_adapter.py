@@ -2,7 +2,6 @@ import asyncio
 import gc
 import subprocess
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -208,9 +207,10 @@ def test_harness_runtime_propagates_caller_cancellation_during_orphan_drain(monk
     asyncio.run(scenario())
 
 
-def test_cli_process_exits_7_when_runtime_cleanup_is_cancelled_once(tmp_path):
+def test_cli_process_exits_7_when_runtime_cleanup_is_cancelled_once(
+    tmp_path, python_child_environment
+):
     marker = tmp_path / "runtime-exit-7.txt"
-    project_root = Path(__file__).resolve().parents[3]
     script = """
 import asyncio
 import gc
@@ -265,7 +265,8 @@ cli.run()
 
     result = subprocess.run(
         [sys.executable, "-c", script, str(marker)],
-        cwd=project_root,
+        cwd=tmp_path,
+        env=python_child_environment,
         capture_output=True,
         text=True,
         timeout=30,

@@ -19,7 +19,7 @@ from litellm.llms.custom_llm import CustomLLM
 from litellm.types.utils import GenericStreamingChunk, ModelResponse, Usage
 
 from koder_agent.auth.base import OAuthProvider, OAuthResult, OAuthTokens
-from koder_agent.auth.client_integration import get_oauth_token
+from koder_agent.auth.client_integration import async_get_oauth_token
 from koder_agent.auth.constants import (
     ANTHROPIC_API_BASE,
     ANTHROPIC_AUTH_URL_CONSOLE,
@@ -83,12 +83,20 @@ class ClaudeOAuthProvider(OAuthProvider):
 
         Anthropic expects JSON body instead of form-encoded.
         """
+        if not isinstance(code, str) or not code.strip():
+            raise ValueError("Authorization code must not be empty")
+        if not isinstance(verifier, str) or not verifier.strip():
+            raise ValueError("Authorization verifier must not be empty")
         # Handle code format: code#state or just code
         if "#" in code:
             auth_code, state = code.split("#", 1)
+            if state != verifier:
+                raise ValueError("Authorization state does not match this login request")
         else:
             auth_code = code
             state = verifier
+        if not auth_code.strip():
+            raise ValueError("Authorization code must not be empty")
 
         return {
             "code": auth_code,
@@ -285,16 +293,16 @@ class ClaudeOAuthLLM(CustomLLM):
         super().__init__()
         self.provider_id = "claude"
 
-    def _get_access_token(self) -> Optional[str]:
+    async def _get_access_token(self) -> Optional[str]:
         """Get OAuth access token for Claude."""
-        tokens = get_oauth_token(self.provider_id)
+        tokens = await async_get_oauth_token(self.provider_id)
         if tokens:
             return tokens.access_token
         return None
 
-    def _require_access_token(self) -> str:
+    async def _require_access_token(self) -> str:
         """Return a valid OAuth token or raise a helpful error."""
-        access_token = self._get_access_token()
+        access_token = await self._get_access_token()
         if not access_token:
             raise ValueError(
                 "No OAuth token available for Claude. "
@@ -557,7 +565,7 @@ class ClaudeOAuthLLM(CustomLLM):
         **kwargs: Any,
     ) -> ModelResponse:
         """Async completion using Anthropic API with OAuth."""
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         body = await self._build_request_body(model, messages, **merged_kwargs)
@@ -602,7 +610,7 @@ class ClaudeOAuthLLM(CustomLLM):
         **kwargs: Any,
     ) -> AsyncIterator[GenericStreamingChunk]:
         """Async streaming using Anthropic API with OAuth."""
-        access_token = self._require_access_token()
+        access_token = await self._require_access_token()
         merged_kwargs = merge_optional_params(kwargs)
 
         body = await self._build_request_body(model, messages, **merged_kwargs)

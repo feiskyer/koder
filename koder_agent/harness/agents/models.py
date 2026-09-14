@@ -33,6 +33,10 @@ class AgentRecord:
     model_config: dict[str, Any] | None = None
     origin_cwd: str | None = None
     definition_provenance: dict[str, Any] | None = None
+    pending_messages: tuple[str, ...] = ()
+    inflight_messages: tuple[str, ...] = ()
+    runtime_owner: str | None = None
+    execution_id: str | None = None
 
     @classmethod
     def create(

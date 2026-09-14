@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from html import escape
 from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -48,14 +49,16 @@ def wrap_channel_message(
         content
         </channel>
 
-    Meta keys are filtered to safe identifiers; values are XML-escaped.
+    Meta keys are filtered to safe identifiers (excluding the reserved source);
+    values and message content are XML-escaped so untrusted input cannot forge
+    another channel envelope.
     """
     attrs = f' source="{escape_xml_attr(server_name)}"'
     if meta:
         for key, val in meta.items():
-            if SAFE_META_KEY.match(key):
+            if key != "source" and SAFE_META_KEY.fullmatch(key):
                 attrs += f' {key}="{escape_xml_attr(str(val))}"'
-    return f"<{CHANNEL_TAG}{attrs}>\n{content}\n</{CHANNEL_TAG}>"
+    return f"<{CHANNEL_TAG}{attrs}>\n{escape(content, quote=False)}\n</{CHANNEL_TAG}>"
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +140,10 @@ class ChannelNotificationRouter:
         meta: Optional[dict[str, str]] = None,
     ) -> None:
         """Dispatch a channel message to all registered callbacks."""
-        for cb in list(self._message_callbacks.values()):
+        for callback_id in list(self._message_callbacks):
+            cb = self._message_callbacks.get(callback_id)
+            if cb is None:
+                continue
             try:
                 await cb(server_name, content, meta)
             except Exception as exc:
@@ -150,7 +156,10 @@ class ChannelNotificationRouter:
         behavior: str,
     ) -> None:
         """Dispatch a channel permission verdict to all registered callbacks."""
-        for cb in list(self._permission_callbacks.values()):
+        for callback_id in list(self._permission_callbacks):
+            cb = self._permission_callbacks.get(callback_id)
+            if cb is None:
+                continue
             try:
                 await cb(server_name, request_id, behavior)
             except Exception as exc:

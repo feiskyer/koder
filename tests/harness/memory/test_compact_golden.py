@@ -17,7 +17,7 @@ from koder_agent.harness.memory.compact import compact_messages
 
 
 def test_compact_matches_golden_fixture():
-    fixtures_dir = Path("tests/fixtures/memory")
+    fixtures_dir = project_root / "tests/fixtures/memory"
     before = json.loads((fixtures_dir / "compact_before.json").read_text(encoding="utf-8"))
     expected = json.loads((fixtures_dir / "compact_after.json").read_text(encoding="utf-8"))
 

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import importlib
 import os
+import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 
 import koder_agent
+from koder_agent import litellm_cost_map as costs
 from koder_agent.litellm_cost_map import (
     LITELLM_LOCAL_MODEL_COST_MAP_ENV,
     configure_litellm_local_model_cost_map,
@@ -115,3 +118,75 @@ def test_litellm_cost_map_debug_lines_include_source_info_errors(monkeypatch):
     rendered = "\n".join(get_litellm_cost_map_debug_lines(fake_litellm))
 
     assert "source_info_error: missing LiteLLM source info" in rendered
+
+
+def test_explicit_sdk_bootstrap_configures_before_import_and_handles_reinit(monkeypatch):
+    module = types.ModuleType("litellm")
+    module.model_cost = {"custom": {"max_input_tokens": 123}}
+    real_import = importlib.import_module
+    imports = []
+
+    def controlled_import(name, *args, **kwargs):
+        if name != "litellm":
+            return real_import(name, *args, **kwargs)
+        imports.append(os.environ[LITELLM_LOCAL_MODEL_COST_MAP_ENV])
+        return module
+
+    monkeypatch.setenv(LITELLM_LOCAL_MODEL_COST_MAP_ENV, "false")
+    monkeypatch.setattr(costs.importlib, "import_module", controlled_import)
+    assert costs.get_litellm() is module
+    first = module.model_cost
+    assert costs.get_litellm().model_cost is first
+    assert first["custom"]["max_input_tokens"] == 123
+    module.model_cost = {"second-custom": {"max_input_tokens": 456}}
+    assert costs.get_litellm().model_cost["second-custom"]["max_input_tokens"] == 456
+    assert module.model_cost["gpt-4o"] == load_vendored_model_cost_map()["gpt-4o"]
+    assert imports == ["true", "true", "true"]
+
+
+def test_concurrent_installers_share_one_published_map(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    second_started = threading.Event()
+    second_load = threading.Event()
+    module = types.SimpleNamespace(model_cost={"custom": {"max_input_tokens": 12}})
+    calls = []
+
+    def load():
+        calls.append("load")
+        if len(calls) > 1:
+            second_load.set()
+        entered.set()
+        assert release.wait(3)
+        return {"vendored": {"max_input_tokens": 99}}
+
+    def second():
+        second_started.set()
+        return costs.install_vendored_litellm_model_cost_map(module)
+
+    monkeypatch.setattr(costs, "load_vendored_model_cost_map", load)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(costs.install_vendored_litellm_model_cost_map, module)
+        other = None
+        try:
+            assert entered.wait(3)
+            other = pool.submit(second)
+            assert second_started.wait(3)
+            assert not second_load.wait(0.15)
+            assert not other.done()
+        finally:
+            release.set()
+        assert other is not None
+        assert first.result(timeout=3) is other.result(timeout=3)
+    assert calls == ["load"]
+    assert module.model_cost["custom"]["max_input_tokens"] == 12
+
+
+def test_repeated_bootstrap_does_not_report_a_false_late_configuration_warning(monkeypatch):
+    monkeypatch.setattr(costs, "_INIT_EVENTS", [])
+    monkeypatch.setenv(LITELLM_LOCAL_MODEL_COST_MAP_ENV, "true")
+    monkeypatch.setitem(costs.sys.modules, "litellm", types.ModuleType("litellm"))
+    costs.configure_litellm_local_model_cost_map()
+    assert not any("warning:" in event for event in costs._INIT_EVENTS)
+    monkeypatch.setenv(LITELLM_LOCAL_MODEL_COST_MAP_ENV, "false")
+    costs.configure_litellm_local_model_cost_map()
+    assert any("warning:" in event for event in costs._INIT_EVENTS)

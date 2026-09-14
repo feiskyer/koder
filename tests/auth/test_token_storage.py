@@ -4,6 +4,7 @@ import os
 import stat
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -206,3 +207,41 @@ class TestOAuthTokens:
         assert tokens.access_token == "access"
         assert tokens.email == "user@example.com"
         assert tokens.extra["mode"] == "max"
+
+
+def test_refresh_lease_survives_token_updates_and_can_move_between_threads(storage, sample_tokens):
+    storage.save(sample_tokens)
+    lease = storage.refresh_lock("google")
+    lease_path = Path(lease.lock_file)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(lease.acquire, timeout=0).result(timeout=2)
+        try:
+            assert lease.is_locked
+            assert lease_path.stat().st_mode & 0o777 == 0o600
+            inode = lease_path.stat().st_ino
+            # Revoke uses the storage mutation lock, not the network lease.
+            assert storage.delete("google")
+            storage.save(sample_tokens)
+            assert lease_path.stat().st_ino == inode
+        finally:
+            lease.release()
+    assert not lease.is_locked
+    with storage.refresh_lock("google"):
+        # filelock may remove the lock file at release. Reacquisition, not
+        # permanent inode identity, is the contract after that critical section.
+        assert lease_path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("provider", ["../other", "", "google/other", "google\nother"])
+def test_refresh_lease_rejects_invalid_provider(storage, provider):
+    with pytest.raises(ValueError, match="Invalid token provider"):
+        storage.refresh_lock(provider)
+
+
+def test_refresh_lease_rejects_symlink_without_touching_target(storage, tmp_path):
+    target = tmp_path / "lock-target"
+    target.write_text("synthetic sentinel", encoding="utf-8")
+    (storage.base_dir / ".google.refresh.lock").symlink_to(target)
+    with pytest.raises(ValueError, match="symlink refresh lock"):
+        storage.refresh_lock("google")
+    assert target.read_text(encoding="utf-8") == "synthetic sentinel"

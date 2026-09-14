@@ -5,7 +5,6 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Annotated, List, Union
 
 from agents import RunConfig, Runner
@@ -22,6 +21,7 @@ from ..harness.config.task_delegate_limits import (
 from ..harness.config.task_delegate_limits import (
     DEFAULT_TASK_DELEGATE_MAX_CONCURRENCY as DEFAULT_TASK_DELEGATE_MAX_CONCURRENCY,
 )
+from ..harness.execution_context import get_execution_cwd
 from .compat import function_tool
 from .skill_context import skill_run_scope
 
@@ -275,7 +275,7 @@ async def _task_delegate_impl(tasks: TaskInput) -> str:
                         )
                         from .todo import get_todo_store
 
-                        agent_definitions = get_agent_definitions(cwd=Path.cwd())
+                        agent_definitions = get_agent_definitions(cwd=get_execution_cwd())
                         display_hooks = get_subagent_display_hooks(
                             group_id=display_group_id,
                             agent_id=f"{display_group_id}:{index}",
@@ -312,7 +312,7 @@ async def _task_delegate_impl(tasks: TaskInput) -> str:
                                 else f"Delegated Agent - {task.description[:30]}..."
                             ),
                             instructions_override=(
-                                build_agent_system_prompt(selected_agent, cwd=Path.cwd())
+                                build_agent_system_prompt(selected_agent, cwd=get_execution_cwd())
                                 if selected_agent is not None
                                 else f"""You are a task agent handling this task: {task.description}
 

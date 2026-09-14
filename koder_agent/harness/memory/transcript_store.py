@@ -1,4 +1,8 @@
-"""Runtime-owned transcript store with legacy DB preservation."""
+"""Standalone synchronous transcript store with legacy DB preservation.
+
+The CLI uses EnhancedSQLiteSession and the Agents SDK tables instead. This
+explicit-call helper is not the main runtime persistence or recovery backend.
+"""
 
 from __future__ import annotations
 
@@ -14,17 +18,21 @@ from .writer_lock import TranscriptWriterLock
 
 
 class TranscriptStore:
-    """Owns runtime transcript persistence separate from the legacy DB."""
+    """Owns an explicit caller's synchronous transcript DB, separate from legacy data."""
 
     def __init__(self, runtime_db_path: str | Path, legacy_db_path: str | Path):
         self.runtime_db_path = Path(runtime_db_path)
         self._legacy_db = LegacyDB(legacy_db_path)
         self._writer_lock = TranscriptWriterLock.for_path(self.runtime_db_path)
         self._connection = sqlite3.connect(self.runtime_db_path)
-        self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA foreign_keys=ON")
-        self._init_schema()
+        try:
+            self._connection.row_factory = sqlite3.Row
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA foreign_keys=ON")
+            self._init_schema()
+        except BaseException:
+            self._connection.close()
+            raise
 
     @classmethod
     def for_test(cls, base_dir: str | Path) -> "TranscriptStore":

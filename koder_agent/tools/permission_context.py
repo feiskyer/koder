@@ -32,6 +32,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from koder_agent.harness.execution_context import get_execution_cwd
 from koder_agent.harness.permissions.tool_arguments import (
     ToolArgumentError,
     normalize_tool_arguments,
@@ -45,17 +46,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Tools whose *arguments* materially affect safety and therefore warrant an
-# argument-level permission check. Read-only and metadata tools are intentionally
-# excluded so the common path stays zero-overhead.
+# argument-level permission check. Reads also need their actual path/URL/URI:
+# a name-only check cannot enforce target-specific deny rules.
 GUARDED_TOOLS: frozenset[str] = frozenset(
     {
         "run_shell",
         "run_powershell",
         "git_command",
+        "read_file",
         "write_file",
         "edit_file",
         "append_file",
         "notebook_edit",
+        "web_fetch",
+        "read_mcp_resource",
     }
 )
 
@@ -215,12 +219,10 @@ def _dispatch_permission_hooks(event_name: str, tool_name: str, payload: dict) -
     tool call.
     """
     try:
-        from pathlib import Path
-
         from koder_agent.harness.hooks.runtime import dispatch_command_hooks
 
         return dispatch_command_hooks(
-            cwd=Path.cwd(),
+            cwd=get_execution_cwd(),
             event_name=event_name,
             match_value=tool_name,
             payload=payload,
@@ -275,14 +277,6 @@ async def enforce_tool_permission(tool_name: str, input_json: str) -> Optional[s
         )
         return _denial_message(tool_name, reason)
 
-    try:
-        decision = await ctx.permission_service.evaluate_tool_call_async(tool_name, arguments)
-    except Exception:
-        # Never let an evaluation bug crash a tool call; log and fail open so the
-        # existing in-tool SecurityGuard still applies as the backstop.
-        logger.debug("Permission evaluation failed for %s", tool_name, exc_info=True)
-        return None
-
     def _deny(reason: str) -> str:
         _dispatch_permission_hooks(
             "PermissionDenied",
@@ -295,6 +289,14 @@ async def enforce_tool_permission(tool_name: str, input_json: str) -> Optional[s
             },
         )
         return _denial_message(tool_name, reason)
+
+    try:
+        decision = await ctx.permission_service.evaluate_tool_call_async(tool_name, arguments)
+    except Exception as exc:
+        # A local command guard does not implement the user's permission rules.
+        # An unavailable evaluator therefore cannot authorize an invocation.
+        logger.warning("Permission evaluation failed for %s (%s)", tool_name, type(exc).__name__)
+        return _deny("permission evaluation failed; tool was not executed")
 
     if decision.requires_approval:
         request_result = _dispatch_permission_hooks(

@@ -194,9 +194,6 @@ def test_get_response_retries(monkeypatch):
 
     monkeypatch.setattr(LitellmModel, "get_response", fake_super_get)
     monkeypatch.setattr("koder_agent.agentic.agent.asyncio.sleep", _no_sleep)
-    # backoff uses time.sleep for the sync wrapper around the coroutine driver;
-    # patch the module the decorator uses so retries don't actually wait.
-    monkeypatch.setattr("backoff._async.asyncio.sleep", _no_sleep, raising=False)
 
     async def run():
         return await model.get_response(None, "in", _DummySettings(), [], None, [], _DummyTracing())
@@ -298,10 +295,10 @@ def test_native_responses_preflights_exact_large_schema_before_provider_io(strea
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_model_wrapper_preflights_each_tool_loop_request(monkeypatch, streaming):
-    model = _make_model("github_copilot/gpt-5.1-codex")
-    model.context_window = 128
-    model.base_url = None
-    model.should_replay_reasoning_content = None
+    model = RetryingLitellmModel(
+        model="github_copilot/gpt-5.1-codex",
+        context_window=128,
+    )
     provider_calls = 0
     tool_loop_input = [
         {"role": "user", "content": "read the file"},
@@ -334,7 +331,7 @@ def test_model_wrapper_preflights_each_tool_loop_request(monkeypatch, streaming)
             async for _chunk in model.stream_response(
                 "system",
                 tool_loop_input,
-                _DummySettings(),
+                ModelSettings(max_tokens=20),
                 [],
                 None,
                 [],
@@ -345,7 +342,7 @@ def test_model_wrapper_preflights_each_tool_loop_request(monkeypatch, streaming)
             await model.get_response(
                 "system",
                 tool_loop_input,
-                _DummySettings(),
+                ModelSettings(max_tokens=20),
                 [],
                 None,
                 [],
@@ -655,7 +652,10 @@ def test_create_dev_agent_cleans_loaded_mcp_servers_when_construction_is_cancell
     assert server.cleaned is True
 
 
-def test_create_dev_agent_preserves_initial_cancel_during_slow_cleanup(monkeypatch):
+def test_create_dev_agent_preserves_initial_cancel_during_slow_cleanup(
+    monkeypatch, cancellation_observer
+):
+    observe, cancellations = cancellation_observer
     entered_tool_build = asyncio.Event()
     cleanup_started = asyncio.Event()
     cleanup_release = asyncio.Event()
@@ -690,21 +690,18 @@ def test_create_dev_agent_preserves_initial_cancel_during_slow_cleanup(monkeypat
     )
 
     async def scenario():
-        construction = asyncio.create_task(create_dev_agent([]))
+        construction = asyncio.create_task(observe(create_dev_agent([])))
         await asyncio.wait_for(entered_tool_build.wait(), timeout=1)
         construction.cancel("initial-parent-cancel")
         await asyncio.wait_for(cleanup_started.wait(), timeout=1)
         construction.cancel("repeat-parent-cancel")
         await asyncio.sleep(0)
         cleanup_release.set()
-        try:
+        with pytest.raises(asyncio.CancelledError):
             await construction
-        except asyncio.CancelledError as exc:
-            return exc.args
-        raise AssertionError("agent construction was not cancelled")
 
-    cancel_args = asyncio.run(scenario())
+    asyncio.run(scenario())
 
     assert cleanup_calls == 1
     assert cleanup_completed == 1
-    assert cancel_args == ("initial-parent-cancel",)
+    assert [error.args for error in cancellations] == [("initial-parent-cancel",)]

@@ -52,7 +52,7 @@ class TestEnforceToolPermission:
         svc = _fake_service(allowed=False, reason="should never be consulted")
         token = set_tool_permission_context(svc)
         try:
-            result = await enforce_tool_permission("read_file", json.dumps({"path": "/etc/shadow"}))
+            result = await enforce_tool_permission("todo_read", "{}")
             assert result is None
             svc.evaluate_tool_call_async.assert_not_called()
         finally:
@@ -246,16 +246,84 @@ class TestEnforceToolPermission:
             reset_tool_permission_context(token)
 
     @pytest.mark.asyncio
-    async def test_evaluation_exception_fails_open(self):
-        """If the permission service throws, we fail open (allow) with a log."""
+    async def test_evaluation_exception_fails_closed(self):
+        """An unavailable policy engine cannot authorize a tool invocation."""
         svc = MagicMock()
-        svc.evaluate_tool_call_async = AsyncMock(side_effect=RuntimeError("boom"))
+        svc.evaluate_tool_call_async = AsyncMock(side_effect=RuntimeError("private error detail"))
         token = set_tool_permission_context(svc)
         try:
             result = await enforce_tool_permission("run_shell", json.dumps({"command": "ls"}))
-            assert result is None  # fail open
+            assert result is not None
+            assert "Permission denied" in result
+            assert "permission evaluation failed" in result
+            assert "private error detail" not in result
         finally:
             reset_tool_permission_context(token)
+
+    @pytest.mark.asyncio
+    async def test_policy_failure_prevents_decorated_tool_side_effects(self):
+        from koder_agent.tools.compat import function_tool
+
+        writes = []
+
+        @function_tool
+        def write_file(path: str, content: str) -> str:
+            """Record a synthetic write without touching disk."""
+            writes.append((path, content))
+            return "written"
+
+        svc = _fake_service()
+        svc.evaluate_tool_call_async.side_effect = OSError("policy unavailable")
+        approver = AsyncMock(return_value=True)
+        token = set_tool_permission_context(svc, approver=approver)
+        try:
+            output = await write_file.on_invoke_tool(
+                None, json.dumps({"path": "example.txt", "content": "example"})
+            )
+        finally:
+            reset_tool_permission_context(token)
+
+        assert "Permission denied" in output
+        assert writes == []
+        approver.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "arguments"),
+        [
+            ("read_file", {"path": "/workspace/private.txt"}),
+            ("web_fetch", {"url": "https://example.test/private"}),
+            ("read_mcp_resource", {"uri": "resource://private"}),
+        ],
+    )
+    async def test_reads_are_checked_with_their_actual_target(self, tool_name, arguments):
+        svc = _fake_service(allowed=False, reason="target denied")
+        token = set_tool_permission_context(svc)
+        try:
+            result = await enforce_tool_permission(tool_name, json.dumps(arguments))
+        finally:
+            reset_tool_permission_context(token)
+
+        assert "Permission denied" in result
+        svc.evaluate_tool_call_async.assert_awaited_once_with(tool_name, arguments)
+
+    @pytest.mark.asyncio
+    async def test_read_file_deny_rule_blocks_real_file_contents(self, tmp_path):
+        from koder_agent.harness.permissions.service import PermissionService
+        from koder_agent.tools.file import read_file
+
+        target = tmp_path / "private.txt"
+        target.write_text("synthetic private fixture", encoding="utf-8")
+        svc = PermissionService.default(workspace_root=tmp_path)
+        svc.add_rule("read_file", "deny", str(target))
+        token = set_tool_permission_context(svc)
+        try:
+            output = await read_file.on_invoke_tool(None, json.dumps({"path": str(target)}))
+        finally:
+            reset_tool_permission_context(token)
+
+        assert "Permission denied" in output
+        assert "synthetic private fixture" not in output
 
 
 class TestContextLifecycle:
@@ -300,8 +368,10 @@ class TestGuardedToolsCoverage:
         assert "append_file" in GUARDED_TOOLS
         assert "notebook_edit" in GUARDED_TOOLS
 
-    def test_read_only_not_guarded(self):
-        assert "read_file" not in GUARDED_TOOLS
+    def test_target_sensitive_reads_are_guarded(self):
+        assert {"read_file", "web_fetch", "read_mcp_resource"} <= GUARDED_TOOLS
+
+    def test_metadata_tools_keep_name_level_guards(self):
         assert "list_directory" not in GUARDED_TOOLS
         assert "glob_search" not in GUARDED_TOOLS
 

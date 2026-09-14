@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import _thread
 import importlib
 import logging
 import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from functools import wraps
 from importlib.abc import Loader, MetaPathFinder
 from importlib.machinery import ModuleSpec, PathFinder
 from importlib.util import module_from_spec, spec_from_loader
-from pathlib import Path
 from types import ModuleType
 from typing import Any, Awaitable, Callable, Iterable, Iterator
 
+from koder_agent.harness.execution_context import capture_tool_directory, get_execution_cwd
 from koder_agent.harness.hooks.runtime import dispatch_command_hooks
 from koder_agent.harness.permissions.results import PermissionEvaluationResult
 
@@ -168,7 +170,8 @@ def _candidate_execution(qualified_name: str) -> Iterator[None]:
     state = _CandidateExecutionState(qualified_name=qualified_name)
     _CANDIDATE_EXECUTION.state = state
     try:
-        yield
+        with _legacy_candidate_thread_guard():
+            yield
         if state.fatal_violation is not None:
             raise state.fatal_violation
     finally:
@@ -183,6 +186,45 @@ def _reject_candidate_thread_start(event: str, _args: tuple[Any, ...]) -> None:
         f"Tool module candidate {qualified_name!r} cannot start child threads "
         "while import and tool collection are staged"
     )
+
+
+@contextmanager
+def _legacy_candidate_thread_guard() -> Iterator[None]:
+    """Cover standard Python launchers before CPython's thread-start audit event.
+
+    The module-load lock serializes these temporary replacements. The policy is
+    thread-local, so unrelated callers can still start threads. This does not
+    cover retained native function references or arbitrary extension code and
+    is not an OS sandbox.
+    """
+    if sys.version_info >= (3, 12):
+        yield
+        return
+
+    def checked_start(original):
+        @wraps(original)
+        def start(*args, **kwargs):
+            _reject_candidate_thread_start("_thread.start_new_thread", ())
+            return original(*args, **kwargs)
+
+        return start
+
+    replacements = []
+    try:
+        for module, name in (
+            (_thread, "start_new_thread"),
+            (_thread, "start_new"),
+            (threading, "_start_new_thread"),
+        ):
+            original = getattr(module, name)
+            guarded = checked_start(original)
+            replacements.append((module, name, original, guarded))
+            setattr(module, name, guarded)
+        yield
+    finally:
+        for module, name, original, guarded in reversed(replacements):
+            if getattr(module, name) is guarded:
+                setattr(module, name, original)
 
 
 sys.addaudithook(_reject_candidate_thread_start)
@@ -628,7 +670,7 @@ class ToolRegistry:
                 )
                 if decision.requires_approval:
                     hook_result = dispatch_command_hooks(
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                         event_name="PermissionRequest",
                         match_value=_name,
                         payload={
@@ -639,7 +681,7 @@ class ToolRegistry:
                         },
                     )
                     dispatch_command_hooks(
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                         event_name="Notification",
                         match_value="permission_prompt",
                         payload={
@@ -677,7 +719,7 @@ class ToolRegistry:
                     }
                 if not decision.allowed:
                     denied_result = dispatch_command_hooks(
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                         event_name="PermissionDenied",
                         match_value=_name,
                         payload={
@@ -700,7 +742,7 @@ class ToolRegistry:
                     result = await _raw(arguments)
                 except Exception as exc:
                     failure_result = dispatch_command_hooks(
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                         event_name="PostToolUseFailure",
                         match_value=_name,
                         payload={
@@ -719,7 +761,7 @@ class ToolRegistry:
                     raise
                 if isinstance(result, dict) and result.get("status") == "error":
                     failure_result = dispatch_command_hooks(
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                         event_name="PostToolUseFailure",
                         match_value=_name,
                         payload={
@@ -736,7 +778,7 @@ class ToolRegistry:
                         }
                 else:
                     post_result = dispatch_command_hooks(
-                        cwd=Path.cwd(),
+                        cwd=get_execution_cwd(),
                         event_name="PostToolUse",
                         match_value=_name,
                         payload={
@@ -754,8 +796,12 @@ class ToolRegistry:
                         }
                 return result
 
-            guarded_invoke.__tool_registry_raw_invoke__ = raw_invoke
-            return replace(spec, invoke=guarded_invoke)
+            async def scoped_invoke(arguments: dict[str, Any]):
+                with capture_tool_directory():
+                    return await guarded_invoke(arguments)
+
+            scoped_invoke.__tool_registry_raw_invoke__ = raw_invoke
+            return replace(spec, invoke=scoped_invoke)
 
         return spec
 

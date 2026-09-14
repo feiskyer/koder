@@ -6,24 +6,14 @@ import json
 import os
 import sys
 import time
-from importlib.metadata import PackageNotFoundError
-from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Optional
 
-from koder_agent import __version__
+from koder_agent.version import resolve_package_version_info as resolve_runtime_version_info
 
 PYPI_JSON_URL = "https://pypi.org/pypi/koder/json"
 VERSION_CHECK_CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 VERSION_CHECK_ENV_OPT_OUT = "KODER_NO_UPDATE_CHECK"
-
-
-def resolve_runtime_version_info() -> tuple[str, str]:
-    """Return the runtime version and the source used to resolve it."""
-    try:
-        return package_version("koder"), "installed-package"
-    except PackageNotFoundError:
-        return (__version__ or "unknown"), "package-fallback"
 
 
 def resolve_runtime_version() -> str:

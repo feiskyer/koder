@@ -1,11 +1,11 @@
 import json
 import os
 import shutil
-import socketserver
 import sys
 import threading
 import time
 import types
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -199,8 +199,9 @@ def test_async_plugin_hook_snapshot_outlives_dispatch(tmp_path, monkeypatch):
         observed["asset"] = (snapshot / "asset.txt").read_text(encoding="utf-8")
         inspected.set()
         assert finish.wait(timeout=5)
+        return 0, "", ""
 
-    monkeypatch.setattr("koder_agent.harness.hooks.runtime.subprocess.run", fake_run)
+    monkeypatch.setattr("koder_agent.harness.hooks.runtime._run_command_hook", fake_run)
 
     try:
         result = dispatch_command_hooks(
@@ -346,19 +347,27 @@ def test_dispatch_command_hooks_supports_http_prompt_agent_and_async_handlers(
     monkeypatch.setenv("HOME", str(tmp_path))
     project = tmp_path / "project"
     async_marker = tmp_path / "async.txt"
+    http_watch_path = tmp_path / "http-watch"
+    received = []
     (project / ".koder").mkdir(parents=True)
 
-    class _Handler(socketserver.BaseRequestHandler):
-        def handle(self):
-            data = self.request.recv(4096).decode("utf-8")
-            body = data.split("\r\n\r\n", 1)[1]
-            payload = json.loads(body)
-            response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n" + json.dumps(
-                {"hookSpecificOutput": {"echo": payload["event"]}}
-            )
-            self.request.sendall(response.encode("utf-8"))
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received.append(json.loads(body))
+            response = json.dumps(
+                {"hookSpecificOutput": {"watchPaths": [str(http_watch_path)]}}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
 
-    server = socketserver.TCPServer(("127.0.0.1", 0), _Handler)
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -384,6 +393,10 @@ def test_dispatch_command_hooks_supports_http_prompt_agent_and_async_handlers(
                                 },
                                 {
                                     "type": "command",
+                                    "command": 'python -c "pass"',
+                                },
+                                {
+                                    "type": "command",
                                     "command": f"python -c \"import pathlib,time; time.sleep(0.1); pathlib.Path(r'{async_marker}').write_text('done')\"",
                                     "async": True,
                                 },
@@ -405,17 +418,23 @@ def test_dispatch_command_hooks_supports_http_prompt_agent_and_async_handlers(
         lambda **_kwargs: json.dumps({"hookSpecificOutput": {"echo": "agent"}}),
     )
 
-    result = dispatch_command_hooks(
-        cwd=project,
-        event_name="Stop",
-        match_value=None,
-        payload={"event": "Stop"},
-    )
+    try:
+        result = dispatch_command_hooks(
+            cwd=project,
+            event_name="Stop",
+            match_value=None,
+            payload={"event": "Stop"},
+        )
+    finally:
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+            thread.join(timeout=2)
 
-    server.shutdown()
-    thread.join(timeout=2)
-
-    assert result.matched_hooks == 4
+    assert result.matched_hooks == 5
+    assert result.watch_paths == [str(http_watch_path)]
+    assert len(received) == 1 and received[0]["event"] == "Stop"
     time.sleep(0.2)
     assert async_marker.read_text(encoding="utf-8") == "done"
 
@@ -788,7 +807,7 @@ class TestHookReentrancyGuard:
         def fake_run(*args, **kwargs):
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr("koder_agent.harness.hooks.runtime.run_command", fake_run)
 
         result = dispatch_command_hooks(
             cwd=project,

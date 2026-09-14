@@ -23,16 +23,12 @@ class ProviderCompat:
     def resolve_model_client(self, model_name: Optional[str] = None) -> ResolvedModelClient:
         from koder_agent.utils.client import get_model_client_snapshot
 
-        snapshot = get_model_client_snapshot()
-        resolved_name = model_name or snapshot["model_name"]
-        litellm_kwargs = dict(snapshot["litellm_kwargs"])
-        if snapshot["native_openai"]:
-            litellm_kwargs["model"] = resolved_name
+        snapshot = get_model_client_snapshot(model_name)
         return ResolvedModelClient(
-            model_name=resolved_name,
+            model_name=snapshot["model_name"],
             api_key=snapshot["api_key"],
             base_url=snapshot["base_url"],
-            litellm_kwargs=litellm_kwargs,
+            litellm_kwargs=dict(snapshot["litellm_kwargs"]),
             native_openai=snapshot["native_openai"],
         )
 

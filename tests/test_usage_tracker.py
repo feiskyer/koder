@@ -1,6 +1,6 @@
 """Tests for UsageTracker and cost calculation."""
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -54,13 +54,14 @@ class TestUsageTracker:
         assert tracker.session_usage.total_cost == 0.0
         assert tracker.session_usage.request_count == 0
 
-    def test_model_property_caches_value(self):
-        """Test that model property caches the model name."""
+    def test_model_property_observes_active_configuration(self):
+        """Model selection is live; only per-model prices are cached."""
         tracker = UsageTracker()
-        with patch("koder_agent.core.usage_tracker.get_model_name", return_value="gpt-4o") as mock:
-            _ = tracker.model
-            _ = tracker.model  # Second call should use cache
-            assert mock.call_count == 1  # Only called once due to caching
+        with patch(
+            "koder_agent.core.usage_tracker.get_model_name", side_effect=["gpt-4o", "gpt-4.1"]
+        ):
+            assert tracker.model == "gpt-4o"
+            assert tracker.model == "gpt-4.1"
 
 
 def test_usage_snapshot_path_escapes_session_ids(tmp_path):
@@ -75,22 +76,19 @@ class TestGetModelCosts:
     def test_costs_cached_after_first_lookup(self):
         """Test that costs are cached after first lookup."""
         tracker = UsageTracker()
-        tracker._model = "gpt-4o"
 
         # First call
-        costs1 = tracker.get_model_costs()
+        costs1 = tracker.get_model_costs("gpt-4o")
         # Second call should use cache
-        costs2 = tracker.get_model_costs()
+        costs2 = tracker.get_model_costs("gpt-4o")
 
         assert costs1 == costs2
-        assert tracker._cached_costs is not None
+        assert tracker._cached_costs["gpt-4o"] == costs1
 
     def test_unknown_model_returns_zero_costs(self):
         """Test that unknown models return zero costs."""
         tracker = UsageTracker()
-        tracker._model = "totally-unknown-model-xyz-99999"
-
-        input_cost, output_cost = tracker.get_model_costs()
+        input_cost, output_cost = tracker.get_model_costs("totally-unknown-model-xyz-99999")
         assert input_cost == 0.0
         assert output_cost == 0.0
 
@@ -108,9 +106,7 @@ class TestGetModelCosts:
         monkeypatch.setattr(litellm, "model_cost", mock_model_cost)
 
         tracker = UsageTracker()
-        tracker._model = "claude-opus-4.5"  # dot version
-
-        input_cost, output_cost = tracker.get_model_costs()
+        input_cost, output_cost = tracker.get_model_costs("claude-opus-4.5")
         # Should find the model via hyphen variant
         assert input_cost == 0.000005
         assert output_cost == 0.000025
@@ -129,9 +125,7 @@ class TestGetModelCosts:
         monkeypatch.setattr(litellm, "model_cost", mock_model_cost)
 
         tracker = UsageTracker()
-        tracker._model = "litellm/github_copilot/claude-opus-4.5"
-
-        input_cost, output_cost = tracker.get_model_costs()
+        input_cost, output_cost = tracker.get_model_costs("litellm/github_copilot/claude-opus-4.5")
         # Should find costs via the variant "claude-opus-4-5"
         assert input_cost == 0.000005
         assert output_cost == 0.000025
@@ -143,7 +137,7 @@ class TestCalculateCost:
     def test_calculate_cost_with_zero_tokens(self):
         """Test cost calculation with zero tokens."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.00001, 0.00003)
+        tracker.get_model_costs = Mock(return_value=(0.00001, 0.00003))
 
         cost = tracker.calculate_cost(0, 0)
         assert cost == 0.0
@@ -152,7 +146,7 @@ class TestCalculateCost:
         """Test cost calculation with known rates."""
         tracker = UsageTracker()
         # Set known rates: $10/1M input, $30/1M output
-        tracker._cached_costs = (0.00001, 0.00003)
+        tracker.get_model_costs = Mock(return_value=(0.00001, 0.00003))
 
         cost = tracker.calculate_cost(1000, 500)
         # 1000 * 0.00001 + 500 * 0.00003 = 0.01 + 0.015 = 0.025
@@ -161,7 +155,7 @@ class TestCalculateCost:
     def test_calculate_cost_with_zero_rates(self):
         """Test cost calculation with zero rates (unknown model)."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         cost = tracker.calculate_cost(10000, 5000)
         assert cost == 0.0
@@ -173,7 +167,7 @@ class TestRecordUsage:
     def test_record_usage_accumulates_tokens(self):
         """Test that record_usage accumulates tokens correctly."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)  # Zero cost for simplicity
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         tracker.record_usage(100, 50)
         tracker.record_usage(200, 100)
@@ -185,7 +179,7 @@ class TestRecordUsage:
     def test_record_usage_tracks_last_call(self):
         """Test that record_usage tracks the last call's tokens."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         tracker.record_usage(100, 50)
         tracker.record_usage(200, 100)
@@ -196,7 +190,7 @@ class TestRecordUsage:
     def test_record_usage_accumulates_cost(self):
         """Test that record_usage accumulates costs."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.00001, 0.00003)
+        tracker.get_model_costs = Mock(return_value=(0.00001, 0.00003))
 
         tracker.record_usage(1000, 500)  # 0.01 + 0.015 = 0.025
         tracker.record_usage(1000, 500)  # 0.025 more
@@ -206,7 +200,7 @@ class TestRecordUsage:
     def test_record_usage_with_explicit_context_tokens(self):
         """Test record_usage with explicit context_tokens parameter."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         tracker.record_usage(100, 50, context_tokens=500)
         assert tracker.session_usage.current_context_tokens == 500
@@ -214,7 +208,7 @@ class TestRecordUsage:
     def test_record_usage_defaults_context_to_input_plus_output(self):
         """Test that context_tokens defaults to input + output."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         tracker.record_usage(100, 50)
         assert tracker.session_usage.current_context_tokens == 150  # 100 + 50
@@ -226,8 +220,8 @@ class TestReset:
     def test_reset_clears_session_usage(self):
         """Test that reset clears all session usage data."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.00001, 0.00003)
-        tracker._model = "gpt-4o"
+        tracker.get_model_costs("gpt-4o")
+        assert tracker._cached_costs
 
         # Record some usage
         tracker.record_usage(1000, 500)
@@ -240,8 +234,7 @@ class TestReset:
         assert tracker.session_usage.output_tokens == 0
         assert tracker.session_usage.total_cost == 0.0
         assert tracker.session_usage.request_count == 0
-        assert tracker._model is None
-        assert tracker._cached_costs is None
+        assert tracker._cached_costs == {}
 
 
 class TestSessionCacheTokens:
@@ -249,7 +242,7 @@ class TestSessionCacheTokens:
 
     def test_record_usage_accumulates_session_cache_tokens(self):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         tracker.record_usage(100, 50, cache_read_tokens=800, cache_write_tokens=40, model="m")
         tracker.record_usage(200, 100, cache_read_tokens=1200, cache_write_tokens=0, model="m")
@@ -268,12 +261,12 @@ class TestPricingKnown:
 
     def test_pricing_known_true_with_rates(self):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.00001, 0.00003)
+        tracker.get_model_costs = Mock(return_value=(0.00001, 0.00003))
         assert tracker.pricing_known() is True
 
     def test_pricing_known_false_with_zero_rates(self):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
         assert tracker.pricing_known() is False
 
 
@@ -282,7 +275,7 @@ class TestSummary:
 
     def test_summary_includes_cache_read_split(self):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.00001, 0.00003)
+        tracker.get_model_costs = Mock(return_value=(0.00001, 0.00003))
 
         tracker.record_usage(
             1000, 500, cache_read_tokens=4000, cache_write_tokens=200, model="gpt-x"
@@ -302,7 +295,7 @@ class TestSummary:
     def test_summary_marks_cost_unavailable_for_unknown_pricing(self):
         """Subscription/OAuth-style: tokens flow but per-token price is 0."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)  # pricing unknown
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         tracker.record_usage(5000, 2000, cache_read_tokens=1000, model="oauth-model")
 
@@ -316,7 +309,7 @@ class TestSummary:
     def test_summary_cost_available_when_positive_even_if_pricing_lookup_zero(self):
         """A recorded positive cost should not be flagged unavailable."""
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
         # Simulate a cost that was recorded some other way.
         tracker.session_usage.total_cost = 0.42
 
@@ -334,7 +327,7 @@ class TestSummary:
         tracker._per_model = {
             "m": ModelUsage(model="m", cache_read_tokens=777, cache_write_tokens=11),
         }
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
 
         summary = tracker.summary()
         assert summary.cache_read_tokens == 777
@@ -346,7 +339,7 @@ class TestFormatSummaryText:
 
     def test_format_summary_shows_cache_read_and_unavailable_cost(self):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)  # unknown pricing
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
         tracker.record_usage(3000, 1000, cache_read_tokens=1500, model="oauth-model")
 
         text = tracker.format_summary()
@@ -356,7 +349,7 @@ class TestFormatSummaryText:
 
     def test_format_summary_shows_dollar_cost_when_known(self):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.00001, 0.00003)
+        tracker.get_model_costs = Mock(return_value=(0.00001, 0.00003))
         tracker.record_usage(1000, 500, model="gpt-x")
 
         text = tracker.format_summary()
@@ -369,7 +362,7 @@ class TestSnapshotRoundTripWithCache:
 
     def test_save_and_load_preserves_session_cache_tokens(self, tmp_path):
         tracker = UsageTracker()
-        tracker._cached_costs = (0.0, 0.0)
+        tracker.get_model_costs = Mock(return_value=(0.0, 0.0))
         tracker.record_usage(100, 50, cache_read_tokens=900, cache_write_tokens=30, model="m")
 
         path = tmp_path / "usage.json"

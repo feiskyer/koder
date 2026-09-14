@@ -81,45 +81,53 @@ class TestForkContext:
         assert reconstructed[1]["role"] == "user"
 
     @pytest.mark.asyncio
-    async def test_agent_tool_with_fork_context(self, agent_definition):
-        """Test that agent_tool passes seed_items when context=fork."""
-        with (
-            patch("koder_agent.harness.agents.definitions.get_agent_definitions") as mock_get_defs,
-            patch("koder_agent.harness.agents.service.AgentService") as mock_service_class,
-            patch("koder_agent.core.session.EnhancedSQLiteSession") as mock_session_class,
-        ):
-            # Setup mocks
-            mock_defs = MagicMock()
-            mock_defs.active_agents = [agent_definition]
-            mock_get_defs.return_value = mock_defs
+    async def test_agent_tool_with_fork_context(
+        self, agent_definition, agent_service, tmp_path, monkeypatch
+    ):
+        """A real parent snapshot reaches the scoped service's child execution."""
+        import json
 
-            mock_session = AsyncMock()
-            mock_session.get_items = AsyncMock(
-                return_value=[
-                    {"role": "system", "content": "Test system"},
-                    {"role": "user", "content": "Test user"},
-                ]
-            )
-            mock_session_class.return_value = mock_session
+        from koder_agent.core.session import EnhancedSQLiteSession
+        from koder_agent.harness.agents.runtime_context import (
+            agent_service_scope,
+            agent_session_scope,
+        )
 
-            mock_service = AsyncMock()
-            mock_service.run_sync = AsyncMock(return_value="Test result")
-            mock_service_class.return_value = mock_service
+        history = [
+            {"role": "system", "content": "Test system"},
+            {"role": "user", "content": "Test user"},
+        ]
+        received = []
 
-            # Call agent_tool with fork context
-            await _agent_tool_impl(
-                description="Test task",
-                prompt="Do something",
-                subagent_type="test-agent",
-                context="fork",
-            )
+        async def execute(**kwargs):
+            received.extend(kwargs["seed_items"])
+            return "Test result"
 
-            # Verify seed_items was passed
-            assert mock_service.run_sync.called
-            call_kwargs = mock_service.run_sync.call_args.kwargs
-            assert "seed_items" in call_kwargs
-            assert call_kwargs["seed_items"] is not None
-            assert len(call_kwargs["seed_items"]) == 2
+        monkeypatch.setattr("koder_agent.harness.agents.service._execute_agent_run", execute)
+        parent = EnhancedSQLiteSession("fork-parent", db_path=str(tmp_path / "parent.db"))
+        try:
+            await parent.add_items(history)
+            with patch(
+                "koder_agent.harness.agents.definitions.get_agent_definitions"
+            ) as mock_get_defs:
+                mock_defs = MagicMock()
+                mock_defs.active_agents = [agent_definition]
+                mock_get_defs.return_value = mock_defs
+                with agent_service_scope(agent_service), agent_session_scope(parent):
+                    result = json.loads(
+                        await _agent_tool_impl(
+                            description="Test task",
+                            prompt="Do something",
+                            subagent_type="test-agent",
+                            context="fork",
+                        )
+                    )
+            assert result["status"] == "completed"
+            assert result["result"] == "Test result"
+            assert received == history
+        finally:
+            await agent_service.aclose()
+            parent.close()
 
     @pytest.mark.asyncio
     async def test_agent_tool_without_fork_context(self, agent_definition):

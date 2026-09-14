@@ -215,6 +215,7 @@ class TestOutputTruncation:
     def test_sdk_static_and_resolved_meta_reach_wrapped_call(self, monkeypatch):
         """SDK-composed static/dynamic meta must survive output-cap wrapping."""
         from agents.mcp.util import MCPUtil
+        from mcp.types import CallToolResult, TextContent
         from mcp.types import Tool as MCPTool
 
         from koder_agent.mcp.server_factory import _install_output_truncation
@@ -239,11 +240,7 @@ class TestOutputTruncation:
 
             async def call_tool(self, tool_name, arguments=None, meta=None):
                 self.received_meta = meta
-                return SimpleNamespace(
-                    content=[SimpleNamespace(type="text", text="ok")],
-                    structuredContent=None,
-                    isError=False,
-                )
+                return CallToolResult(content=[TextContent(type="text", text="ok")])
 
         server = FakeServer()
         _install_output_truncation(server, "fake")

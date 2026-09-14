@@ -219,3 +219,138 @@ def test_cron_prompt_runner_stop_survives_repeated_caller_cancellation(tmp_path)
         await runner.stop()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.asyncio
+async def test_deleted_job_is_not_dispatched_from_an_old_queue_snapshot(tmp_path):
+    storage = CronStorage(tmp_path / "crons.json")
+    job = storage.create(cron="* * * * *", prompt="deleted job", recurring=False)
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+    drained = asyncio.Event()
+    prompts = []
+
+    async def dispatch(prompt, **_kwargs):
+        prompts.append(prompt)
+        if prompt == "blocker":
+            blocked.set()
+            await release.wait()
+        elif prompt == "barrier":
+            drained.set()
+        return prompt
+
+    runner = CronPromptRunner(dispatch, storage=storage)
+    runner.enqueue("blocker")
+    assert runner.enqueue_job(job)
+    runner.start()
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=2)
+        assert storage.delete(job["id"])
+        runner.enqueue("barrier")
+        release.set()
+        await asyncio.wait_for(drained.wait(), timeout=2)
+        assert prompts == ["blocker", "barrier"]
+        assert not runner.pending_job_ids
+    finally:
+        release.set()
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_restarted_runner_stops_its_new_consumer_and_poller(tmp_path):
+    runner = CronPromptRunner(
+        _dispatcher(_RecordingScheduler()),
+        storage=CronStorage(tmp_path / "crons.json"),
+    )
+    tasks = []
+    try:
+        for _ in range(2):
+            runner.start()
+            consumer = runner._consumer_task
+            poller = runner._cron_scheduler._task
+            tasks.extend((consumer, poller))
+            await runner.stop()
+            assert consumer.done()
+            assert poller.done()
+            assert runner._consumer_task is None
+            assert runner._cron_scheduler._task is None
+    finally:
+        # Join even a leaked task when this regression runs against old code.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_drops_queued_deliveries_but_preserves_durable_jobs(tmp_path):
+    storage = CronStorage(tmp_path / "crons.json")
+    first = storage.create(cron="* * * * *", prompt="running", recurring=False)
+    second = storage.create(cron="* * * * *", prompt="queued", recurring=False)
+    dispatch_started = asyncio.Event()
+    release_dispatch = asyncio.Event()
+
+    async def dispatch(prompt, **_kwargs):
+        dispatch_started.set()
+        await release_dispatch.wait()
+        return prompt
+
+    runner = CronPromptRunner(dispatch, storage=storage)
+    assert runner.enqueue_job(first)
+    assert runner.enqueue_job(second)
+    runner.start()
+    try:
+        await asyncio.wait_for(dispatch_started.wait(), timeout=2)
+        await runner.stop()
+        assert not runner.pending_job_ids
+        assert runner._queue.empty()
+        assert storage.get(first["id"]) == first
+        assert storage.get(second["id"]) == second
+    finally:
+        release_dispatch.set()
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_stopped_runner_rejects_delivery_until_restarted(tmp_path):
+    storage = CronStorage(tmp_path / "crons.json")
+    job = storage.create(cron="* * * * *", prompt="not accepted", recurring=False)
+    runner = CronPromptRunner(_dispatcher(_RecordingScheduler()), storage=storage)
+    await runner.stop()
+
+    assert runner.enqueue_job(job) is False
+    assert runner.enqueue("manual prompt") is False
+    assert not runner.pending_job_ids
+    assert runner._queue.empty()
+    assert storage.get(job["id"]) == job
+    runner.start()
+    try:
+        assert runner.enqueue_job(job) is True
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_runner_cannot_restart_while_shutdown_is_in_progress(tmp_path, monkeypatch):
+    runner = CronPromptRunner(
+        _dispatcher(_RecordingScheduler()),
+        storage=CronStorage(tmp_path / "crons.json"),
+    )
+    runner.start()
+    stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
+    real_stop = runner._cron_scheduler.stop_async
+
+    async def blocked_stop():
+        stop_started.set()
+        await release_stop.wait()
+        await real_stop()
+
+    monkeypatch.setattr(runner._cron_scheduler, "stop_async", blocked_stop)
+    stopping = asyncio.create_task(runner.stop())
+    try:
+        await asyncio.wait_for(stop_started.wait(), timeout=2)
+        with pytest.raises(RuntimeError, match="shutdown"):
+            runner.start()
+    finally:
+        release_stop.set()
+        await stopping

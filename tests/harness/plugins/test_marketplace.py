@@ -37,8 +37,13 @@ def test_add_accepts_mixed_case_github_marketplace_name(tmp_path, monkeypatch):
 
     assert source is not None
     assert source.name == "mixedcase-market"
-    assert source.path == str(cache_root / "mixedcase-market")
-    assert clone_calls == [("Acme/MixedCase-Market", cache_root / "mixedcase-market")]
+    expected_cache = marketplace_module._repository_cache_path(
+        "mixedcase-market", "Acme/MixedCase-Market"
+    )
+    assert expected_cache.parent == cache_root
+    assert expected_cache.name.startswith("mixedcase-market-")
+    assert source.path == str(expected_cache)
+    assert clone_calls == [("Acme/MixedCase-Market", expected_cache)]
     assert message == "Added marketplace: mixedcase-market"
 
 
@@ -140,7 +145,9 @@ def test_add_rejects_new_source_after_legacy_name_is_canonicalized(tmp_path):
     assert persisted["community"]["raw_source"] == str(first)
 
 
-def test_fresh_process_migrates_legacy_name_before_collision_check(tmp_path):
+def test_fresh_process_migrates_legacy_name_before_collision_check(
+    tmp_path, python_child_environment
+):
     first = tmp_path / "first" / "Community"
     second = tmp_path / "second" / "community"
     first.mkdir(parents=True)
@@ -172,7 +179,8 @@ print(json.dumps({"accepted": source is not None, "message": message}))
 
     result = subprocess.run(
         [sys.executable, "-c", script, str(store_path), str(second)],
-        cwd=project_root,
+        cwd=tmp_path,
+        env=python_child_environment,
         capture_output=True,
         text=True,
         timeout=30,

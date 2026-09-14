@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import shutil
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+from uuid import uuid4
 
 from filelock import FileLock
 
 from koder_agent.harness.agents.hooks import dispatch_project_hook_event
 from koder_agent.harness.agents.messages import AgentMessage
+from koder_agent.utils.atomic_file import write_text_atomic
 
 from .memory_sync import TeamMemoryStatus, TeamMemorySyncResult
 from .models import TeamHistoryEntry, TeamMailboxMessage, TeamMemberRecord, TeamRecord
@@ -26,6 +30,17 @@ def _sanitize(value: str) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _locked_team(method):
+    """Serialize local lifecycle mutations, including nested mailbox writes."""
+
+    @wraps(method)
+    def locked(self, team_id, *args, **kwargs):
+        with self._team_lock(team_id):
+            return method(self, team_id, *args, **kwargs)
+
+    return locked
 
 
 class TeamService:
@@ -45,6 +60,8 @@ class TeamService:
         self.cwd = Path(cwd or Path.cwd()).resolve()
         self.backend = backend
         self.permission_bridge = permission_bridge
+        self._team_scope: tuple[str, str] | None = None
+        self._member_scope: tuple[str, str, str, str] | None = None
         self.teams_root.mkdir(parents=True, exist_ok=True)
         self.tasks_root.mkdir(parents=True, exist_ok=True)
 
@@ -67,6 +84,8 @@ class TeamService:
         return _sanitize(name)
 
     def _team_dir(self, team_id: str) -> Path:
+        if not team_id or team_id != _sanitize(team_id):
+            raise ValueError("Invalid team identifier")
         return self.teams_root / team_id
 
     def _config_path(self, team_id: str) -> Path:
@@ -88,21 +107,85 @@ class TeamService:
         return self.cwd / ".koder" / "team-memory" / team_id
 
     def _team_lock_path(self, team_id: str) -> Path:
-        lock_path = self._team_dir(team_id) / ".lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.touch(exist_ok=True)
-        return lock_path
+        self._team_dir(team_id)  # Validate without resurrecting a deleted directory.
+        return self.teams_root / f".{team_id}.lock"
+
+    def _team_lock(self, team_id: str) -> FileLock:
+        return FileLock(str(self._team_lock_path(team_id).resolve()), timeout=5, is_singleton=True)
+
+    @contextmanager
+    def lifecycle(self, team_id: str, generation: str | None = None):
+        """A short synchronous transaction, never held across an await."""
+        with self._team_lock(team_id):
+            payload = self._read_config(team_id)
+            if generation is not None and payload["generation"] != generation:
+                raise KeyError(team_id)
+            yield
+
+    @_locked_team
+    def bind_team(self, team_id: str) -> "TeamService":
+        """Fence leader tools to this team lifetime, including delete/recreate."""
+        payload = self._read_config(team_id)
+        scoped = TeamService(
+            teams_root=self.teams_root,
+            tasks_root=self.tasks_root,
+            cwd=self.cwd,
+            backend=self.backend,
+            permission_bridge=self.permission_bridge,
+        )
+        scoped._team_scope = (team_id, payload["generation"])
+        scoped._member_scope = self._member_scope
+        return scoped
+
+    @_locked_team
+    def bind_member(self, team_id: str, agent_id: str) -> "TeamService":
+        """Bind run callbacks/tools to this exact team and membership lifetime."""
+        payload = self._read_config(team_id)
+        member = next((m for m in payload.get("members", []) if m["agent_id"] == agent_id), None)
+        if member is None or not member["is_active"]:
+            raise KeyError(agent_id)
+        scoped = TeamService(
+            teams_root=self.teams_root,
+            tasks_root=self.tasks_root,
+            cwd=self.cwd,
+            backend=self.backend,
+            permission_bridge=self.permission_bridge,
+        )
+        scoped._member_scope = (team_id, payload["generation"], agent_id, member["generation"])
+        return scoped
 
     def _read_config(self, team_id: str) -> dict:
         path = self._config_path(team_id)
-        if not path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise KeyError(team_id) from None
+        # Old snapshots remain readable; every newly created lifetime has a UUID.
+        payload.setdefault("generation", payload["created_at"])
+        for member in payload.get("members", []):
+            member.setdefault("generation", member["joined_at"])
+        if self._team_scope is not None and self._team_scope != (
+            team_id,
+            payload["generation"],
+        ):
             raise KeyError(team_id)
-        return json.loads(path.read_text(encoding="utf-8"))
+        if self._member_scope is not None:
+            scoped_team, generation, agent_id, membership = self._member_scope
+            if (
+                team_id != scoped_team
+                or payload["generation"] != generation
+                or not any(
+                    m["agent_id"] == agent_id and m["generation"] == membership and m["is_active"]
+                    for m in payload.get("members", [])
+                )
+            ):
+                raise KeyError(agent_id)
+        return payload
 
     def _write_config(self, team_id: str, payload: dict) -> None:
         path = self._config_path(team_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False))
 
     def _record_from_payload(self, payload: dict) -> TeamRecord:
         return TeamRecord(
@@ -113,6 +196,7 @@ class TeamService:
             lead_session_id=payload.get("lead_session_id"),
             config_path=str(self._config_path(payload["id"])),
             created_at=payload["created_at"],
+            generation=payload["generation"],
         )
 
     def get(self, team_id: str) -> TeamRecord:
@@ -128,23 +212,32 @@ class TeamService:
         lead_session_id: str | None = None,
     ) -> str:
         team_id = self._team_id(name)
-        payload = TeamRecord.create(
-            team_id=team_id,
-            name=name,
-            description=description,
-            lead_agent_id=lead_agent_id,
-            lead_session_id=lead_session_id,
-            config_path=str(self._config_path(team_id)),
-        ).__dict__.copy()
-        payload["members"] = []
-        payload["hidden_pane_ids"] = []
-        payload["plan_approvals"] = {}
-        payload["shutdown_requests"] = {}
-        self._write_config(team_id, payload)
-        self._mailbox_dir(team_id).mkdir(parents=True, exist_ok=True)
-        TeamTaskService(team_id, root=self.tasks_root, cwd=self.cwd)
+        with self._team_lock(team_id):
+            if self._config_path(team_id).exists():
+                existing = self._read_config(team_id)
+                if existing["name"] != name:
+                    raise ValueError(f"Team name aliases an existing team: {name}")
+                # /peers also uses create_team to ensure its sample team exists.
+                # Repeated creation must not reset active members or approvals.
+                return team_id
+            payload = TeamRecord.create(
+                team_id=team_id,
+                name=name,
+                description=description,
+                lead_agent_id=lead_agent_id,
+                lead_session_id=lead_session_id,
+                config_path=str(self._config_path(team_id)),
+            ).__dict__.copy()
+            payload["members"] = []
+            payload["hidden_pane_ids"] = []
+            payload["plan_approvals"] = {}
+            payload["shutdown_requests"] = {}
+            self._write_config(team_id, payload)
+            self._mailbox_dir(team_id).mkdir(parents=True, exist_ok=True)
+            TeamTaskService(team_id, root=self.tasks_root, cwd=self.cwd)
         return team_id
 
+    @_locked_team
     def delete_team(self, team_id: str) -> None:
         payload = self._read_config(team_id)
         active_teammates = [
@@ -152,11 +245,28 @@ class TeamService:
         ]
         if active_teammates:
             raise RuntimeError(f"Cannot clean up active team: {team_id}")
+        self.task_service(team_id).cleanup()
         team_dir = self._team_dir(team_id)
         if team_dir.exists():
             shutil.rmtree(team_dir)
-        TeamTaskService(team_id, root=self.tasks_root, cwd=self.cwd).cleanup()
 
+    def validate_member_name(self, team_id: str, name: str, *, agent_id: str | None = None) -> None:
+        """Reject names or IDs that share another member's mailbox address."""
+        payload = self._read_config(team_id)
+        aliases = {_sanitize(name)}
+        if agent_id is not None:
+            aliases.add(_sanitize(agent_id))
+        reserved = {"", _sanitize(TEAM_LEAD_NAME), _sanitize(payload["lead_agent_id"])}
+        if aliases & reserved:
+            raise ValueError(f"Reserved team recipient: {name}")
+        for member in payload.get("members", []):
+            if member["agent_id"] == agent_id:
+                continue
+            addresses = {_sanitize(member["name"]), _sanitize(member["agent_id"])}
+            if aliases & addresses:
+                raise ValueError(f"Team recipient already exists: {name}")
+
+    @_locked_team
     def add_member(
         self,
         team_id: str,
@@ -174,6 +284,7 @@ class TeamService:
         mode: str | None = None,
         is_active: bool = True,
     ) -> TeamMemberRecord:
+        self.validate_member_name(team_id, name or agent_id, agent_id=agent_id)
         payload = self._read_config(team_id)
         members = list(payload.get("members", []))
         member_name = name or agent_id
@@ -198,30 +309,44 @@ class TeamService:
             index = members.index(existing)
             members[index] = record.__dict__.copy()
         payload["members"] = members
+        if existing is not None:
+            # Re-registering even the same ID starts a new membership lifetime.
+            self.task_service(team_id).cancel_owner_tasks(agent_id)
         self._write_config(team_id, payload)
         return record
 
     def set_member_active(self, team_id: str, agent_id: str, is_active: bool) -> None:
-        payload = self._read_config(team_id)
-        updated = False
-        for member in payload.get("members", []):
-            if member["agent_id"] == agent_id:
-                if member.get("is_active", True) == is_active:
-                    updated = True
-                    break
-                if not is_active:
-                    self._dispatch_teammate_idle_hook(team_id, member)
-                member["is_active"] = is_active
-                updated = True
-                break
-        if not updated:
-            raise KeyError(agent_id)
-        self._write_config(team_id, payload)
+        with self.lifecycle(team_id):
+            payload = self._read_config(team_id)
+            generation = payload["generation"]
+            original = next(
+                (m for m in payload.get("members", []) if m["agent_id"] == agent_id), None
+            )
+            if original is None:
+                raise KeyError(agent_id)
+        if original["is_active"] and not is_active:
+            self._dispatch_teammate_idle_hook(team_id, original)
+        with self.lifecycle(team_id, generation):
+            payload = self._read_config(team_id)
+            member = next(
+                (m for m in payload.get("members", []) if m["agent_id"] == agent_id), None
+            )
+            if member is None or member["generation"] != original["generation"]:
+                raise KeyError(agent_id)
+            if not is_active:
+                self.task_service(team_id).cancel_owner_tasks(agent_id)
+            if is_active and not member["is_active"]:
+                member["joined_at"] = _utc_now_iso()
+                member["generation"] = uuid4().hex
+            member["is_active"] = is_active
+            self._write_config(team_id, payload)
 
+    @_locked_team
     def member_records(self, team_id: str) -> list[TeamMemberRecord]:
         payload = self._read_config(team_id)
         return [TeamMemberRecord(**member) for member in payload.get("members", [])]
 
+    @_locked_team
     def set_member_mode(self, team_id: str, agent_id: str, mode: str) -> TeamMemberRecord:
         payload = self._read_config(team_id)
         for member in payload.get("members", []):
@@ -231,6 +356,7 @@ class TeamService:
                 return TeamMemberRecord(**member)
         raise KeyError(agent_id)
 
+    @_locked_team
     def set_all_member_modes(self, team_id: str, mode: str) -> list[TeamMemberRecord]:
         payload = self._read_config(team_id)
         updated: list[TeamMemberRecord] = []
@@ -243,6 +369,7 @@ class TeamService:
     def members(self, team_id: str) -> list[str]:
         return [member.agent_id for member in self.member_records(team_id)]
 
+    @_locked_team
     def _append_history_event(self, team_id: str, event: dict) -> None:
         self._read_config(team_id)
         history_path = self._history_path(team_id)
@@ -299,6 +426,7 @@ class TeamService:
                 )
         return sorted(entries, key=lambda item: item.created_at)
 
+    @_locked_team
     def record_run(
         self,
         team_id: str,
@@ -310,6 +438,11 @@ class TeamService:
         state: str,
         source: str | None = None,
     ) -> None:
+        if not any(
+            member.agent_id == agent_id and member.is_active
+            for member in self.member_records(team_id)
+        ):
+            raise KeyError(agent_id)
         self._append_history_event(
             team_id,
             {
@@ -349,7 +482,7 @@ class TeamService:
         member = next(
             (item for item in payload.get("members", []) if item["agent_id"] == agent_id), None
         )
-        if member is None:
+        if member is None or not member["is_active"]:
             raise KeyError(agent_id)
         self._dispatch_teammate_idle_hook(team_id, member)
 
@@ -375,6 +508,7 @@ class TeamService:
             for item in payload
         ]
 
+    @_locked_team
     def consume_next_mailbox_entry(
         self,
         team_id: str,
@@ -407,9 +541,7 @@ class TeamService:
                 return None
             item = payload[selected_index]
             payload[selected_index] = {**item, "read": True}
-            mailbox_path.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            write_text_atomic(mailbox_path, json.dumps(payload, indent=2, ensure_ascii=False))
         self._append_history_event(
             team_id,
             {
@@ -431,6 +563,7 @@ class TeamService:
             read=True,
         )
 
+    @_locked_team
     def route(
         self,
         team_id: str,
@@ -439,7 +572,13 @@ class TeamService:
         recipient: str = TEAM_LEAD_NAME,
         sender: str = TEAM_LEAD_NAME,
     ) -> AgentMessage:
-        self._read_config(team_id)
+        payload = self._read_config(team_id)
+        if any(
+            _sanitize(sender) in {_sanitize(m["name"]), _sanitize(m["agent_id"])}
+            and not m["is_active"]
+            for m in payload.get("members", [])
+        ):
+            raise KeyError(sender)
         mailbox_path = self._mailbox_path(team_id, recipient)
         mailbox_path.parent.mkdir(parents=True, exist_ok=True)
         lock = FileLock(str(mailbox_path) + ".lock", timeout=5)
@@ -458,9 +597,7 @@ class TeamService:
                 "read": False,
             }
             current.append(envelope)
-            mailbox_path.write_text(
-                json.dumps(current, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            write_text_atomic(mailbox_path, json.dumps(current, indent=2, ensure_ascii=False))
         self._append_history_event(
             team_id,
             {
@@ -485,8 +622,18 @@ class TeamService:
             for item in self.mailbox_entries(team_id, recipient=recipient)
         ]
 
+    @_locked_team
     def task_service(self, team_id: str) -> TeamTaskService:
-        return TeamTaskService(team_id, root=self.tasks_root, cwd=self.cwd)
+        generation = self._read_config(team_id)["generation"]
+        return TeamTaskService(
+            team_id,
+            root=self.tasks_root,
+            cwd=self.cwd,
+            lifecycle_guard=lambda: self.lifecycle(team_id, generation),
+            claimant_is_active=lambda owner: any(
+                m.agent_id == owner and m.is_active for m in self.member_records(team_id)
+            ),
+        )
 
     def team_memory_status(self, team_id: str) -> TeamMemoryStatus:
         self._read_config(team_id)
@@ -512,6 +659,7 @@ class TeamService:
         payload = self._read_config(team_id)
         return dict(payload.get("plan_approvals", {}))
 
+    @_locked_team
     def request_plan_approval(
         self,
         team_id: str,
@@ -536,6 +684,7 @@ class TeamService:
             sender=agent_id,
         )
 
+    @_locked_team
     def respond_plan_approval(
         self,
         team_id: str,
@@ -567,6 +716,7 @@ class TeamService:
         payload = self._read_config(team_id)
         return dict(payload.get("shutdown_requests", {}))
 
+    @_locked_team
     def request_shutdown(
         self,
         team_id: str,
@@ -598,21 +748,36 @@ class TeamService:
         feedback: str | None = None,
         agent_service=None,
     ) -> None:
-        payload = self._read_config(team_id)
-        requests = dict(payload.get("shutdown_requests", {}))
-        request = requests.pop(agent_id, None)
-        if request is None:
-            raise KeyError(agent_id)
-        payload["shutdown_requests"] = requests
-        self._write_config(team_id, payload)
+        with self.lifecycle(team_id):
+            payload = self._read_config(team_id)
+            generation = payload["generation"]
+            requests = dict(payload.get("shutdown_requests", {}))
+            request = requests.pop(agent_id, None)
+            if request is None:
+                raise KeyError(agent_id)
+            member_generation = next(
+                (m["generation"] for m in payload.get("members", []) if m["agent_id"] == agent_id),
+                None,
+            )
+            if approved:
+                self.set_member_active(team_id, agent_id, False)
+            # Re-read after the membership update; never restore its stale snapshot.
+            payload = self._read_config(team_id)
+            payload["shutdown_requests"] = requests
+            self._write_config(team_id, payload)
         if approved:
             if agent_service is not None:
                 try:
                     await agent_service.cancel_background(agent_id)
                 except KeyError:
                     pass
-            self.set_member_active(team_id, agent_id, False)
         message = "shutdown approved" if approved else "shutdown rejected"
         if feedback:
             message += f": {feedback}"
-        self.route(team_id, message, recipient=agent_id, sender=TEAM_LEAD_NAME)
+        with self.lifecycle(team_id, generation):
+            if not any(
+                m["agent_id"] == agent_id and m["generation"] == member_generation
+                for m in self._read_config(team_id).get("members", [])
+            ):
+                raise KeyError(agent_id)
+            self.route(team_id, message, recipient=agent_id, sender=TEAM_LEAD_NAME)
