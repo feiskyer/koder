@@ -176,7 +176,7 @@ After building a wheel, check the exact output file against its source checkout:
 
 ```bash
 uv build --wheel --out-dir dist
-uv run --no-project --no-env-file python scripts/verify_wheel.py dist/koder-0.6.3-py3-none-any.whl --source . --json
+uv run --no-project --no-env-file python scripts/verify_wheel.py dist/koder-0.6.4-py3-none-any.whl --source . --json
 ```
 
 Use the filename printed by the build if the project version changes. The

@@ -57,7 +57,7 @@ uv run pytest tests/e2e/                        # E2E tmux tests (requires tmux)
 Validate a built wheel without importing the application:
 
 ```bash
-uv run --no-project --no-env-file python scripts/verify_wheel.py dist/koder-0.6.3-py3-none-any.whl --source . --json
+uv run --no-project --no-env-file python scripts/verify_wheel.py dist/koder-0.6.4-py3-none-any.whl --source . --json
 ```
 
 ### CLI Subcommands
